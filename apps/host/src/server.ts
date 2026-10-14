@@ -2,10 +2,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi, type RemoteRunTarget } from "@computer-harness/app-runtime";
-import { normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
+import { RemoteRunApiError, type RemoteCommand, type RemoteRunApi, type RemoteRunTarget, type RemoteWindowCandidatePreview } from "@computer-harness/app-runtime";
+import { MAX_WINDOW_PREVIEW_BYTES, normalizeRunAssistantPreferencesSnapshot, type RunAssistantPreferencesSnapshot } from "@computer-harness/protocol";
 import type { HostRequestHandler, PairingTokenRegistration, RelayBridgeRequest } from "@computer-harness/relay-connector/protocol";
-import { resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
+import { MAX_WINDOW_PREVIEW_RESPONSE_BYTES, resolveAllowedApiRoute } from "@computer-harness/relay-connector/routing";
 import { VOICE_INPUT_MAX_BATCH_CHUNKS, VOICE_INPUT_MAX_CHUNK_BYTES } from "@computer-harness/voice";
 import type { PairRequestView, PairedDeviceView } from "./contracts.js";
 import { ManagedBrowserProfileServiceError, type ManagedBrowserProfileController } from "./managed-browser-profile-service.js";
@@ -274,8 +274,14 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     };
     if (target.mode === "auto" && hasTargetKeys(["mode"])) return { mode: "auto", ...switchField };
     if (target.mode === "desktop" && hasTargetKeys(["mode"])) return { mode: "desktop", ...switchField };
-    if (target.mode === "window" && hasTargetKeys(["mode", "targetToken"])) {
-      return { mode: "window", targetToken: requiredString(target, "targetToken", 128), ...switchField };
+    if (target.mode === "window" &&
+        (hasTargetKeys(["mode", "targetToken"]) || hasTargetKeys(["mode", "targetToken", "previewToken"]))) {
+      return {
+        mode: "window",
+        targetToken: requiredString(target, "targetToken", 128),
+        ...(target.previewToken === undefined ? {} : { previewToken: requiredString(target, "previewToken", 128) }),
+        ...switchField,
+      };
     }
     if (target.mode === "browser" && hasTargetKeys(["mode"])) return { mode: "browser", ...switchField };
     if (target.mode === "browser" && hasTargetKeys(["mode", "url"]) &&
@@ -310,6 +316,24 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       throw new HostHttpError(404, "NOT_FOUND", "Resource was not found.");
     }
     return value;
+  };
+
+  const requestAbortSignal = (request: FastifyRequest, reply: FastifyReply): { signal: AbortSignal; dispose(): void } => {
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(new Error("request disconnected"));
+    const abortOnResponseClose = (): void => {
+      if (!reply.raw.writableFinished) abort();
+    };
+    if (request.raw.aborted || reply.raw.destroyed && !reply.raw.writableFinished) abort();
+    else request.raw.once("aborted", abort);
+    reply.raw.once("close", abortOnResponseClose);
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        request.raw.off("aborted", abort);
+        reply.raw.off("close", abortOnResponseClose);
+      },
+    };
   };
 
   const bridge = (request: FastifyRequest): boolean => request.headers["x-harness-bridge"] === bridgeSecret;
@@ -467,6 +491,57 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     const choices = await options.api.listWindowTargets(session.deviceId);
     revalidateBrowserSession(request, session);
     return choices;
+  });
+
+  server.post("/api/windows/preview", async (request, reply) => {
+    reply.header("Cache-Control", "no-store, max-age=0").header("Pragma", "no-cache");
+    const session = browserSession(request, true);
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "candidateToken")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only candidateToken is accepted.");
+    }
+    if (options.api.previewWindowTarget === undefined) {
+      throw new HostHttpError(501, "WINDOW_PREVIEW_UNAVAILABLE", "This Host cannot safely preview a selected window.");
+    }
+    const abort = requestAbortSignal(request, reply);
+    let preview: Awaited<ReturnType<NonNullable<RemoteRunApi["previewWindowTarget"]>>>;
+    try {
+      preview = await options.api.previewWindowTarget(session.deviceId, bodyString(body.candidateToken, "candidateToken", 128), abort.signal);
+    } finally {
+      abort.dispose();
+    }
+    preview = projectWindowCandidatePreviewResponse(preview);
+    revalidateBrowserSession(request, session);
+    return preview;
+  });
+
+  server.post("/api/runs/:runId/window-candidates/preview", async (request, reply) => {
+    reply.header("Cache-Control", "no-store, max-age=0").header("Pragma", "no-cache");
+    const session = browserSession(request, true);
+    const runId = pathId(request, "runId");
+    const body = bodyObject(request.body);
+    if (Object.keys(body).length !== 2 || !Object.hasOwn(body, "requestId") || !Object.hasOwn(body, "candidateToken")) {
+      throw new HostHttpError(400, "INVALID_REQUEST", "Only requestId and candidateToken are accepted.");
+    }
+    if (options.api.previewWindowHandoffCandidate === undefined) {
+      throw new HostHttpError(501, "WINDOW_PREVIEW_UNAVAILABLE", "This Host cannot safely preview a waiting window candidate.");
+    }
+    const abort = requestAbortSignal(request, reply);
+    let preview: Awaited<ReturnType<NonNullable<RemoteRunApi["previewWindowHandoffCandidate"]>>>;
+    try {
+      preview = await options.api.previewWindowHandoffCandidate(
+        session.deviceId,
+        runId,
+        bodyString(body.requestId, "requestId", 128),
+        bodyString(body.candidateToken, "candidateToken", 128),
+        abort.signal,
+      );
+    } finally {
+      abort.dispose();
+    }
+    preview = projectWindowCandidatePreviewResponse(preview);
+    revalidateBrowserSession(request, session);
+    return preview;
   });
 
   server.get("/api/managed-browser-profile", async (request) => {
@@ -725,7 +800,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
       clearInterval(heartbeat);
       if (expiration !== undefined) clearTimeout(expiration);
       subscription.close();
-      streams.delete(dispose);
+      streams.delete(terminate);
       streamCount = Math.max(0, streamCount - 1);
       if (streams.size === 0) deviceStreams.delete(session.sessionKey);
       if (deviceStreams.size === 0) activeStreams.delete(session.deviceId);
@@ -844,11 +919,13 @@ function parseCommand(value: unknown): RemoteCommand {
     } as RemoteCommand;
   }
   if (type === "window.confirm") {
+    const previewToken = body.previewToken === undefined ? undefined : bodyString(body.previewToken, "previewToken", 128);
     return {
       ...base,
       type,
       requestId: bodyString(body.requestId, "requestId", 128),
       candidateToken: bodyString(body.candidateToken, "candidateToken", 128),
+      ...(previewToken === undefined ? {} : { previewToken }),
     };
   }
   if (type === "window.ignore") {
@@ -867,6 +944,88 @@ function bodyString(value: unknown, key: string, maxLength: number): string {
     throw new HostHttpError(400, "INVALID_REQUEST", "Field " + key + " is invalid.");
   }
   return value;
+}
+
+function projectWindowCandidatePreviewResponse(value: RemoteWindowCandidatePreview): RemoteWindowCandidatePreview {
+  const record = typeof value === "object" && value !== null ? value as unknown as Record<string, unknown> : undefined;
+  const viewport = record?.viewport;
+  const viewportRecord = typeof viewport === "object" && viewport !== null && !Array.isArray(viewport)
+    ? viewport as Record<string, unknown>
+    : undefined;
+  const appName = previewLabel(record?.appName, 256);
+  const title = previewLabel(record?.title, 512);
+  const relationship = projectPreviewRelationship(record?.relationship);
+  const base64 = record?.dataBase64;
+  if (record === undefined || viewportRecord === undefined ||
+      typeof record.previewToken !== "string" || !/^[A-Za-z0-9_-]{32}$/u.test(record.previewToken) ||
+      typeof record.capturedAt !== "string" || !Number.isFinite(Date.parse(record.capturedAt)) ||
+      typeof record.expiresAt !== "string" || !Number.isFinite(Date.parse(record.expiresAt)) ||
+      record.mediaType !== "image/png" || typeof base64 !== "string" || base64.length === 0 ||
+      base64.length > Math.ceil(MAX_WINDOW_PREVIEW_BYTES / 3) * 4 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(base64) ||
+      !isExactKeys(viewportRecord, ["width", "height"]) ||
+      !Number.isSafeInteger(viewportRecord.width) || !Number.isSafeInteger(viewportRecord.height) ||
+      Number(viewportRecord.width) < 1 || Number(viewportRecord.height) < 1 ||
+      Number(viewportRecord.width) > 8_192 || Number(viewportRecord.height) > 8_192) {
+    throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host could not safely project the exact window preview.");
+  }
+  const data = Buffer.from(base64, "base64");
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (data.byteLength === 0 || data.byteLength > MAX_WINDOW_PREVIEW_BYTES || data.toString("base64") !== base64 ||
+      data.byteLength < pngSignature.length || !pngSignature.every((byte, index) => data[index] === byte)) {
+    throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host could not safely project the exact window preview.");
+  }
+  const projected: RemoteWindowCandidatePreview = {
+    previewToken: record.previewToken,
+    ...(appName === undefined ? {} : { appName }),
+    ...(title === undefined ? {} : { title }),
+    ...(relationship === undefined ? {} : { relationship }),
+    capturedAt: record.capturedAt,
+    expiresAt: record.expiresAt,
+    viewport: { width: Number(viewportRecord.width), height: Number(viewportRecord.height) },
+    mediaType: "image/png",
+    dataBase64: base64,
+  };
+  if (Buffer.byteLength(JSON.stringify(projected), "utf8") > MAX_WINDOW_PREVIEW_RESPONSE_BYTES) {
+    throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host preview exceeds the safe transfer limit.");
+  }
+  return projected;
+}
+
+function previewLabel(value: unknown, maxLength: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > maxLength || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host preview label is invalid.");
+  }
+  const clean = value.trim();
+  return clean.length === 0 ? undefined : clean;
+}
+
+function projectPreviewRelationship(value: unknown): RemoteWindowCandidatePreview["relationship"] {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host preview relationship is invalid.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.kind === "scoped_peer" && isExactKeys(record, ["kind"])) return { kind: "scoped_peer" };
+  if (record.kind !== "owned_child" || !isExactKeys(record, ["kind"], ["rootRole", "parentAppName", "parentTitle"]) ||
+      record.rootRole !== undefined && !["menu", "popup", "dialog"].includes(String(record.rootRole))) {
+    throw new HostHttpError(502, "WINDOW_PREVIEW_UNAVAILABLE", "The Host preview relationship is invalid.");
+  }
+  const parentAppName = previewLabel(record.parentAppName, 256);
+  const parentTitle = previewLabel(record.parentTitle, 512);
+  return {
+    kind: "owned_child",
+    ...(record.rootRole === undefined ? {} : { rootRole: record.rootRole as "menu" | "popup" | "dialog" }),
+    ...(parentAppName === undefined ? {} : { parentAppName }),
+    ...(parentTitle === undefined ? {} : { parentTitle }),
+  };
+}
+
+function isExactKeys(record: Record<string, unknown> | undefined, required: readonly string[], optional: readonly string[] = []): boolean {
+  if (record === undefined) return false;
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(record, key)) && Object.keys(record).every((key) => allowed.has(key));
 }
 
 function localPairRequest(request: PairRequestView): Record<string, unknown> {

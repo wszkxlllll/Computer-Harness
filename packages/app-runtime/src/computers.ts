@@ -1,9 +1,10 @@
-import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
+import { CuaWindowDiscovery, ManagedBrowserHost, defaultManagedBrowserKind, formatManagedBrowserStartupDiagnostic, openCuaBootstrapSession, resolveOwnedManagedBrowserWindow, type CuaBootstrapSession, type CuaDriverComputerOptions, type CuaMultilineTypeProfile, type CuaWindowTarget, type ManagedBrowserHostOptions, type ManagedBrowserTarget, type ManagedBrowserWindowBindingHint, type WindowRelationshipProbe } from "@computer-harness/computer-cua";
 import { OsworldBridgeClient, OsworldComputer } from "@computer-harness/computer-osworld";
 import { groundingComputerTools, type Computer, type ComputerExecuteOptions, type ComputerOpenOptions, type ToolDefinition, type ToolRegistry } from "@computer-harness/runtime";
-import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption, ObservationCapture, ObservationId } from "@computer-harness/protocol";
-import type { WindowTargetDiscovery } from "./application-session.js";
+import type { ActionIntent, ActionReceipt, ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList, ObservationCapture, ObservationId } from "@computer-harness/protocol";
+import type { WindowTargetDiscovery, WindowTargetPreview } from "./application-session.js";
 import { createWindowsWindowRelationshipProbe } from "./windows-window-relationship-probe.js";
+import { projectWindowTargetInventory } from "./window-target-discovery.js";
 
 export type ComputerBackendConfig =
   | {
@@ -17,8 +18,16 @@ export type ComputerBackendConfig =
       screenshotDir: string;
       /** Explicit host-only opt-in; omitted keeps primary desktop behavior. */
       windowTarget?: { pid: number; windowId: number };
+      /** Exact Host-prepared Darwin recovery window; never model-discovered as an arbitrary peer. */
+      recoveryWindowTarget?: { pid: number; windowId: number };
+      recoverBoundWindowMissing?: boolean;
+      /** Host grant for one absent output file, eligible only after this Run saves it and closes its exact clean document. */
+      reopenSavedDocumentGrant?: { path: string; expectedExecutableUrl: string };
+      hybridNativeWebDocumentTargets?: { readonly primaryTarget: CuaWindowTarget; readonly recoveryTarget: CuaWindowTarget };
       /** Explicit window action delivery; background never escalates. */
       windowDeliveryMode?: "background" | "foreground";
+      /** Private Host opt-in to the experimental Windows foreground-caret typing route; use only after independent validation of the selected candidate driver. Never inferred from a driver version. */
+      multilineTypeProfile?: CuaMultilineTypeProfile;
       /** Explicit per-Run permission to discover and switch among opened windows. */
       windowSwitch?: "off" | "opened-windows-v1";
       /** Host-only exact target allowlist; omitted permits the enumerated opened-window inventory. */
@@ -49,7 +58,14 @@ export type ComputerBackendConfig =
 export interface ComputerRunAssemblyPolicy {
   readonly config: ComputerBackendConfig;
   readonly groundingTools: readonly ToolDefinition[];
+  readonly toolPresentationOverrides: readonly ComputerToolPresentationOverride[];
   enabledToolNames(registry: ToolRegistry): readonly string[] | undefined;
+}
+
+export interface ComputerToolPresentationOverride {
+  readonly name: string;
+  readonly description: string;
+  readonly inputPropertyDescriptions: Readonly<Record<string, string>>;
 }
 
 export function prepareComputerRunAssembly(
@@ -66,10 +82,22 @@ export function prepareComputerRunAssembly(
   const groundingTools = grounding === "off"
     ? []
     : groundingComputerTools({ includeSelectOption: managedGrounding });
+  const toolPresentationOverrides = effectiveConfig.kind === "cua" && process.platform === "win32" &&
+      effectiveConfig.multilineTypeProfile === "foreground-caret-v1"
+    ? [{
+      name: "type",
+      description: "Type text into the currently focused GUI control. In the host-enabled Windows foreground-caret-v1 profile, multiline text without elementRef follows ordinary foreground typing, intended to insert at the current caret or replace the current selection; driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send in controls where Enter has that meaning; check the intended control before typing. An explicit current UIA elementRef uses the separate append-to-end route regardless of caret or selection; that route does not automatically submit or send. Do not use elementRef for single-line text.",
+      inputPropertyDescriptions: {
+        text: "Text to type. With the host-enabled Windows foreground-caret-v1 profile, omit elementRef for multiline typing; ordinary foreground input is intended to insert at the current caret or replace the current selection, but driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send depending on the current control.",
+        elementRef: "Optional current UIA editable reference for the explicit multiline append-to-end route. It appends regardless of caret or selection; omit it to use ordinary foreground caret typing when that host profile is enabled.",
+      },
+    } satisfies ComputerToolPresentationOverride]
+    : [];
 
   return {
     config: effectiveConfig,
     groundingTools,
+    toolPresentationOverrides,
     enabledToolNames(registry) {
       if (!windowScoped || effectiveConfig.kind !== "cua") return undefined;
       // Single-target managed browsers only click through grounded elements.
@@ -88,6 +116,7 @@ export function prepareComputerRunAssembly(
       if (grounding !== "off") allowedComputerTools.add("click_element");
       if (managedGrounding) allowedComputerTools.add("select_option");
       if (windowSwitch === "opened-windows-v1") allowedComputerTools.add("switch_window");
+      if (effectiveConfig.reopenSavedDocumentGrant !== undefined) allowedComputerTools.add("reopen_saved_document");
       return registry.list()
         .filter((definition) => definition.category !== "computer" || allowedComputerTools.has(definition.name))
         .map((definition) => definition.name);
@@ -197,21 +226,37 @@ export interface ComputerFactoryDependencies {
   windowRelationshipProbe?: WindowRelationshipProbe | null;
 }
 
-export function createWindowTargetDiscovery(config: ComputerBackendConfig): WindowTargetDiscovery | undefined {
+export function createWindowTargetDiscovery(
+  config: ComputerBackendConfig,
+  dependencies: Pick<ComputerFactoryDependencies, "windowRelationshipProbe"> = {},
+): WindowTargetDiscovery | undefined {
   if (config.kind !== "cua") return undefined;
-  const discovery = new CuaWindowDiscovery({ socketPath: config.socketPath });
-  const project = (windows: Awaited<ReturnType<CuaWindowDiscovery["listWindows"]>>) => windows.map((window) => ({
-    pid: window.target.pid,
-    windowId: window.target.windowId,
-    ...(window.appName === undefined ? {} : { appName: window.appName }),
-    ...(window.title === undefined ? {} : { title: window.title }),
-  }));
+  const relationshipProbe = dependencies.windowRelationshipProbe !== undefined
+    ? dependencies.windowRelationshipProbe ?? undefined
+    : process.platform === "win32" ? createWindowsWindowRelationshipProbe() : undefined;
+  const discovery = new CuaWindowDiscovery({
+    socketPath: config.socketPath,
+    ...(relationshipProbe === undefined ? {} : { windowRelationshipProbe: relationshipProbe }),
+  });
   return {
     async listWindows(signal) {
-      return project(await discovery.listWindows(signal));
+      return projectWindowTargetInventory(await discovery.listInventory(signal, true));
     },
     async listAllWindows(signal) {
-      return project(await discovery.listWindows(signal, false));
+      return projectWindowTargetInventory(await discovery.listInventory(signal, false));
+    },
+    async captureWindowPreview(target, signal): Promise<WindowTargetPreview> {
+      const preview = await discovery.captureWindowPreview(target, signal);
+      const projectedTarget = projectWindowTargetInventory(preview.inventory).find((window) =>
+        window.pid === target.pid && window.windowId === target.windowId);
+      if (projectedTarget === undefined) throw new Error("preview target was not present in the fresh post-capture inventory");
+      return {
+        target: projectedTarget,
+        capturedAt: preview.capturedAt,
+        viewport: { width: preview.capture.viewport.width, height: preview.capture.viewport.height },
+        mediaType: "image/png",
+        data: preview.capture.data,
+      };
     },
     async activateWindow(target, signal) {
       await discovery.activateWindow(target, signal);
@@ -266,7 +311,11 @@ export async function createComputer(
       socketPath: config.socketPath,
       screenshotDir: config.screenshotDir,
       ...(config.windowTarget === undefined ? {} : { windowTarget: config.windowTarget }),
+      ...(config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: config.recoveryWindowTarget }),
+      ...(config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: config.recoverBoundWindowMissing }),
+      ...(config.reopenSavedDocumentGrant === undefined ? {} : { reopenSavedDocumentGrant: config.reopenSavedDocumentGrant }),
       ...(config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: config.windowDeliveryMode }),
+      ...(config.multilineTypeProfile === undefined ? {} : { multilineTypeProfile: config.multilineTypeProfile }),
       ...(config.grounding === undefined ? {} : { grounding: config.grounding }),
       ...(config.windowSwitch === undefined ? {} : { windowSwitch: config.windowSwitch }),
       ...(config.windowSwitchAllowedTargets === undefined ? {} : { windowSwitchAllowedTargets: config.windowSwitchAllowedTargets }),
@@ -343,11 +392,12 @@ class ManagedBrowserComputer implements Computer {
         this.options.config.windowSwitch === "opened-windows-v1";
       const initialTarget = companionMode ? this.options.config.windowTarget : record.target.windowTarget;
       const allowedTargets = this.options.config.windowSwitchAllowedTargets;
+      const hybridCapability = this.options.config.hybridNativeWebDocumentTargets;
       const scopedTargets = allowedTargets === undefined
         ? undefined
         : allowedTargets.length === 0
           ? []
-          : this.options.config.windowSwitch === "opened-windows-v1"
+          : this.options.config.windowSwitch === "opened-windows-v1" && hybridCapability === undefined
             ? uniqueTargets([...allowedTargets, record.target.windowTarget])
             : allowedTargets;
       const delegateOptions: CuaDriverComputerOptions = {
@@ -356,7 +406,12 @@ class ManagedBrowserComputer implements Computer {
         browserTarget: record.target,
         domGroundingTransport: host.createTransport(),
         ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
+        ...(this.options.config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: this.options.config.recoveryWindowTarget }),
+        ...(this.options.config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: this.options.config.recoverBoundWindowMissing }),
+        ...(this.options.config.reopenSavedDocumentGrant === undefined ? {} : { reopenSavedDocumentGrant: this.options.config.reopenSavedDocumentGrant }),
+        ...(hybridCapability === undefined ? {} : { hybridNativeWebDocumentCapability: { ...hybridCapability, managedBrowserTarget: record.target } }),
         ...(this.options.config.windowDeliveryMode === undefined ? {} : { windowDeliveryMode: this.options.config.windowDeliveryMode }),
+        ...(this.options.config.multilineTypeProfile === undefined ? {} : { multilineTypeProfile: this.options.config.multilineTypeProfile }),
         ...(this.options.config.grounding === undefined ? {} : { grounding: this.options.config.grounding }),
         ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),
         ...(scopedTargets === undefined ? {} : { windowSwitchAllowedTargets: scopedTargets }),
@@ -393,7 +448,7 @@ class ManagedBrowserComputer implements Computer {
     return this.delegate.execute(session, action, signal, options);
   }
 
-  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<readonly ComputerWindowOption[]> {
+  public async listWindows(session: ComputerSessionDescriptor, signal: AbortSignal): Promise<ComputerWindowList> {
     if (this.delegate?.listWindows === undefined) throw new Error("managed browser Computer has no opened-window inventory");
     return this.delegate.listWindows(session, signal);
   }

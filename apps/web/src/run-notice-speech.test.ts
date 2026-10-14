@@ -45,6 +45,11 @@ function options(pending: () => PendingRequestBase | undefined, enabled = true) 
   return { enabled, speechRate: 1 as const, currentPendingRequest: pending };
 }
 
+async function waitForUtterances(utterances: readonly FakeUtterance[], count: number): Promise<void> {
+  for (let attempt = 0; attempt < 20 && utterances.length < count; attempt += 1) await Promise.resolve();
+  expect(utterances).toHaveLength(count);
+}
+
 describe("browser RunNotice speech output", () => {
   it("pins Mandarin Chinese and does not inherit a Cantonese browser default", async () => {
     const cantonese = fakeVoice("Sin-Ji Cantonese", "zh-HK");
@@ -83,6 +88,37 @@ describe("browser RunNotice speech output", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(utterances.map((item) => item.text)).toEqual(["正在核对页面。", "遇到问题。"]);
     expect(utterances[0]?.rate).toBe(1.15);
+  });
+
+  it("reopens BrowserSpeechOutput for manual reads after and during terminal finish", async () => {
+    const { environment, utterances } = fakeEnvironment();
+    const onFailure = vi.fn();
+    const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), onFailure);
+
+    await controller.deliver(notice({
+      noticeId: "terminal-result",
+      kind: "result",
+      delivery: "interrupt",
+      text: "任务已完成。",
+    }), options(() => undefined));
+    expect(utterances.map((item) => item.text)).toEqual(["任务已完成。"]);
+
+    // Start the manual request immediately after the terminal utterance ends,
+    // while finish() is closing its browser speech session.
+    utterances[0]!.onend?.({} as SpeechSynthesisEvent);
+    const duringFinish = controller.speakText("请读出完整结果。", 1);
+    await waitForUtterances(utterances, 2);
+    expect(utterances[1]?.text).toBe("请读出完整结果。");
+    utterances[1]!.onend?.({} as SpeechSynthesisEvent);
+    await duringFinish;
+
+    const afterFinish = controller.speakText("还可以再次朗读结果。", 1);
+    await waitForUtterances(utterances, 3);
+    expect(utterances[2]?.text).toBe("还可以再次朗读结果。");
+    utterances[2]!.onend?.({} as SpeechSynthesisEvent);
+    await afterFinish;
+
+    expect(onFailure).not.toHaveBeenCalled();
   });
 
   it("coalesces a StrictMode-style duplicate effect while its notice is in flight", async () => {
@@ -140,12 +176,94 @@ describe("browser RunNotice speech output", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
-  it("cancels active speech when the user starts text or voice input", async () => {
-    const { environment, cancel } = fakeEnvironment();
+  it("binds handoff speech to the current window request and cancels it when that request changes", async () => {
+    const { environment, utterances, cancel } = fakeEnvironment();
+    const sourceActionId = "action-window-handoff";
+    let current: PendingRequestBase | undefined = { requestId: sourceActionId, kind: "window_handoff" };
     const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
+    const handoff = notice({
+      noticeId: "window-handoff-notice",
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: sourceActionId,
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+
+    await controller.deliver(handoff, options(() => current));
+    expect(utterances.map((item) => item.text)).toEqual([handoff.text]);
+
+    const cancellationsBeforeResolution = cancel.mock.calls.length;
+    current = undefined;
+    controller.syncPendingRequest(current);
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledTimes(cancellationsBeforeResolution + 1);
+  });
+
+  it("defers handoff speech until its matching pending window request is current", async () => {
+    const { environment, utterances } = fakeEnvironment();
+    const sourceActionId = "action-window-handoff-current";
+    const current: PendingRequestBase = { requestId: sourceActionId, kind: "window_handoff" };
+    const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
+    const handoff = notice({
+      noticeId: "window-handoff-awaiting-snapshot",
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: sourceActionId,
+      feedSequence: 12,
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+
+    expect(await controller.deliver(handoff, { ...options(() => undefined), snapshotSequence: 11 })).toBe("deferred");
+    expect(utterances).toHaveLength(0);
+    expect(await controller.deliver(handoff, { ...options(() => current), snapshotSequence: 12 })).toBe("handled");
+    expect(utterances.map((item) => item.text)).toEqual([handoff.text]);
+  });
+
+  it("interrupts a pending handoff notice when the Run ends", async () => {
+    const { environment, utterances, cancel } = fakeEnvironment();
+    const current: PendingRequestBase = { requestId: "action-window-abort", kind: "window_handoff" };
+    const controller = new RunNoticeSpeechController(new BrowserSpeechOutput(environment), vi.fn());
+    const handoff = notice({
+      noticeId: "window-handoff-before-abort",
+      kind: "handoff",
+      delivery: "interrupt",
+      pendingRequestId: current.requestId,
+      text: "任务正在等待你选择或确认一个窗口。",
+    });
+    await controller.deliver(handoff, options(() => current));
+    const cancellationsBeforeResult = cancel.mock.calls.length;
+
+    await controller.deliver(notice({
+      noticeId: "cancelled-run-result",
+      kind: "result",
+      delivery: "interrupt",
+      eventSequence: 5,
+      text: "任务已取消。",
+    }), options(() => current));
+
+    expect(cancel).toHaveBeenCalledTimes(cancellationsBeforeResult + 1);
+    expect(utterances.map((item) => item.text)).toEqual([handoff.text, "任务已取消。"]);
+  });
+
+  it("cancels active speech when the user starts text or voice input", async () => {
+    const spoken: string[] = [];
+    const cancel = vi.fn(async () => undefined);
+    const adapter: VoiceOutputAdapter = {
+      async openSession(): Promise<VoiceOutputSession> {
+        return {
+          enqueueText: async ({ text }) => { spoken.push(text); },
+          finish: async () => undefined,
+          cancel,
+        };
+      },
+    };
+    const controller = new RunNoticeSpeechController(adapter, vi.fn());
     await controller.deliver(notice(), options(() => undefined));
+    await controller.speakText("用户点开了朗读结果。", 1);
+    expect(spoken).toEqual(["正在核对页面。", "用户点开了朗读结果。"]);
     controller.notifyUserStartedInput();
     await Promise.resolve();
+    expect(cancel).toHaveBeenCalledWith("user");
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 

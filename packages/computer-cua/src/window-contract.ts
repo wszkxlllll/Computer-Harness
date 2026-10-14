@@ -2,6 +2,7 @@ import type { CuaDriverLike, ToolResult } from "./cua-sdk-contract.js";
 import { loadCuaSdkModule } from "./cua-sdk-platform.js";
 import type { Viewport } from "@computer-harness/protocol";
 import { mergeWindowRelationshipInventory, type WindowRelationshipProbe } from "./window-relationship-probe.js";
+import type { WindowsVisibleWindowCapture } from "./windows-visible-window-capture.js";
 
 /** Explicit host-owned identity; never model-facing. */
 export interface CuaWindowTarget {
@@ -27,6 +28,13 @@ export interface CuaWindowBinding {
  * package.  Actions must still use the opaque PID/window_id pair.
  */
 export interface CuaWindowInfo extends CuaWindowBinding {
+  /**
+   * Exact identity appeared in the same CUA list_windows sample used alongside
+   * a native topology snapshot. False marks a native-only row: preserve it for
+   * owner/relationship proof, but do not offer it as an executable target.
+   * Undefined keeps older callers and test doubles source-compatible.
+   */
+  readonly cuaListed?: boolean;
   readonly title?: string;
   readonly appName?: string;
   readonly zIndex?: number;
@@ -35,6 +43,8 @@ export interface CuaWindowInfo extends CuaWindowBinding {
   readonly ownerWindowId?: number;
   readonly minimized?: boolean;
   readonly windowClass?: string;
+  /** Private Win32 extended-style fact; true means this HWND cannot independently activate. */
+  readonly noActivate?: boolean;
 }
 
 export interface CuaWindowInventory {
@@ -53,7 +63,9 @@ export interface CuaWindowCapture {
   readonly binding: CuaWindowBinding;
   readonly viewport: Viewport;
   readonly data: Uint8Array;
-  readonly source: "verify_state" | "get_window_state_registered" | "get_window_state_fallback";
+  readonly source: "verify_state" | "get_window_state_registered" | "get_window_state_fallback" | "windows_foreground_region";
+  /** CUA list_windows geometry sampled before a native visible-region capture. */
+  readonly cuaBounds?: CuaWindowGeometry;
 }
 
 /**
@@ -64,6 +76,13 @@ export interface CuaWindowCapture {
 export interface WindowCaptureRetryOptions {
   readonly delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   readonly now?: () => number;
+  /** Explicit DI seam; Host production callers gate this to a local Windows named pipe. */
+  readonly foregroundVisibleCapture?: (
+    target: CuaWindowTarget,
+    signal: AbortSignal,
+  ) => Promise<WindowsVisibleWindowCapture | undefined>;
+  /** Optional tighter byte cap for preview callers; oversized native captures fall back to isolated CUA. */
+  readonly foregroundVisibleCaptureMaxBytes?: number;
 }
 
 export class WindowContractError extends Error {
@@ -73,6 +92,15 @@ export class WindowContractError extends Error {
   }
 }
 
+const confirmedWindowsActivationRefusals = new WeakSet<WindowContractError>();
+
+/** Internal-only evidence that a desktop activation was explicitly refused by
+ * the Windows foreground driver. This proof is deliberately not serialized in
+ * ActionReceipt or exposed to Providers. */
+export function hasConfirmedWindowsActivationRefusal(error: unknown): error is WindowContractError {
+  return error instanceof WindowContractError && confirmedWindowsActivationRefusals.has(error);
+}
+
 export function validateWindowTarget(target: CuaWindowTarget): void {
   if (!Number.isSafeInteger(target.pid) || target.pid <= 0) {
     throw new Error("CUA window target pid must be a positive safe integer");
@@ -80,6 +108,14 @@ export function validateWindowTarget(target: CuaWindowTarget): void {
   if (!Number.isSafeInteger(target.windowId) || target.windowId <= 0) {
     throw new Error("CUA window target windowId must be a positive safe integer");
   }
+}
+
+/** Native screen pixels are local-only. This accepts Windows' local named-pipe
+ * namespace and deliberately rejects UNC/server pipe endpoints. */
+export function isLocalWindowsNamedPipeSocket(socketPath: string): boolean {
+  const prefix = "\\\\.\\pipe\\";
+  const normalized = socketPath.trim().toLocaleLowerCase("en-US");
+  return normalized.startsWith(prefix) && normalized.length > prefix.length;
 }
 
 export async function discoverWindow(
@@ -282,6 +318,9 @@ export async function captureWindowWithRetry(
   let uiaTimeoutRetriesRemaining = WINDOW_CAPTURE_MAX_UIA_TIMEOUT_RETRIES;
   let captureReadCalls = 0;
   let schemaAttempts = 0;
+  // An expensive native visibility check must not repeat and consume the
+  // bounded CUA/UIA retry budget; a fresh capture invocation may try again.
+  let foregroundVisibleCaptureAttempted = false;
   const now = options.now ?? Date.now;
   const delay = options.delay ?? delayWithAbort;
 
@@ -303,6 +342,19 @@ export async function captureWindowWithRetry(
       throwIfCaptureAborted();
       const binding = await discoverWindowChecked(driver, session, target, captureSignal);
       try {
+        let visibleRegionCapture: CuaWindowCapture | undefined;
+        if (options.foregroundVisibleCapture !== undefined && !foregroundVisibleCaptureAttempted) {
+          foregroundVisibleCaptureAttempted = true;
+          visibleRegionCapture = await tryCaptureForegroundVisibleRegion(
+            target,
+            binding,
+            captureSignal,
+            options.foregroundVisibleCapture,
+            options.foregroundVisibleCaptureMaxBytes,
+          );
+        }
+        throwIfCaptureAborted();
+        if (visibleRegionCapture !== undefined) return visibleRegionCapture;
         if (captureReadCalls >= WINDOW_CAPTURE_MAX_READ_CALLS) {
           throw new WindowContractError("WINDOW_CAPTURE_RETRY_BUDGET_EXHAUSTED", "configured CUA window capture retry budget was exhausted");
         }
@@ -351,6 +403,58 @@ export async function captureWindowWithRetry(
     clearTimeout(deadlineTimer);
   }
 }
+
+async function tryCaptureForegroundVisibleRegion(
+  target: CuaWindowTarget,
+  currentBinding: CuaWindowBinding,
+  signal: AbortSignal,
+  captureVisibleRegion: WindowCaptureRetryOptions["foregroundVisibleCapture"],
+  maxBytes = MAX_FOREGROUND_VISIBLE_CAPTURE_BYTES,
+): Promise<CuaWindowCapture | undefined> {
+  if (captureVisibleRegion === undefined) return undefined;
+  let nativeCapture: WindowsVisibleWindowCapture | undefined;
+  try {
+    nativeCapture = await captureVisibleRegion(target, signal);
+  } catch {
+    signal.throwIfAborted();
+    return undefined;
+  }
+  signal.throwIfAborted();
+  if (nativeCapture === undefined || nativeCapture.target.pid !== target.pid || nativeCapture.target.windowId !== target.windowId ||
+      !isForegroundCaptureGeometryCompatible(nativeCapture.bounds, currentBinding.bounds) ||
+      !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || nativeCapture.data.byteLength === 0 ||
+      nativeCapture.data.byteLength > maxBytes) return undefined;
+  const dimensions = readPngDimensions(nativeCapture.data);
+  if (dimensions === undefined || dimensions.width !== nativeCapture.bounds.width || dimensions.height !== nativeCapture.bounds.height ||
+      !hasPngEnd(nativeCapture.data)) return undefined;
+  return {
+    binding: { target: { ...target }, bounds: { ...nativeCapture.bounds } },
+    viewport: { ...dimensions, coordinateSpace: "physical" },
+    data: new Uint8Array(nativeCapture.data),
+    source: "windows_foreground_region",
+    cuaBounds: { ...currentBinding.bounds },
+  };
+}
+
+/** Allow only the ordinary one-pixel DWM/CUA frame rounding difference. The
+ * returned visible-frame bounds remain the single geometry used for both the
+ * screenshot viewport and all subsequent UIA coordinate projection. */
+function isForegroundCaptureGeometryCompatible(
+  visible: CuaWindowGeometry,
+  listed: CuaWindowGeometry,
+): boolean {
+  const tolerance = 1;
+  return Math.abs(visible.x - listed.x) <= tolerance && Math.abs(visible.y - listed.y) <= tolerance &&
+    Math.abs(visible.width - listed.width) <= tolerance && Math.abs(visible.height - listed.height) <= tolerance;
+}
+
+function hasPngEnd(data: Uint8Array): boolean {
+  const length = data.byteLength;
+  return length >= 12 && data[length - 8] === 73 && data[length - 7] === 69 &&
+    data[length - 6] === 78 && data[length - 5] === 68;
+}
+
+const MAX_FOREGROUND_VISIBLE_CAPTURE_BYTES = 8 * 1024 * 1024;
 
 /**
  * Last-resort read-only capture for the daemon regression where every bounded
@@ -487,6 +591,14 @@ export async function activateWindowTarget(
   signal.throwIfAborted();
   const structured = parseStructured(result.structuredJson);
   if (result.isError) {
+    if (!result.degraded && isExactWindowsForegroundRefusal(structured, target)) {
+      const error = new WindowContractError(
+        "WINDOW_ACTIVATION_REFUSED",
+        "Windows did not activate the exact listed window; no UI input was sent",
+      );
+      confirmedWindowsActivationRefusals.add(error);
+      throw error;
+    }
     // A macOS sheet can be enumerated as a distinct HWND, yet Cocoa/AX may
     // keep the parent document focused after bring_to_front. Preserve that
     // distinction for callers: the candidate was found, but its independent
@@ -499,12 +611,12 @@ export async function activateWindowTarget(
         exactWindowEffect?.verified === false) {
       throw new WindowContractError(
         "WINDOW_ACTIVATION_UNCONFIRMED",
-        activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
+        `${activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle)} ${activationEvidenceSummary(result, structured, target, "is_error")}`,
       );
     }
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front refused the exact window target");
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", `CUA bring_to_front refused the exact window target ${activationEvidenceSummary(result, structured, target, "is_error")}`);
   }
-  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", "CUA bring_to_front returned a degraded result for the exact window target");
+  if (result.degraded) throw new WindowContractError("WINDOW_ACTIVATION_UNKNOWN", `CUA bring_to_front returned a degraded result for the exact window target ${activationEvidenceSummary(result, structured, target, "degraded")}`);
   const landed = structured?.landed_on_target;
   const targetHandle = parseWindowHandle(structured?.target_hwnd);
   const foregroundHandle = parseWindowHandle(structured?.now_fg_hwnd);
@@ -538,11 +650,69 @@ export async function activateWindowTarget(
         exactWindowEffect?.verified === false) {
       throw new WindowContractError(
         "WINDOW_ACTIVATION_UNCONFIRMED",
-        activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle),
+        `${activationUnconfirmedMessage(target, observedFocusedHandle, observedFrontmostHandle)} ${activationEvidenceSummary(result, structured, target, "explicit_mismatch")}`,
       );
     }
-    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", "CUA bring_to_front did not land on the exact window target");
+    const branch = explicitMismatch ? "explicit_mismatch" : "unverified";
+    throw new WindowContractError("WINDOW_ACTIVATION_REFUSED", `CUA bring_to_front did not land on the exact window target ${activationEvidenceSummary(result, structured, target, branch)}`);
   }
+}
+
+type ActivationDiagnosticBranch = "is_error" | "degraded" | "explicit_mismatch" | "unverified";
+type ActivationDiagnosticValue = "true" | "false" | "missing" | "invalid";
+
+/** Fixed, bounded and non-content evidence that survives the Computer.open error wrapper. */
+function activationEvidenceSummary(
+  result: ToolResult,
+  structured: Record<string, unknown> | undefined,
+  target: CuaWindowTarget,
+  branch: ActivationDiagnosticBranch,
+): string {
+  const structuredState = result.structuredJson === undefined ? "missing" : structured === undefined ? "invalid" : "present";
+  const observedState = structuredState !== "present"
+    ? structuredState
+    : !Object.hasOwn(structured!, "observed") ? "missing" : isRecord(structured!.observed) ? "present" : "invalid";
+  const observed = isRecord(structured?.observed) ? structured.observed : undefined;
+  const effectState = structuredState !== "present"
+    ? structuredState
+    : !Object.hasOwn(structured!, "exact_window_effect") ? "missing" : isRecord(structured!.exact_window_effect) ? "present" : "invalid";
+  const effect = isRecord(structured?.exact_window_effect) ? structured.exact_window_effect : undefined;
+  const handle = (record: Record<string, unknown> | undefined, key: string, containerState: "missing" | "invalid" | "present"): string => {
+    if (containerState === "missing" || containerState === "invalid") return containerState;
+    if (record === undefined) return "invalid";
+    if (!Object.hasOwn(record, key)) return "missing";
+    const value = parseWindowHandle(record[key]);
+    if (value === undefined || Number(value) <= 0) return "invalid";
+    return `${value === String(target.windowId) ? "match" : "mismatch"}:${value}`;
+  };
+  const boolean = (record: Record<string, unknown> | undefined, key: string, containerState: "missing" | "invalid" | "present"): ActivationDiagnosticValue => {
+    if (containerState === "missing" || containerState === "invalid") return containerState;
+    if (record === undefined) return "invalid";
+    if (!Object.hasOwn(record, key)) return "missing";
+    return typeof record[key] === "boolean" ? String(record[key]) as "true" | "false" : "invalid";
+  };
+  const status = structuredState !== "present" ? structuredState
+    : !Object.hasOwn(structured!, "status") ? "missing"
+    : structured!.status === "activated" || structured!.status === "partial" || structured!.status === "refused"
+      ? structured!.status as "activated" | "partial" | "refused"
+      : "invalid";
+  const exactVerified = boolean(effect, "verified", effectState);
+  const focused = handle(observed, "focused_window_id", observedState);
+  const frontmost = handle(observed, "frontmost_ordinary_window_id", observedState);
+  const reasons = [
+    handle(structured, "window_id", structuredState).startsWith("mismatch") ? "window_id_mismatch" : undefined,
+    focused.startsWith("mismatch") ? "focused_mismatch" : undefined,
+    frontmost.startsWith("mismatch") ? "frontmost_mismatch" : undefined,
+    handle(structured, "target_hwnd", structuredState).startsWith("mismatch") ? "target_hwnd_mismatch" : undefined,
+    handle(structured, "now_fg_hwnd", structuredState).startsWith("mismatch") ? "now_fg_hwnd_mismatch" : undefined,
+    exactVerified === "false" ? "exact_verified_false" : undefined,
+    boolean(observed, "front_process_matches_target", observedState) === "false" ? "front_process_false" : undefined,
+    boolean(structured, "landed_on_target", structuredState) === "false" ? "landed_false" : undefined,
+  ].filter((value): value is string => value !== undefined);
+  const reason = reasons.length === 0 ? branch === "degraded" ? "degraded" : "driver_refused_or_missing_proof" : reasons.join(",");
+  const isError = typeof result.isError === "boolean" ? String(result.isError) : "invalid";
+  const degraded = typeof result.degraded === "boolean" ? String(result.degraded) : "invalid";
+  return `[activation_evidence branch=${branch} is_error=${isError} degraded=${degraded} status=${status} window_id=${handle(structured, "window_id", structuredState)} focused=${focused} frontmost=${frontmost} front_process=${boolean(observed, "front_process_matches_target", observedState)} exact_effect=${effectState} exact_verified=${exactVerified} landed=${boolean(structured, "landed_on_target", structuredState)} target_hwnd=${handle(structured, "target_hwnd", structuredState)} now_fg_hwnd=${handle(structured, "now_fg_hwnd", structuredState)} reason=${reason}]`;
 }
 
 function activationUnconfirmedMessage(
@@ -569,6 +739,22 @@ function parseWindowHandle(value: unknown): string | undefined {
     return Number.isSafeInteger(parsed) ? String(parsed) : undefined;
   }
   return undefined;
+}
+
+function isExactWindowsForegroundRefusal(
+  structured: Record<string, unknown> | undefined,
+  target: CuaWindowTarget,
+): boolean {
+  if (structured === undefined ||
+      structured.code !== "foreground_unavailable" ||
+      structured.effect !== "refused" ||
+      structured.landed_on_target !== false) {
+    return false;
+  }
+  const targetHandle = parseWindowHandle(structured.target_hwnd);
+  const actualForegroundHandle = parseWindowHandle(structured.now_fg_hwnd);
+  return targetHandle === String(target.windowId) &&
+    actualForegroundHandle !== undefined && actualForegroundHandle !== targetHandle;
 }
 
 function captureFailureClassification(errorCode: string | undefined, errorText: string): string | undefined {
@@ -656,6 +842,7 @@ function parseWindows(result: ToolResult, osPlatform: NodeJS.Platform): CuaWindo
     const ownerWindowId = positiveSafeInteger(item.owner_window_id ?? item.ownerWindowId);
     const minimized = typeof (item.is_minimized ?? item.minimized) === "boolean" ? (item.is_minimized ?? item.minimized) as boolean : undefined;
     const windowClass = boundedClassName(item.window_class ?? item.windowClass);
+    const noActivateValue = item.no_activate ?? item.noActivate;
     return [{
       target: { pid, windowId },
       bounds,
@@ -667,6 +854,7 @@ function parseWindows(result: ToolResult, osPlatform: NodeJS.Platform): CuaWindo
       ...(ownerWindowId === undefined ? {} : { ownerWindowId }),
       ...(minimized === undefined ? {} : { minimized }),
       ...(windowClass === undefined ? {} : { windowClass }),
+      ...(typeof noActivateValue === "boolean" ? { noActivate: noActivateValue } : {}),
     }];
   });
   return normalizeWindowInventory(parsed, osPlatform);

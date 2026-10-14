@@ -1,18 +1,133 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29
-状态：隔离 Preview 已于 2026-10-03 切换到 Runtime / Surface Registry 冻结版本并完成公网基础检查；手机重新配对及端到端实测仍待用户执行
+状态：2026-10-10 已 Web-only 发布隔离 Preview `2026-10-10-web-accessibility-v1`；Relay backend 保持上一版编译代码，本机 Host 4318 和 CUA 不重启，WSS 在线、已有配对保留。iPhone 旁白与真实任务待用户验收；不因部署自动通过。
+
+2026-10-12 只读复核：公网首页、JS、CSS 三项 SHA-256 均与下方 10 月 10 日记录相同；经已固定服务器指纹的 SSH 登录读取，Preview current 仍为上述无障碍 release，Relay active、PID 155349、启动时间仍为 10 月 9 日 22:57:38 CST；release 标记仍记录 backend d2ee1a3、Web base d4eae01 加未提交无障碍改动。未发现当前部署被 PR26 替换的证据，未重启或改动服务。本次默认 SSH 密钥未获授权，但原有密码认证成功，不是已确认的服务器密码失效。此核对不保证期间从未发生又回退的部署，也不代替本机 Host 版本或真实任务验收。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
+
+## 2026-10-10：网页无障碍版本已发布（无需清空配对）
+
+使用 iPhone Safari 打开 [无障碍 Preview](https://47.108.197.221:8443/?v=a11y-20261010)。先关闭旧页面再打开此链接，避免旧内存页面仍在运行。已经在同一 Safari 配对且会话有效时可以直接继续；首次改用 Safari 或会话过期时，在电脑 `http://127.0.0.1:4318/connect` 扫码并由用户本人／可信协助者确认。此轮没有重启 Relay，因此**不是要求所有人重新配对**；不要照搬下方 2026-10-09 重启后的历史要求。
+
+这次无障碍语义默认可用，不需要先打开项目里的某个模式。按[手机无障碍文档](./mobile-accessibility-experience-review-2026-10-08.md)顶部步骤，先练习系统旁白退出手势，再检查设置、输入、进展、暂停／纠正、请求和结果。建议先关应用自动播报，单独测试旁白，随后再试两套语音并用。没有触发的审批／提问记“未覆盖”；图片才能确认的窗口／审批记“需视觉协助”，不得盲批。
+
+### 发布事实和版本
+
+- 当前 Preview `current`：`/opt/computer-harness-preview/releases/2026-10-10-web-accessibility-v1`；回退点：`2026-10-09-pr22-d2ee1a3-v2`。新 release 从旧 release 独立复制，覆盖匹配的 Web source 与 dist，backend／node_modules／原 `.release-source` 不变。旧哈希资源同时保留，避免已打开页面请求旧资源时 404。
+- Git base 为 `d4eae01`，Web 改动仍未提交，不称 Git HEAD 已发布新源码。`.web-release-source` 记录 uncommitted 来源、77 个 source 文件指纹 `7db6e662041a830de69350c4134ff2e0f9f08834d39b4f9b6c836873805cfdcf`，以及 source+dist tar SHA-256 `8A8BCCD6671F05C47A2A55586384BAC1C56F320387D17FA23AB76D3088E95C0D`。未上传 `.env`、运行记录、账号 profile、密钥或本机 node_modules。
+- 新 JS：`index-BlAUldwj.js`，SHA-256 `3271F27F8DBC4BF2B2BA884CCFC0DA0A584A7AB32E1F2EB9D1C81317E9E4EDE7`；新 CSS：`index-C8yJJOYs.css`，SHA-256 `FEDD42E600E12477B4F66B4F224D83ACE3F5EF9113C92A074BE38D63C2963457`；index SHA-256 `9C841A904847749F4D2807426B8BB205FEB2E6856686DADDA9B21648849E833D`。协调者从公网重新下载读取并核验，均与本机产物一致，中文 UTF-8 无替换症状。
+- Preview／stable health 200，匿名 Preview `GET /api/runs` 为 401；旧 `index-Dksr18pu.js` 仍 200 且原 SHA 不变。Preview／stable PID 与 service state 未变，443 current 不变；本机 Host 4318 在线、WSS established，设备数量仍 2，未代用户生成或批准配对。原登录状态、CUA 候选与配置不变，没有实际桌面／模型调用。
+
+### 回退与边界
+
+当前 Relay 配置的 `webRoot` 是 `/opt/computer-harness-preview/current/apps/web/dist`，进程使用该符号路径读取文件，而非固定旧 release 的 realpath。因此本次只原子替换 Preview current，不需重启服务或清空内存会话。回退时同样只原子指回上述前一 release，然后核对 root／asset／health／匿名 401／两个服务 PID 及 stable current；不得改 443、默认 Host／driver、登录 profile 或自动重放任务。切换脚本失败时只有 current 仍指向自己发布的目录才回退，不覆盖其他人的并发发布。
+
+本轮完成发布与独立公网核验；不宣称已完成真实 iPhone 读屏、物理声音、真实业务任务或完整 WCAG 合规。上一轮 Web 227 项、隔离浏览器 50/50 与 Sol 审查结论见手机文档，不能把本次发布重计为新一轮实机成功。
+
+## 2026-10-09：只读部署状态核对
+
+PR25完整历史与本地手机体验已按保留作者方式合入PR #22；代码head `d2ee1a3`的新CI四矩阵及ci-required全部通过。Node24／固定pnpm 11.19.0根build、Web build、Node自测70通过／0失败／1项环境跳过；本机Vitest 1841/1843，两例CLI窄屏长中文分页检查超5秒，未改timeout。集成报告见`runs/diagnostics/pr22-integration-20261009-2235/`。
+
+独立Preview已原子切换到`/opt/computer-harness-preview/releases/2026-10-09-pr22-d2ee1a3-v2`，新JS为`/assets/index-Dksr18pu.js`（SHA-256 `256A9FF98C08A259644982087047D2776AF376F0ED201AF0FB9A5C5C8FA52C85`），公网health/root/asset为200，匿名`GET /api/runs`为401。Relay重启清空手机内存session，stable 443/current未变；原Preview release `2026-10-07-desktop-input-v1`保留作回滚点。回退时只把Preview `current`原子指回旧release并重启`computer-harness-relay-preview.service`，随后复查health/asset/匿名API；不得改stable。
+
+本机Host PID 47180监听4318，`/connect`、`/api/local/session`均200，页面引用新asset；Host到Preview `:8443`存在ESTABLISHED WSS，Host stderr无Relay认证错误。物理桌面owner lease及operation marker均不存在，新Host run目录无Run轨迹，未发送pairing请求、未approve、未CreateRun、未执行桌面/模型API任务。
+
+用户重新连接步骤：在电脑浏览器打开`http://127.0.0.1:4318/connect`，用手机重新扫描该页面显示的二维码，并在需要时由用户本人确认手机配对请求；不能自动配对或自动批准。只有重新连接后才能继续同一个Preview体验；本次部署与连接检查本身不证明手机语音或真实任务通过。
+
+受管Edge网页zoom 100%／125%窗口绑定短实机检查未完成。尝试入口通过隔离`node_repl`运行时调用既有`openCuaBootstrapSession`，但该工具运行时没有Node全局`process`；SDK在`cua-sdk-platform.ts:22`读取`process.platform`时抛出`ReferenceError`，失败发生在连接候选pipe前，没有启动Edge窗口。这是工具运行时限制，不是产品代码或候选驱动回归；也不把单测/CI代替GUI验收。
+
+## 2026-10-07 Preview 部署与 Windows 输入候选
+
+### 同日后续更新：仅本机Host（已完成）
+
+本机Host随后更新为源码`d840000c90651fd21a6d34173435e68cb5a5e205`，包含Context完整操作指导投影及大图候选预览缩略图。服务器Relay/Web仍是下方`a9464d4`的release／asset，没有改协议或前端，不因本机代码提交就宣称服务器全部切到新commit。候选CUA二进制／pipe／home／profile保持不变，未重启driver。
+
+- 全仓Vitest1817/1817通过，预览定向102/102、两个包noEmit及实际Node24.19.0根`tsc -b`通过；Sol独立审查放行。输入／查询真实任务仍是更新前用户Run验收，不把离线缩图测试写成新实机整题通过。
+- 构建与重启前后物理桌面owner均unowned；只核验并重启精确Preview Host，未停止默认CUA或服务器。新Host`/connect`、`/api/local/session`均200，Relay连接建立；本次没有业务Run、桌面输入或模型API调用。env修改时间不变，登录profile未操作。
+- Host入口hash可能不变，但本次记录了新`app-runtime/dist/window-preview-image.js`（`01798F…C46F3F5`）、`remote-run-api.js`（`1F5F69…A7D561`）和`context/dist/compiler.js`（`3C563F…66F0F27`）及完整本机指纹，避免用旧入口hash误认依赖未更新。私有state中保存新sourceRevision和构建hash；沿用旧launcher目录名称不代表旧源码。
+- 手机需重新打开电脑`http://localhost:4318/connect`扫码配对。大图捕获成功时会在Host端有界缩为预览PNG，最终仍≤2MiB；模型截图／坐标不变。离线合成图9,834,668字节（2048×1200）→1,550,797字节（819×480），651ms；真实capture失败不在此修复承诺中。
+
+### 服务器 Relay/Web（已部署）
+
+- PR22 源码 commit `a9464d4023a0d1cc807d38cb69f483e237a2ff96` 已 push；GitHub 核验 author 与 committer 均解析为账号 ID `142909575`。部署包来自该 commit 的 clean archive：SHA-256 `CD889A783D6EFA3143C0901FAAEB56895626E618DC79476B434F45ABD5ADA01E`。归档审计为 759 项，未包含 `.env*`、`.harness.local.*`、`runs/`、`.tools/`、profile、截图/图片、key 文件、`node_modules/` 或 `dist/`。
+- Preview `current` 现指向 `/opt/computer-harness-preview/releases/2026-10-07-desktop-input-v1`。构建使用已有 Node `/opt/node-v24.19.0/bin/node` 与 pnpm 11.19.0；frozen-lockfile 过滤安装报告 131 个包全部复用、0 次下载，Relay TypeScript refs 与 Web 顺序构建成功。服务器 Relay 配置仍为 0600、原 owner，`webRoot` 指向 `current/apps/web/dist`，监听 `127.0.0.1:8788`，公网 origin 为 `:8443`。没有部署或启动 CUA driver 服务，也没有重新安装 Node 或全局依赖。
+- Preview unit `computer-harness-relay-preview.service` 重启后 active。公网 TLS 校验通过：Preview health `200`，根页面加载 `index-jH9TY0Xe.js`，asset SHA-256 `53EAC427391087DE5311327C1319E580B45EE01EF063258F4BCB893F13590BFA` 与本地/服务器构建一致；匿名 `GET /api/runs` 返回 `401`。旧 stable health `200`，其 `current` 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4/three-track-relay-20261006.ENXj6t/release`；本轮未改 stable 的 `current`、443 服务或配置。Relay 重启会清空手机内存 session，需重新配对。
+- 新 release 保留旧 Preview `/opt/computer-harness-preview/releases/2026-10-04-popup-input-closeout-v2` 作为回滚点。回滚时仅将 Preview `current` 原子指回该目录并重启 Preview unit；不得触碰 stable。
+
+### Windows 本机输入候选（单独验收）
+
+- 本机输入候选是独立的 Windows x64 driver binary，不是项目 CUA SDK 升级：本轮不改 SDK/lockfile，实际调用 v0.22.2；仓库既有 v0.22.2/v0.32.0 兼容依赖均保留。Mac/Linux 不使用这份 Windows binary。候选 source commit `7852ab1983b60c0ce581b8736c9da13eaf04640a`，artifact SHA-256 `400AB8670980ECD461F304FDC7E7A9D8A27F53585EA629B81EE1B7C260BC3095`，来自自有 fork 的 [Windows 构建 workflow](https://github.com/wszkxlllll/cua/actions/runs/37552571018)；CI formatting、4 个 focused test 与 x64 release build 全绿。PR22 源码 commit 的 CI run `37565173013` 四矩阵与 `ci-required` 也全绿。artifact 保留 7 天，可用于本轮 Preview 验证但不是长期正式发布渠道；如过期需从同一 source workflow 重建，正式 Release 另行安排。
+
+在仓库根目录使用有权限的 GitHub CLI 重新下载候选并核验哈希（命令不包含凭据）：
+
+```powershell
+gh run download 37552571018 --repo wszkxlllll/cua --name cua-driver-v0.22.2-focused-document-caret-win-x64 --dir .tools/cua-driver-v0222-focused-document
+Get-FileHash .tools\cua-driver-v0222-focused-document\cua-driver.exe -Algorithm SHA256
+```
+
+- 该 driver 仅在 Windows Host 上用独立配置与唯一 Preview pipe 做受控测试；默认/旧 driver、默认 pipe 与 stable 配置保留。服务器不部署 CUA。当前 run 的 SDK metadata 为 `0.22.2`、contract 为 `0.7.0`。手机没有单独的 Guard 关闭开关；本轮不改变默认 Host-layered Guard 政策。
+- 组长启动的 run-local launcher 是忽略目录中的脚本，不是仓库随附的团队通用工具。若在同一测试 checkout 复现，请从仓库根目录运行：
+
+  ```powershell
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\runs\diagnostics\preview-host-candidate-a9464d4023a0\start-preview.ps1"
+  ```
+
+  Host 进程专用设置为 `HARNESS_MULTILINE_TYPE_PROFILE=foreground-caret-v1`、`HARNESS_OPERATION_GUIDANCE=catalog-v1`、`GLM_THINKING=low`，测试上限为 100 requests / 100 steps；Host 使用既有私有 env-file，但其路径和值不记录。候选路径、SHA、唯一 pipe 与隔离 CUA home 由 run-local launcher/state 管理，不复制到共享文档或默认配置。候选 Host 和 CUA 使用独立进程/pipe；默认 CUA socket、配置、env-file 与浏览器 profile 未修改。已核验 `/connect` 与 `/api/local/session` 为 `200`、Relay TCP 已连接且 Host stderr 无 auth/disconnect 提示。Host `POST /api/local/pairing` 返回 `200`，本机 CSRF 流程正常；短期票据的 origin 与私有 Relay public origin 匹配，随后经 admin API 明确拒绝；核验后 active ticket=false、pending requests=0、device count=0。未输出或持久化 token、CSRF 或 Host ID；没有手机实际配对、设备批准、任务或模型调用。
+- whole-desktop 必须由用户明确选择，可用于整桌面输入／弹窗兼容或跨应用任务。携程→记事本选择“整个桌面（高级）”并开启“跨应用完成任务”；单独记事本可关闭跨应用。整屏可能把其他可见窗口内容发送给模型，开始前关闭或遮挡敏感内容。Run 期间不要用鼠标、键盘或触控板操作同一台电脑，以免改变焦点或画面；需要人工介入时应先暂停或取消。
+- 回退时按该 run 的私有 `preview-state.json` 核对精确 Host PID，只停止该候选 Host；再校验候选 exe SHA，并在同一隔离 CUA home 下对记录中的候选 pipe 执行该 exe 的 `stop --socket <candidate-pipe>`，确认候选进程退出且该 pipe 不可连接。不要把 PID、私有 env 路径或 pipe 值抄入文档；绝不停止默认 `\\.\pipe\computer-harness-pi-local` daemon、改写 `.harness.local.psd1`/原 `.env` 或清理浏览器 profile，也不要用 `scripts/mobile.ps1` 清理这个 run。候选停止后，因配置和 env 未改，恢复使用原 socket/env 不需要恢复文件；launcher 没有配套 stop 子命令，候选清理必须使用该 run 的私有 state。
+- 手机入口仍为电脑上的 `http://localhost:4318/connect`，扫描配对后连接 Preview `https://47.108.197.221:8443`；Relay 重启后必须重新配对。候选尚未替换默认 driver，也不以本机连接检查代替完整业务验收。
+
+### 队友从新 checkout 启动 Windows 候选
+
+先按[开发者上手](./getting-started.md)完成依赖与 Host/Web 构建，准备自己的 Preview Relay／模型私有配置文件 `.env.preview`，不要复制他人的密钥或浏览器 profile。使用 Node 24.19.0 和上方已核验 SHA 的候选；这不是 Mac/Linux 的安装步骤。下列命令在仓库根目录、两个专用 PowerShell 终端中执行，环境变量仅影响当前进程及其子进程，不修改系统变量。
+
+终端一保持候选 driver 运行（pipe 名必须未被其他服务占用）：
+
+```powershell
+$env:CUA_DRIVER_RS_HOME = Join-Path (Get-Location).Path '.tools\cua-team-preview-home'
+& '.\.tools\cua-driver-v0222-focused-document\cua-driver.exe' serve --socket '\\.\pipe\computer-harness-team-preview' --no-overlay
+```
+
+终端二启动 Host；`node` 必须是已配置的 Node 24.19.0，可替换成该机器的 node.exe 绝对路径：
+
+```powershell
+$env:HARNESS_MULTILINE_TYPE_PROFILE = 'foreground-caret-v1'
+$env:HARNESS_OPERATION_GUIDANCE = 'catalog-v1'
+$env:GLM_THINKING = 'low'
+node .\apps\host\dist\index.js --env-file .env.preview --socket '\\.\pipe\computer-harness-team-preview' --model glm-5.3-flash --output .\runs\team-preview --port 4318 --max-model-requests 100 --max-steps 100
+```
+
+此输入 profile 只能与核验过的候选 pipe 配套，不凭版本号相同自动开启。打开 `http://localhost:4318/connect`，扫码并在电脑确认配对；手机应进入 Preview 8443，而不是旧 443。保存登录状态需要在这台电脑上单独准备受管浏览器。退出前先结束当前任务并关闭专用 Host，再在终端一停止该候选；不要停止默认 driver。以上是交接命令，不代表已在队友机器实测。
 
 ## 部署状态
 
-- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-03-runtime-surface-v2`；Preview 的 `current` 符号链接已切换到该 release。此前 `2026-10-02-cross-window-v1` 仍保留，可作为应用版本回滚点。
+- Preview 当前使用独立 release：`/opt/computer-harness-preview/releases/2026-10-07-desktop-input-v1`，源码 `a9464d4023a0d1cc807d38cb69f483e237a2ff96`；Preview 的 `current` 已原子切换。此前 `2026-10-04-popup-input-closeout-v2`、`popup-input-closeout-v1`、`window-progress-v1`、`2026-10-03-runtime-surface-v2` 和 `2026-10-02-cross-window-v1` 均保留回滚。
 - `computer-harness-relay-preview` 服务处于 active，只监听 loopback `8788`。Nginx 在 `8443` 提供 TLS：`https://47.108.197.221:8443`，使用现有有效 IP 证书。用户已开放 `8443`。
 - 旧入口 `https://47.108.197.221` 及旧服务、旧 `current` 均未修改，仍健康。
-- stable release 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；本次未切换或重启 stable。
-- 公网检查结果及边界见下方 2026-10-03 更新记录。它们不代表手机麦克风或完整语音任务已经验收。
+- stable `current` 的只读核验路径见上方 2026-10-07 部署记录；本次未切换或重启 stable。
+- 当前公网检查结果及边界见上方 2026-10-07 更新记录；下方旧日期为历史。它们不代表手机麦克风或完整语音任务已经验收。
 
-## 2026-10-03 Runtime / Surface Preview 更新记录
+## 2026-10-04 窗口与播报修复部署
+
+### 本轮收尾更新
+
+当前源码、审查、CI 与真实任务边界见[统一收尾记录](./window-popup-regression-2026-10-04.md)。源码 `3f234c6` 本地 111 文件／1655 项通过，四组 CI 及 `ci-required` 全绿；服务器从已验证 Git commit 构建，Web asset 为 `index-D8bCuibX.js`。Preview health／asset 200，匿名任务 API 401，stable health 200。本机 Host 已对齐构建并监听 4318、连接 8443，日志／新任务目录 `runs/voice-preview-popup-closeout-20261004/`。
+
+现在在电脑打开 `http://localhost:4318/connect`，手机重新扫码，使用 `https://47.108.197.221:8443`。不需要重新配置 Node／API key，不要求重新登录已保存的网站，但网站自身登录是否过期仍以实际页面为准。没有操作桌面或重跑本轮未通过的任务；下方旧部署与测试数量是历史，不代表当前端到端放行。
+
+### 早期 window-progress-v1 部署（历史）
+
+部署 commit：`5f0efe00b6d1ca3e66320283a745f15755858f07`，分支 `codex/runtime-surface-preview-20261003`；源码 tar.gz SHA-256：`0C7BD877FF33135B4239D6486AC6C33BF91492EA5B478B956EDFC81A26D73533`。服务器保存 `.release-source`，不含本机密钥、轨迹或截图。
+
+- Windows 根构建通过；全量 107 文件、1312 项通过，脚本 31 通过、1 项跳过。记事本菜单返回与 WPS 列窗/切换/Ctrl+A/Esc 实机成功，见[修复验收](./window-and-progress-repair-results-2026-10-04.md)。
+- 服务器 frozen lockfile 安装、Web/Relay 依赖构建和入口语法检查通过，Preview current 已原子切换。重启后第一次 health 发生启动竞态而连接失败；稍后公网复查 health `200`、新 asset `/assets/index-Br-MqOQ2.js` `200`、匿名 `/api/runs` `401`；stable health `200`。旧服务未切换。
+- 本机旧 Host 已停止，新 Host 使用本轮构建与原 `.env.voice-preview`、原 CUA socket，监听 4318；`/connect` 返回 `200`，至服务器 8443 的连接 established。没有重启 CUA 或清除浏览器登录 profile。
+- 新日志与任务目录：`runs/voice-preview-window-progress-20261004/`，任务在其 `sessions/` 下。手机必须重新配对，新页面应来自上述新 asset。任务中途语音仍可能被模型漏报，不能用基础 health 证明语音端到端通过。
+
+现在打开 `http://localhost:4318/connect`，手机重新扫码配对，使用 `https://47.108.197.221:8443`。首先复测 WPS 菜单/弹窗与携程→记事本任务，开启朗读关键通知；无需重新登录已保存的网站。
+
+## 2026-10-03 Runtime / Surface Preview 更新记录（历史）
 
 部署源码来自分支 `codex/runtime-surface-preview-20261003` 的 commit `600ccecc713737049267b350cfc983cb3942d80c`；源码归档 SHA-256 为 `09931D26140D9FB4CB80BBD361E07567CBF3225E94ECD7DE2E3A2B97D4884562`。服务器 release 内保存 `.release-source`，记录分支、commit 与归档哈希。
 
@@ -79,7 +194,7 @@
 | 本次 Preview 手机端 | `https://47.108.197.221:8443` | 新隔离部署 |
 | 旧公网服务 | `https://47.108.197.221` | 保持原状、健康 |
 
-本机 Host 日志：`runs/voice-preview-launch/host.stdout.log`、`runs/voice-preview-launch/host.stderr.log`。
+本机当前 Host 日志：`runs/voice-preview-popup-closeout-20261004/host.stdout.log`、`runs/voice-preview-popup-closeout-20261004/host.stderr.log`。
 
 ## TLS 尝试记录
 

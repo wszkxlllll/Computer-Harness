@@ -13,5 +13,8 @@ export * from "./cua-doctor.js";
 export * from "./managed-browser-prepare.js";
 export * from "./managed-browser-profile.js";
 export * from "./window-target-matcher.js";
+export * from "./window-preview-image.js";
+export * from "./window-selection-jev.js";
 export * from "./diagnostics/provider-summary.js";
 export * from "./diagnostics/recording-clients.js";
+export { parseSourceLinkedFinishContractJson, validateSourceLinkedFinishContract } from "@computer-harness/runtime";

@@ -1,0 +1,118 @@
+{
+  "schema": "cua-driver-native11-diagnostic-r2-source-chain.v1",
+  "upstream": "https://github.com/trycua/cua.git",
+  "baseCommit": "d114f35fec05ecd37bf529e5587be86852205b64",
+  "baseTree": "1be75321ea36185d2fd660107785c07cc1daa67c",
+  "patches": [
+    {
+      "order": 1,
+      "path": "patches/cua-driver/d114f35-macos-exact-window-capture.patch",
+      "sha256": "980323a0737626152a27ad0edda2eb0408f944e707f5a63f6094bd74d3e8393b"
+    },
+    {
+      "order": 2,
+      "path": "patches/cua-driver/d114f35-macos-focused-element-proof.patch",
+      "sha256": "66beef9c2d6906bbed07053e2cf0fbfeca5cb6640a2bcf9d0e839ebf3999bb7c"
+    },
+    {
+      "order": 3,
+      "path": "patches/cua-driver/d114f35-macos-attached-sheet-proof.patch",
+      "sha256": "2e624c66251e1c2785fe43a452556ac73b7b29b76ddc725af37ee2ee1b8d432e"
+    },
+    {
+      "order": 4,
+      "path": "patches/cua-driver/d114f35-macos-exact-focused-unicode-text.patch",
+      "sha256": "f784f6ae53dcf40e42615b45732617f1ac5f29e508349cde741f36b5892770f4"
+    },
+    {
+      "order": 5,
+      "path": "patches/cua-driver/d114f35-macos-foreground-pixel-hit-guard.patch",
+      "sha256": "a47655cc07f5536029da53d13263b83bfa46125afdbaae1307cc29a2c1994cb1"
+    },
+    {
+      "order": 6,
+      "path": "patches/cua-driver/d114f35-macos-ax-text-format.patch",
+      "sha256": "5db869d3c5b9180832cac08bce2c584a3426ceb8d5501a5e23fc2300085e73f5"
+    },
+    {
+      "order": 7,
+      "path": "patches/cua-driver/d114f35-macos-document-and-click-diagnostics-complete.patch",
+      "sha256": "650bb5c57f538972ddabbcef673ab65e38bd011996fd43b91424c0ad3f465d5e"
+    },
+    {
+      "order": 8,
+      "path": "docs/a-line-sync/diagnostics/F-20261007-018/native.patch",
+      "sha256": "6e3dd9cf25423abdd77e943cb7c77e577067f181ce07d0d6a3d86b207885f109"
+    },
+    {
+      "order": 9,
+      "path": "patches/cua-driver/d114f35-macos-sharing-control-after-f018.patch",
+      "sha256": "4a0d6112699ab059ddebc09bd2b5f778ab1f6e6c3e01ab03b0ed9f83f59a1c49"
+    },
+    {
+      "order": 10,
+      "path": "patches/cua-driver/d114f35-macos-foreground-oracle-diagnostic-after-native9.patch",
+      "sha256": "b78f6c8e9d76dfddcd015fdf4a56b7778dceb36423f4f429541a2d74087e425f"
+    },
+    {
+      "order": 11,
+      "path": "patches/cua-driver/d114f35-macos-foreground-oracle-risk-classification-after-native10.patch",
+      "sha256": "cb1d8f8443f80020ecbbec3391eba1b8b3d39bdd871f0517a6998cea347d5500"
+    }
+  ],
+  "apply": "Apply the full ten-step native10 chain, then this two-file additive R2 classification delta. Restore test-only upstream fixtures from the listed pinned blobs when checking all targets; they are not runtime patch additions.",
+  "toolchain": "1.97.1",
+  "cargoLockSha256": "cb7cdf7d03eee68f2dd48b6dc75a6005e74ca96a5604a7a88a2994ddd5125a2f",
+  "validation": {
+    "rustSourceFiles": 383,
+    "sourceManifestSha256": "ff10cfe05a0b00e42fc4152dd2e2cb8756ca6457a5abb5d207879c03fb1636fa",
+    "coreLibraryTests": {
+      "passed": 590,
+      "failed": 0
+    },
+    "platformMacosLibraryTests": {
+      "passed": 411,
+      "failed": 0,
+      "ignored": 2
+    },
+    "fmtCheck": "passed",
+    "driverCheck": "passed",
+    "allTargetsCheck": "passed after exact upstream test-resource restoration; earlier failures retained",
+    "releaseBuild": "passed; duplicate Swift symbol linker warnings retained",
+    "independentReplay": "two modified paths strict check/apply byte equal to final native11 source",
+    "independentReviewSha256": "5b37eb6ae3524b6069ffa3dc9bf1ef31d2e582ee110fe5c8e006b2ed4cef60c4"
+  },
+  "artifact": {
+    "preSignSha256": "4b66f341a70032e6acf3353749804b351006cb46ed3d3ea2b3ba919219d2b8b3",
+    "preSignLinkerAdHocSigned": true,
+    "postSignSha256": "b04cb18afd773bbcc7e5e314216bed63aef814661a07b5a7ef92938d6e954fe8",
+    "postSignBytes": 30283312,
+    "bundleIdentifier": "com.trycua.driver.astradiagnostic.r2fix.local.20261014",
+    "plistSha256": "2dcef29dac8dca1081d399dc70837e937c591b382831b2da7cadb49949fa9f0e",
+    "codeDirectoryHash": "777c83767324a5c8e58d13c5c9a743274be5518f",
+    "fileBackedNonLinkeditSectionsExcludingZerofill": 37,
+    "sectionsUnchangedBySigning": true
+  },
+  "boundary": "Offline diagnostic candidate only. Exact tool classified R2 using existing private-observation authorization; policy, manifest, unknown-tool and self-PID denial retained. No input/capture/foreground guard change. App not launched or TCC-granted. Human consent for this exact new App is granted, while all GUI/permission-setting/launch actions are deferred at the human request. Earlier candidates and failures retained.",
+  "testResourceClosure": {
+    "upstream_commit": "d114f35fec05ecd37bf529e5587be86852205b64",
+    "upstream_tree": "1be75321ea36185d2fd660107785c07cc1daa67c",
+    "fixtures": [
+      {
+        "path": "libs/cua-driver/compat-fixtures/cli.json",
+        "git_blob": "2dd1c67f1e543765fa354c75e4040efe7966c003",
+        "sha256": "00d16fae4f44ebdbe1331b7b572764c069f0373090ab110b80536a690b52e194"
+      },
+      {
+        "path": "libs/cua-driver/compat-fixtures/mcp.json",
+        "git_blob": "ddee85192962440f63127c37dfd7d2ad999c9ad1",
+        "sha256": "5579eb51178f08c69fbb6b28a63a59f253a600858505ea80f5df94c105c387cb"
+      },
+      {
+        "path": "libs/cua-driver/tests/fixtures/shared/web/index.html",
+        "git_blob": "23a860cecee87d2bc4d67ca26c8c22fca432a66c",
+        "sha256": "977f0afd3ed9a879d93dcbd18b1d49293df23f18ffedd0ebae70c5a1ebe23af0"
+      }
+    ]
+  }
+}

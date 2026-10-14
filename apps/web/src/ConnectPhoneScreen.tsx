@@ -98,8 +98,8 @@ export function ConnectPhoneScreen() {
   return (
     <>
       <BrandHeader mode="computer" />
-      <main className="page-shell connect-page">
-        <h1 className="page-title">连接管理</h1>
+      <main id="main-content" className="page-shell connect-page" aria-labelledby="connect-phone-title" tabIndex={-1}>
+        <h1 id="connect-phone-title" className="page-title" tabIndex={-1}>连接管理</h1>
         <details className="connection-guide">
           <summary>连接说明</summary>
           <p>手机访问二维码中的地址；跨网络连接需该地址可达且 HTTPS 证书受手机信任。每次配对都要在电脑本机确认。</p>

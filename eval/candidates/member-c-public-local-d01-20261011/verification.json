@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-11",
+  "scope": "publication_provenance_not_new_consumption_verification",
+  "source": {
+    "sourceId": "member-c-d01-2026-10-11/verification.json",
+    "sha256": "70c0211bab5f1c1a72d0c94747c6918ed859e084c5a87a51808c753cb7ff84ff",
+    "bytes": 4875,
+    "availability": "private/not included",
+    "interpretation": "original local frozen artifact; not a clickable published evidence link"
+  },
+  "originalAuthorReportedVerification": {
+    "schemaVersion": 1,
+    "date": "2026-10-11",
+    "scope": "artifact_consumption_and_preparation_utility_not_harness_execution",
+    "preparedInstances": [
+      {
+        "cardId": "M01",
+        "variant": "v1",
+        "split": "development",
+        "goalSha256": "f40f16983603df6e79d503a19fed168c56391d7bd9b58105f9166f3846157503",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "M01",
+        "variant": "v2",
+        "split": "heldout",
+        "goalSha256": "b05b1c91c9c0421b5580177627053e304b1ecdf928213a6e8b1c9a6fda8123e0",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "M02",
+        "variant": "v1",
+        "split": "development",
+        "goalSha256": "550b2ad7864b14a6612bdc8b2354b9abba45b180d29552e3c669c4f3a63f9a3f",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "M02",
+        "variant": "v2",
+        "split": "heldout",
+        "goalSha256": "bba47fff59592e3fbab7b5e149ddefa7e80a959d45ec126fd978addf2c103d79",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "M03",
+        "variant": "v1",
+        "split": "development",
+        "goalSha256": "71a9ccdec72655e0294cc8b67825413e2af4ef7945107012f9f873fce5a2132e",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "M03",
+        "variant": "v2",
+        "split": "heldout",
+        "goalSha256": "1951446394487baacd58e3069d3b24c48bbbd150b89d4c820c69b9d516da3ba3",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "CP01",
+        "variant": "v1",
+        "split": "development",
+        "goalSha256": "7f4791d398deaebd72b193f2737b2ab38769f73327e252304dbb38802a984bc2",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "CP01",
+        "variant": "v2",
+        "split": "heldout",
+        "goalSha256": "17b4a8d84cdcbb2c4fd95a12a80eb7586569e2e9ca58c497bdf7a90bf63b111b",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "CP02",
+        "variant": "v1",
+        "split": "development",
+        "goalSha256": "b6b1aabfeb373d2b52f109843ab16ab98942e86e8b8138e069042fa7db9ae7ff",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "CP02",
+        "variant": "v2",
+        "split": "heldout",
+        "goalSha256": "151f5c13c5d2883cd4b1c29fefc76060cde1237291346a2596dbf32c41b53205",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "CP03",
+        "variant": "v1",
+        "split": "development",
+        "goalSha256": "265517341b59b765a0f8ebc7318d11952e083e0c40b96e77a06a0c875d7ee8b0",
+        "goalRendered": true,
+        "actualTaskRun": false
+      },
+      {
+        "cardId": "CP03",
+        "variant": "v2",
+        "split": "heldout",
+        "goalSha256": "302b12f4462f82eb93637744a11d53c552c2c7b0ff2842f4e11f9345e0e33e0f",
+        "goalRendered": true,
+        "actualTaskRun": false
+      }
+    ],
+    "rejectedInputs": [
+      {
+        "case": "unknown_family",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: family必须唯一存在"
+      },
+      {
+        "case": "wrong_weekday",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: 目标日期与冻结星期条件不一致"
+      },
+      {
+        "case": "missing_target_date",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: M02须提供已人工核对可见表头的--target-date"
+      },
+      {
+        "case": "missing_output_path",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: 文件任务必须指定--output-file"
+      },
+      {
+        "case": "relative_output_path",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: 输出须为Windows绝对.txt路径，不能是相对路径"
+      },
+      {
+        "case": "invalid_date",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: argument --target-date: 日期必须为YYYY-MM-DD"
+      },
+      {
+        "case": "weekend_consultation",
+        "exitCode": 2,
+        "stderr": "prepare-instance.py: error: 期望咨询日期须为运行日后3天内的工作日；不是服务预约"
+      }
+    ],
+    "syntheticArithmetic": {
+      "v1ExpectedYuan": "68.55",
+      "v2ExpectedYuan": "112.90",
+      "annualTier350And500BoundaryChecks": "passed"
+    },
+    "notPerformed": [
+      "Windows Run",
+      "model API",
+      "real account login",
+      "real payment or appointment",
+      "operator humanReview",
+      "business scoring",
+      "D02 stability run"
+    ],
+    "artifactChecks": {
+      "lockedFileCount": 18,
+      "hashAndBytes": "passed",
+      "publicScreenshotCount": 9,
+      "screenshotHashes": "passed",
+      "localMarkdownLinksCheckedBeforeReport": 17,
+      "localLinks": "passed",
+      "manifestSplitAndIdentity": "passed",
+      "utf8Text": "passed",
+      "providerOrHarnessInvoked": false,
+      "browserTabsReleased": true,
+      "windowsExecutionReleased": false
+    }
+  },
+  "publication": {
+    "consumptionChecksRun": false,
+    "buildsTestsLintersFormattersRun": false,
+    "historicalPassedFieldsApplyTo": "original private frozen package only; not publication bytes",
+    "visualPrivacyInspection": "nine original public webpage images individually opened before copy; no contributor credentials/account/private desktop seen",
+    "rawTrajectoriesOrPrivateRuntimeLogsIncluded": false,
+    "runId": null,
+    "runtimeOutcome": null,
+    "businessScore": null,
+    "cost": null,
+    "taskInitialStateReleased": false,
+    "realRunReleased": false,
+    "scoringReleased": false,
+    "D02Released": false,
+    "manifestAndGoalPolicy": "original manifest bytes copied unchanged; original Goal templates untouched",
+    "publicationByteChangesWithoutContractSemanticChanges": [
+      "README publication paths and authorization wording",
+      "entry-evidence privacy cleanup and screenshot attribution",
+      "oracle-guidance internal role wording",
+      "publication freeze-lock and verification provenance"
+    ]
+  }
+}

@@ -1,6 +1,7 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { CuaDriverLike, ToolResult as CuaToolResult } from "@trycua/cua-driver";
 import type { ToolCall, ToolCallId } from "@computer-harness/protocol";
@@ -14,14 +15,17 @@ import {
   type ManagedBrowserTarget,
 } from "@computer-harness/computer-cua";
 import { CuaDriverComputer } from "../../computer-cua/src/cua-driver-computer.js";
+import { installFakeCuaSdkModuleForTests } from "../../computer-cua/src/cua-sdk-test-support.js";
 import { ApplicationSession, type ApplicationSessionConfig } from "./application-session.js";
 import { createComputer } from "./computers.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
 
 const BROWSER_TARGET: CuaWindowTarget = { pid: 7101, windowId: 71011 };
 const NATIVE_TARGET: CuaWindowTarget = { pid: 7202, windowId: 72022 };
+const RECOVERY_TARGET: CuaWindowTarget = { pid: 7202, windowId: 72023 };
 const THIRD_TARGET: CuaWindowTarget = { pid: 7303, windowId: 73033 };
 const WINDOW_BOUNDS = { x: 100, y: 120, width: 100, height: 100 };
+installFakeCuaSdkModuleForTests();
 const ONE_BY_ONE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -35,6 +39,7 @@ type FixtureWindow = CuaWindowTarget & {
 const WINDOWS: readonly FixtureWindow[] = [
   { ...BROWSER_TARGET, title: "Managed Edge", appName: "Microsoft Edge" },
   { ...NATIVE_TARGET, title: "Native Editor", appName: "Editor" },
+  { ...RECOVERY_TARGET, title: "Prepared blank", appName: "TextEdit" },
   { ...THIRD_TARGET, title: "Out of scope", appName: "Other App" },
 ];
 
@@ -42,6 +47,7 @@ type RunStep =
   | { readonly kind: "click"; readonly callId: string; readonly expectedEnabled: boolean }
   | { readonly kind: "list"; readonly callId: string }
   | { readonly kind: "switch"; readonly callId: string; readonly listCallId: string; readonly targetTitle: string }
+  | { readonly kind: "action"; readonly callId: string; readonly name: string; readonly arguments: Record<string, unknown> }
   | { readonly kind: "finish" };
 
 interface ProviderTrace {
@@ -71,6 +77,10 @@ interface FixtureOptions {
   readonly profileRoot?: string;
   readonly failure?: "bootstrap" | "host" | "delegate";
   readonly failDomCapture?: boolean;
+  readonly textEditExecutableUrl?: string;
+  readonly includeRecoveryWindow?: boolean;
+  readonly hybridOutputPath?: string;
+  readonly nativeWebDocumentGrant?: { readonly outputPath: string; readonly expectedExecutableUrl: string };
 }
 
 interface FixtureMetrics {
@@ -81,6 +91,7 @@ interface FixtureMetrics {
   readonly bootstrap: { opens: number; closes: number; failureCleanup: number };
   readonly bootstrapDriver: ReturnType<typeof createDriver>;
   readonly delegateDriver: ReturnType<typeof createDriver>;
+  readonly delegateCalls: ReturnType<typeof createDriver>["calls"];
   readonly domTargets: CuaWindowTarget[];
 }
 
@@ -89,6 +100,15 @@ function pngWithDimensions(width: number, height: number): string {
   bytes.writeUInt32BE(width, 16);
   bytes.writeUInt32BE(height, 20);
   return bytes.toString("base64");
+}
+
+function temporarilySetProcessPlatform(platform: NodeJS.Platform): () => void {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { configurable: true, value: platform });
+  return () => {
+    if (original === undefined) Reflect.deleteProperty(process, "platform");
+    else Object.defineProperty(process, "platform", original);
+  };
 }
 
 function toolResult(overrides: Partial<CuaToolResult> = {}): CuaToolResult {
@@ -102,8 +122,13 @@ function toolResult(overrides: Partial<CuaToolResult> = {}): CuaToolResult {
   };
 }
 
-function createDriver(options: { readonly failStart?: boolean; readonly failCapture?: boolean } = {}) {
+function createDriver(options: { readonly failStart?: boolean; readonly failCapture?: boolean; readonly textEditExecutableUrl?: string; readonly includeRecoveryWindow?: boolean; readonly hybridOutputPath?: string } = {}) {
   const calls: Array<{ readonly name: string; readonly input?: Record<string, unknown> }> = [];
+  let hybridDocumentClean = false;
+  let hybridPrimaryClosed = false;
+  let hybridReopenCount = 0;
+  let hybridTypedText = "";
+  const reopenedWindowId = RECOVERY_TARGET.windowId + 1;
   const driver = {
     async startSession() {
       calls.push({ name: "startSession" });
@@ -132,6 +157,8 @@ function createDriver(options: { readonly failStart?: boolean; readonly failCapt
       if (name === "list_windows") {
         const requestedPid = typeof input.pid === "number" ? input.pid : undefined;
         const windows = WINDOWS
+          .filter((window) => options.includeRecoveryWindow === true || window.windowId !== RECOVERY_TARGET.windowId)
+          .filter((window) => !(hybridPrimaryClosed && window.windowId === NATIVE_TARGET.windowId))
           .filter((window) => requestedPid === undefined || window.pid === requestedPid)
           .map((window) => ({
             pid: window.pid,
@@ -139,13 +166,66 @@ function createDriver(options: { readonly failStart?: boolean; readonly failCapt
             title: window.title,
             app_name: window.appName,
             bounds: WINDOW_BOUNDS,
+            is_on_screen: true,
           }));
+        if (options.includeRecoveryWindow === true && hybridReopenCount > 0 && (requestedPid === undefined || requestedPid === NATIVE_TARGET.pid)) {
+          windows.push({ pid: NATIVE_TARGET.pid, window_id: reopenedWindowId, title: "itinerary.txt", app_name: "TextEdit", bounds: WINDOW_BOUNDS, is_on_screen: true });
+        }
         return toolResult({ structuredJson: JSON.stringify({ windows, complete: true }) });
       }
       if (name === "bring_to_front") {
         return toolResult({ structuredJson: JSON.stringify({ landed_on_target: true }) });
       }
+      if (name === "type_text" && options.includeRecoveryWindow === true && typeof options.hybridOutputPath === "string") {
+        hybridTypedText = String(input.text ?? "");
+        hybridDocumentClean = false;
+        return toolResult();
+      }
+      if (name === "hotkey" && options.includeRecoveryWindow === true && Array.isArray(input.keys)) {
+        const keys = input.keys.map((key) => String(key).toUpperCase());
+        if (keys.includes("S") && typeof options.hybridOutputPath === "string") {
+          await writeFile(options.hybridOutputPath, hybridTypedText, "utf8");
+          hybridDocumentClean = true;
+        }
+        if (keys.includes("W")) hybridPrimaryClosed = true;
+        return toolResult();
+      }
+      if (name === "launch_app" && options.includeRecoveryWindow === true) {
+        hybridReopenCount += 1;
+        return toolResult({ structuredJson: JSON.stringify({ pid: NATIVE_TARGET.pid }) });
+      }
       if (name === "get_window_state") {
+        if (input.document_identity_query !== undefined) {
+          const targetPid = Number(input.pid);
+          const windowId = Number(input.window_id);
+          const processStart = { seconds: 1, microseconds: 2 };
+          if (options.includeRecoveryWindow === true) {
+            const isDocument = hybridDocumentClean && (hybridReopenCount > 0 ? windowId === reopenedWindowId : windowId === NATIVE_TARGET.windowId);
+            const target = { pid: targetPid, window_id: windowId, process_start: processStart };
+            return toolResult({ structuredJson: JSON.stringify({ _private_document_proof: {
+              version: "macos-document-identity-v1", snapshot_id: `hybrid-${windowId}-${isDocument ? "doc" : "blank"}`,
+              status: "identity_verified", tail_revalidated: true,
+              target,
+              application_identity: { status: "verified", target: { ...target, bundle_id: "com.apple.TextEdit", executable_url: options.textEditExecutableUrl ?? "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+                instances: [{ pid: targetPid, process_start: processStart, bundle_id: "com.apple.TextEdit", executable_url: options.textEditExecutableUrl ?? "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" }] },
+              frontmost_pid: targetPid, focused_window_id: windowId,
+              window: { role: "AXWindow", pid: targetPid, owner_pid: targetPid, window_id: windowId, bounds: WINDOW_BOUNDS },
+              document: { status: isDocument ? "ok" : "missing", type: "cf_url", matches_expected: isDocument },
+              document_domain: { status: "complete_for_ax_windows", matching_window_ids: isDocument ? [windowId] : [] },
+              edited: { source: "ax_close_button", close_button: { status: "verified", role: "AXButton", subrole: "AXCloseButton", pid: targetPid, window_id: windowId, ax_window_id: windowId, ax_window_matches_target: true }, value: { status: "ok", type: "cf_boolean", value: false } },
+            } }) });
+          }
+          return toolResult({ structuredJson: JSON.stringify({ _private_document_proof: {
+            version: "macos-document-identity-v1", snapshot_id: `initial-${windowId}`, status: "unstable", tail_revalidated: false,
+            target: { pid: targetPid, window_id: windowId, process_start: processStart },
+            application_identity: { status: "verified", target: { pid: targetPid, window_id: windowId, process_start: processStart,
+              bundle_id: "com.apple.TextEdit", executable_url: options.textEditExecutableUrl ?? "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" },
+              instances: [{ pid: targetPid, process_start: processStart, bundle_id: "com.apple.TextEdit",
+                executable_url: options.textEditExecutableUrl ?? "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit" }] },
+            frontmost_pid: targetPid, focused_window_id: windowId,
+            window: { role: "AXWindow", pid: targetPid, owner_pid: targetPid, window_id: windowId, bounds: WINDOW_BOUNDS },
+          } }) });
+        }
         if (input.include_screenshot === true) {
           return toolResult({
             images: [{ mimeType: "image/png", dataBase64: pngWithDimensions(100, 100) }],
@@ -188,10 +268,12 @@ function listedWindowsFrom(input: ModelInput, callId: string): readonly ListedWi
   const result = input.messages
     .flatMap((message) => message.content)
     .find((block) => block.type === "tool_result" && block.result.callId === callId);
-  if (result?.type !== "tool_result" || result.result.status !== "completed" || !Array.isArray(result.result.output)) {
+  const output = result?.type === "tool_result" ? result.result.output : undefined;
+  if (result?.type !== "tool_result" || result.result.status !== "completed" ||
+      output === null || typeof output !== "object" || Array.isArray(output) || !Array.isArray(output.windows)) {
     throw new Error(`fixture could not find completed list_windows result '${callId}'`);
   }
-  return result.result.output as unknown as readonly ListedWindow[];
+  return output.windows as unknown as readonly ListedWindow[];
 }
 
 function scriptedProvider(steps: readonly RunStep[], trace: ProviderTrace): ProviderAdapter {
@@ -224,6 +306,9 @@ function scriptedProvider(steps: readonly RunStep[], trace: ProviderTrace): Prov
           calls: [{ id: step.callId as ToolCallId, name: "list_windows", arguments: {} }],
         };
       }
+      if (step.kind === "action") {
+        return { type: "tool_calls", calls: [{ id: step.callId as ToolCallId, name: step.name, arguments: step.arguments }] };
+      }
       const windows = listedWindowsFrom(input, step.listCallId);
       trace.listedWindows.push(windows);
       pendingListCallId = undefined;
@@ -242,8 +327,8 @@ function scriptedProvider(steps: readonly RunStep[], trace: ProviderTrace): Prov
 
 async function createFixture(outputDir: string, options: FixtureOptions = {}) {
   const providerTrace: ProviderTrace = { inputs: [], toolNames: [], listedWindows: [], selectedRefs: [] };
-  const bootstrapDriver = createDriver({ failStart: options.failure === "bootstrap" });
-  const delegateDriver = createDriver({ failCapture: options.failure === "delegate" });
+  const bootstrapDriver = createDriver({ failStart: options.failure === "bootstrap", textEditExecutableUrl: options.textEditExecutableUrl, includeRecoveryWindow: options.includeRecoveryWindow, hybridOutputPath: options.hybridOutputPath });
+  const delegateDriver = createDriver({ failCapture: options.failure === "delegate", textEditExecutableUrl: options.textEditExecutableUrl, includeRecoveryWindow: options.includeRecoveryWindow, hybridOutputPath: options.hybridOutputPath });
   const hostOptions: ManagedBrowserHostOptions[] = [];
   const delegateOptions: CuaDriverComputerOptions[] = [];
   const host = { starts: 0, closes: 0, transports: 0 };
@@ -350,6 +435,15 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
     ...(options.allowedTargets === undefined ? {} : { windowSwitchAllowedTargets: options.allowedTargets }),
     ...(options.initialGrounding === undefined ? {} : { grounding: options.initialGrounding }),
     ...(options.managedBrowserUrl === undefined ? {} : { managedBrowserUrl: options.managedBrowserUrl }),
+    ...(options.nativeWebDocumentGrant === undefined ? {} : {
+      recoveryWindowTarget: RECOVERY_TARGET,
+      recoverBoundWindowMissing: true,
+      reopenSavedDocumentGrant: {
+        path: options.nativeWebDocumentGrant.outputPath,
+        expectedExecutableUrl: options.nativeWebDocumentGrant.expectedExecutableUrl,
+      },
+      hybridNativeWebDocumentTargets: { primaryTarget: options.initialTarget ?? NATIVE_TARGET, recoveryTarget: RECOVERY_TARGET },
+    }),
     ...(options.profileMode === undefined ? {} : { managedBrowserProfileMode: options.profileMode }),
     ...(options.profileLabel === undefined ? {} : { managedBrowserProfileLabel: options.profileLabel }),
     ...(options.profileRoot === undefined ? {} : { managedBrowserProfileRoot: options.profileRoot }),
@@ -372,6 +466,11 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
     riskTimeoutMs: 100,
     cleanupDeadlineMs: 500,
     ...(options.initialGrounding === undefined ? {} : { grounding: options.initialGrounding }),
+    ...(options.nativeWebDocumentGrant === undefined ? {} : {
+      windowHandoff: "confirm-v1" as const,
+      windowSwitch: "opened-windows-v1" as const,
+      recoverBoundWindowMissing: true,
+    }),
   };
   const session = new ApplicationSession({
     config,
@@ -384,7 +483,7 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
       createComputer: ({ config: runComputer }) => createComputer(runComputer, computerFactoryDependencies),
     },
   });
-  const metrics: FixtureMetrics = { provider: providerTrace, hostOptions, delegateOptions, host, bootstrap, bootstrapDriver, delegateDriver, domTargets };
+  const metrics: FixtureMetrics = { provider: providerTrace, hostOptions, delegateOptions, host, bootstrap, bootstrapDriver, delegateDriver, delegateCalls: delegateDriver.calls, domTargets };
   return { session, metrics };
 }
 
@@ -395,22 +494,90 @@ async function runFixture(session: ApplicationSession, windowSwitch: "off" | "op
 }
 
 describe("managed browser companion through ApplicationSession and the real tool registry", () => {
-  it.each([false, true])("restores desktop/native clicks while browser clicks stay blocked (DOM capture failure: %s)", async (failDomCapture) => {
+  it("keeps Browser research, completed TextEdit close, exact Host recovery, and one reopen in one direct Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "hybrid-browser-textedit-reopen-runtime-"));
+    const canonicalOutputDir = await realpath(outputDir);
+    const profilePath = join(canonicalOutputDir, "itinerary.txt");
+    const executable = join(canonicalOutputDir, "TextEdit.app", "Contents", "MacOS", "TextEdit");
+    await mkdir(join(canonicalOutputDir, "TextEdit.app", "Contents", "MacOS"), { recursive: true });
+    await writeFile(executable, "fixture executable");
+    const executableUrl = pathToFileURL(executable).href;
+    const restorePlatform = temporarilySetProcessPlatform("darwin");
+    const { session, metrics } = await createFixture(outputDir, {
+      includeRecoveryWindow: true,
+      hybridOutputPath: profilePath,
+      textEditExecutableUrl: executableUrl,
+      companion: true,
+      initialTarget: NATIVE_TARGET,
+      allowedTargets: [NATIVE_TARGET, RECOVERY_TARGET],
+      initialGrounding: "hybrid-catalog-v1",
+      managedBrowserUrl: "https://example.test/research",
+      profileMode: "ephemeral",
+      nativeWebDocumentGrant: { outputPath: profilePath, expectedExecutableUrl: executableUrl },
+      steps: [
+        { kind: "list", callId: "t3-list-browser" },
+        { kind: "switch", callId: "t3-switch-browser", listCallId: "t3-list-browser", targetTitle: "Managed Edge" },
+        { kind: "list", callId: "t3-list-textedit" },
+        { kind: "switch", callId: "t3-switch-textedit", listCallId: "t3-list-textedit", targetTitle: "Native Editor" },
+        { kind: "action", callId: "t3-type-document", name: "type", arguments: { text: "Offline itinerary fixture" } },
+        { kind: "action", callId: "t3-save-document", name: "hotkey", arguments: { keys: ["CMD", "S"] } },
+        { kind: "action", callId: "t3-close-document", name: "hotkey", arguments: { keys: ["CMD", "W"] } },
+        { kind: "list", callId: "t3-list-recovery" },
+        { kind: "switch", callId: "t3-select-recovery", listCallId: "t3-list-recovery", targetTitle: "Prepared blank" },
+        { kind: "action", callId: "t3-reopen-once", name: "reopen_saved_document", arguments: {} },
+        { kind: "finish" },
+      ],
+    });
+    try {
+      const handle = await session.startRun("Search the explicitly selected site and save the itinerary in the Host-granted document\n");
+      const outcome = await session.waitForActiveRun();
+      const events = handle.controller.getEvents();
+      const failures = events.filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
+      expect(outcome, JSON.stringify(failures)).toBe("succeeded");
+      expect(metrics.hostOptions[0]).toMatchObject({ url: "https://example.test/research", profileMode: "ephemeral" });
+      expect(metrics.domTargets).toEqual([BROWSER_TARGET]);
+      expect(metrics.delegateCalls.filter((call) => call.name === "launch_app")).toHaveLength(1);
+      expect(metrics.delegateCalls.find((call) => call.name === "launch_app")?.input).toMatchObject({ urls: [pathToFileURL(profilePath).href] });
+      expect(events.some((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing")).toBe(true);
+      expect(events.some((event) => event.type === "computer.window.handoff.completed" && event.target.pid === RECOVERY_TARGET.pid && event.target.windowId === RECOVERY_TARGET.windowId)).toBe(true);
+      const closeProposal = events.find((event) => event.type === "action.proposed" && event.callId === "t3-close-document");
+      const closeReceipt = events.find((event) => event.type === "action.execution.completed" && closeProposal?.type === "action.proposed" && event.receipt.actionId === closeProposal.action.actionId);
+      const missingBoundary = events.find((event) => event.type === "computer.window.handoff.requested" && event.reasonCode === "bound_window_missing");
+      expect(closeReceipt?.type).toBe("action.execution.completed");
+      expect(missingBoundary?.type === "computer.window.handoff.requested" ? missingBoundary.sourceActionId : undefined)
+        .toBe(closeProposal?.type === "action.proposed" ? closeProposal.action.actionId : undefined);
+      expect(events.filter((event) => event.type === "tool.call.received" && event.call.id === "t3-reopen-once")).toHaveLength(1);
+      const reopenProposal = events.find((event) => event.type === "action.proposed" && event.callId === "t3-reopen-once");
+      const reopenReceiptIndex = events.findIndex((event) => event.type === "action.execution.completed" && reopenProposal?.type === "action.proposed" && event.receipt.actionId === reopenProposal.action.actionId);
+      const reopenReceipt = events[reopenReceiptIndex];
+      expect(reopenReceipt?.type === "action.execution.completed" ? reopenReceipt.receipt.sessionAfter : undefined).toBeDefined();
+      expect(events.slice(reopenReceiptIndex + 1).some((event) => event.type === "observation.created")).toBe(true);
+      expect(metrics.delegateCalls.some((call) => call.name === "verifyState" && call.input?.windowId === RECOVERY_TARGET.windowId + 1)).toBe(true);
+      expect(events.filter((event) => event.type === "observation.created").length).toBeGreaterThan(5);
+      expect(metrics.delegateOptions[0]?.windowSwitchAllowedTargets).toEqual([NATIVE_TARGET, RECOVERY_TARGET]);
+    } finally {
+      try { await session.close(); } finally { restorePlatform(); await rm(outputDir, { recursive: true, force: true }); }
+    }
+  });
+
+  it.each([false, true])("keeps raw clicks bound to the exact selected window across Browser/native surfaces (DOM capture failure: %s)", async (failDomCapture) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-companion-surface-click-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
+      initialTarget: NATIVE_TARGET,
+      allowedTargets: [NATIVE_TARGET],
       failDomCapture,
       steps: [
         { kind: "click", callId: "desktop-click", expectedEnabled: true },
         { kind: "list", callId: "desktop-list" },
         { kind: "switch", callId: "to-browser", listCallId: "desktop-list", targetTitle: "Managed Edge" },
-        { kind: "click", callId: "blocked-browser-click", expectedEnabled: false },
+        { kind: "click", callId: "browser-click", expectedEnabled: true },
         { kind: "list", callId: "browser-list" },
         { kind: "switch", callId: "to-native", listCallId: "browser-list", targetTitle: "Native Editor" },
         { kind: "click", callId: "native-click", expectedEnabled: true },
         { kind: "list", callId: "native-list" },
         { kind: "switch", callId: "back-to-browser", listCallId: "native-list", targetTitle: "Managed Edge" },
-        { kind: "click", callId: "blocked-browser-click-again", expectedEnabled: false },
+        { kind: "click", callId: "browser-click-again", expectedEnabled: true },
         { kind: "finish" },
       ],
     });
@@ -419,40 +586,93 @@ describe("managed browser companion through ApplicationSession and the real tool
       const failures = handle.controller.getEvents().filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
       expect(outcome, JSON.stringify(failures)).toBe("succeeded");
       const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
-      expect(clicks).toHaveLength(2);
-      expect(clicks[0]?.input).toMatchObject({ target: { kind: "desktop", display_id: "primary" } });
-      expect(clicks[1]?.input).toMatchObject({ target: { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId } });
+      expect(clicks).toHaveLength(4);
+      expect(clicks[0]?.input).toMatchObject({ target: { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId } });
+      expect(clicks.map((call) => call.input?.target)).toEqual([
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+      ]);
       const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
-      expect(observations.some((event) => event.type === "observation.created" && event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+      expect(observations.some((event) => event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+      expect(observations.some((event) => event.observation.surfaceRef.kind === "native_window")).toBe(true);
     } finally {
       await fixture.session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
   });
 
-  it("keeps the default CUA run on its chosen native window without starting a browser Host", async () => {
-    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-default-"));
-    const fixture = await createFixture(outputDir, { initialTarget: NATIVE_TARGET });
+  it("keeps the full desktop capture scope while activating exact listed windows", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-companion-surface-click-"));
+    const fixture = await createFixture(outputDir, {
+      companion: true,
+      steps: [
+        { kind: "click", callId: "desktop-click", expectedEnabled: true },
+        { kind: "list", callId: "desktop-list" },
+        { kind: "switch", callId: "to-browser", listCallId: "desktop-list", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "browser-click", expectedEnabled: true },
+        { kind: "list", callId: "browser-list" },
+        { kind: "switch", callId: "to-native", listCallId: "browser-list", targetTitle: "Native Editor" },
+        { kind: "click", callId: "native-click", expectedEnabled: true },
+        { kind: "list", callId: "native-list" },
+        { kind: "switch", callId: "back-to-browser", listCallId: "native-list", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "browser-click-after-return", expectedEnabled: true },
+        { kind: "finish" },
+      ],
+    });
     try {
-      const { handle, outcome } = await runFixture(fixture.session, "off");
-      const report = await handle.report();
-      expect(outcome).toBe("succeeded");
-      expect(fixture.metrics.host.starts).toBe(0);
-      expect(fixture.metrics.bootstrap.opens).toBe(0);
-      expect(fixture.metrics.provider.toolNames[0]).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
-      expect(fixture.metrics.delegateOptions[0]).toMatchObject({ windowTarget: NATIVE_TARGET, grounding: "off", windowSwitch: "off" });
-      expect(report.summary.grounding).toBe("off");
-      await fixture.session.close();
+      const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
+      const failures = handle.controller.getEvents().filter((event) => event.type === "runtime.error" || event.type === "action.execution.failed");
+      expect(outcome, JSON.stringify(failures)).toBe("succeeded");
+      expect(handle.config.computer).toMatchObject({
+        managedBrowserCompanion: true,
+        grounding: "hybrid-catalog-v1",
+        windowSwitch: "opened-windows-v1",
+        windowDeliveryMode: "foreground",
+      });
+      expect(handle.controller.getEffectiveToolNames()).toEqual(expect.arrayContaining(["click", "list_windows", "switch_window"]));
+      const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
+      expect(clicks).toHaveLength(4);
+      expect(clicks.map((call) => call.input?.target)).toEqual([
+        { kind: "desktop", display_id: "primary" },
+        { kind: "desktop", display_id: "primary" },
+        { kind: "desktop", display_id: "primary" },
+        { kind: "desktop", display_id: "primary" },
+      ]);
+      for (const click of clicks) {
+        expect(click.input).toMatchObject({
+          target: { kind: "desktop", display_id: "primary" },
+          x: 20,
+          y: 20,
+          delivery_mode: "foreground",
+        });
+      }
+      expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "bring_to_front").map((call) => ({
+        pid: call.input?.pid,
+        window_id: call.input?.window_id,
+      }))).toEqual([
+        { pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        { pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+      ]);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_window_state")).toBe(false);
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((event) => event.observation.surfaceRef.kind === "desktop")).toBe(true);
+      expect(new Set(observations.map((event) => event.observation.surfaceRef.surfaceId)).size).toBe(1);
     } finally {
       await fixture.session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
   });
 
-  it("switches native → managed browser → native → managed browser with fresh refs and browser-only DOM", async () => {
+  it.each([false, true])("keeps native-window rebinding and browser-only DOM routing intact (DOM capture failure: %s)", async (failDomCapture) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-roundtrip-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
+      failDomCapture,
       initialTarget: NATIVE_TARGET,
       allowedTargets: [NATIVE_TARGET, NATIVE_TARGET],
       managedBrowserUrl: "https://fixture.example/path?private=query",
@@ -460,12 +680,16 @@ describe("managed browser companion through ApplicationSession and the real tool
       profileLabel: "fixture.profile",
       profileRoot: "C:\\HarnessOwned\\managed-profiles",
       steps: [
+        { kind: "click", callId: "native-initial-click", expectedEnabled: true },
         { kind: "list", callId: "list-initial" },
         { kind: "switch", callId: "to-browser", listCallId: "list-initial", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "browser-click", expectedEnabled: true },
         { kind: "list", callId: "list-on-browser" },
         { kind: "switch", callId: "to-native", listCallId: "list-on-browser", targetTitle: "Native Editor" },
+        { kind: "click", callId: "native-click-after-return", expectedEnabled: true },
         { kind: "list", callId: "list-on-native" },
         { kind: "switch", callId: "back-to-browser", listCallId: "list-on-native", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "browser-click-after-return", expectedEnabled: true },
         { kind: "finish" },
       ],
     });
@@ -489,7 +713,22 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(fixture.metrics.provider.listedWindows[0]?.some((window) => window.title === "Out of scope")).toBe(false);
       expect(fixture.metrics.provider.listedWindows[0]?.find((window) => window.title === "Native Editor")?.isCurrent).toBe(true);
       expect(new Set(fixture.metrics.provider.selectedRefs).size).toBe(3);
-      expect(fixture.metrics.domTargets).toEqual([BROWSER_TARGET, BROWSER_TARGET]);
+      expect(fixture.metrics.domTargets).toEqual([BROWSER_TARGET, BROWSER_TARGET, BROWSER_TARGET, BROWSER_TARGET]);
+      const clicks = fixture.metrics.delegateDriver.calls.filter((call) => call.name === "click");
+      expect(clicks).toHaveLength(4);
+      expect(clicks.map((call) => call.input?.target)).toEqual([
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        { kind: "window", pid: NATIVE_TARGET.pid, window_id: NATIVE_TARGET.windowId },
+        { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+      ]);
+      for (const click of clicks) {
+        expect(click.input).toMatchObject({ x: 20, y: 20, delivery_mode: "foreground" });
+      }
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.some((event) => event.observation.surfaceRef.kind === "native_window")).toBe(true);
+      expect(observations.some((event) => event.observation.surfaceRef.kind === (failDomCapture ? "browser_tab" : "dom"))).toBe(true);
+      expect(observations.every((event) => event.observation.surfaceRef.kind !== "desktop")).toBe(true);
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "persistent", profileLabel: "fixture.profile", persistentProfileRoot: "C:\\HarnessOwned\\managed-profiles" });
       expect(fixture.metrics.host.starts).toBe(1);
       expect(fixture.metrics.host.closes).toBe(1);
@@ -511,7 +750,7 @@ describe("managed browser companion through ApplicationSession and the real tool
     }
   });
 
-  it("starts on the CUA desktop and exposes the managed browser as a switch target", async () => {
+  it("starts on the CUA desktop and exposes the managed browser as a switch target without leaving desktop scope", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-desktop-"));
     const fixture = await createFixture(outputDir, {
       companion: true,
@@ -530,11 +769,38 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "ephemeral" });
       expect(fixture.metrics.hostOptions[0]).not.toHaveProperty("persistentProfileRoot");
       expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_desktop_state")).toBe(true);
-      expect(fixture.metrics.domTargets).toEqual([BROWSER_TARGET]);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_window_state")).toBe(false);
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "ephemeral" });
       expect(fixture.metrics.provider.listedWindows[0]?.find((window) => window.title === "Managed Edge")?.isCurrent).toBe(false);
       expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "bring_to_front").at(-1)?.input)
         .toMatchObject({ pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId });
+      expect(fixture.metrics.provider.listedWindows).toHaveLength(1);
+      expect(fixture.metrics.provider.selectedRefs).toHaveLength(1);
+      expect(new Set(fixture.metrics.provider.selectedRefs).size).toBe(1);
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((event) => event.observation.surfaceRef.kind === "desktop")).toBe(true);
+      expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
+      await fixture.session.close();
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the default CUA run on its chosen native window without starting a browser Host", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-default-"));
+    const fixture = await createFixture(outputDir, { initialTarget: NATIVE_TARGET });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "off");
+      const report = await handle.report();
+      expect(outcome).toBe("succeeded");
+      expect(fixture.metrics.host.starts).toBe(0);
+      expect(fixture.metrics.bootstrap.opens).toBe(0);
+      expect(fixture.metrics.provider.toolNames[0]).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
+      expect(fixture.metrics.delegateOptions[0]).toMatchObject({ windowTarget: NATIVE_TARGET, grounding: "off", windowSwitch: "off" });
+      expect(report.summary.grounding).toBe("off");
       await fixture.session.close();
     } finally {
       await fixture.session.close();

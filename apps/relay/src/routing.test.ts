@@ -127,6 +127,17 @@ describe("relay API route allowlist", () => {
     }
   });
 
+  it("rejects retired Host native recovery selectors from the public run API", () => {
+    const route = resolveAllowedApiRoute("POST", "/api/runs")!;
+    const request = (target: Record<string, unknown>) => ({ commandId: "retired_start", goal: "Save the supplied local document", target });
+    for (const target of [
+      { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" },
+      { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" },
+      { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", path: "/private/document.txt" },
+      { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345", url: "https://example.test/" },
+    ]) expect(isValidApiRequestBody(route, request(target)), JSON.stringify(target)).toBe(false);
+  });
+
   it("accepts only the shared versioned assistant-preferences snapshot on legacy and tagged starts", () => {
     const route = resolveAllowedApiRoute("POST", "/api/runs");
     expect(route).not.toBeNull();

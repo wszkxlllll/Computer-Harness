@@ -281,6 +281,8 @@ export interface ManagedBrowserStartupPageDiagnostic {
 export interface ManagedBrowserWindowBindingHint {
   readonly browserWindowId: number;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  /** Independently measured scale converting this page's CDP DIP bounds to local CUA backend window units. */
+  readonly browserBoundsToCuaScale?: number;
   readonly ownedProcessIds?: readonly number[];
   readonly onDiagnostic?: (diagnostic: ManagedBrowserWindowResolutionDiagnostic) => void;
 }
@@ -427,6 +429,8 @@ export interface ManagedBrowserPageActivity {
   /** Opaque per-document marker used only to invalidate stale actions. */
   readonly navigationKey?: string;
   readonly browserBounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  /** Scale converting CDP DIP bounds to local platform-specific CUA window units, derived from stable page metrics rather than candidate geometry. */
+  readonly browserBoundsToCuaScale?: number;
 }
 
 export interface ManagedBrowserNavigationReadiness {
@@ -652,6 +656,20 @@ export function selectManagedBrowserStartupActivity(
   return activity === undefined || activity.visibilityState === "unloaded" ? undefined : activity;
 }
 
+export function createManagedBrowserWindowBindingHint(
+  selected: ManagedBrowserPageActivity,
+  ownedProcessIds: Iterable<number>,
+  onDiagnostic?: ManagedBrowserWindowBindingHint["onDiagnostic"],
+): ManagedBrowserWindowBindingHint {
+  return {
+    browserWindowId: selected.browserWindowId,
+    ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
+    ...(selected.browserBoundsToCuaScale === undefined ? {} : { browserBoundsToCuaScale: selected.browserBoundsToCuaScale }),
+    ownedProcessIds: [...ownedProcessIds],
+    ...(onDiagnostic === undefined ? {} : { onDiagnostic }),
+  };
+}
+
 const MANAGED_PAGE_ACTIVITY_SCRIPT = String.raw`({
   visibilityState: document.visibilityState,
   hasFocus: document.hasFocus(),
@@ -675,6 +693,26 @@ interface HostState {
   readonly profileLock: FileHandle | undefined;
 }
 
+// Share the same observation-bound click point across collection and dispatch.
+const MANAGED_DOM_CLICK_POINT_SCRIPT = String.raw`
+  const clickPointRefusal = (element, frame) => {
+    if (!frame || frame.x < 0 || frame.y < 0 || frame.x + frame.width > window.innerWidth || frame.y + frame.height > window.innerHeight) return "DOM_CLICK_CLIPPED";
+    if (element.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) === false) return "DOM_CLICK_OCCLUDED";
+    const x = frame.x + frame.width / 2, y = frame.y + frame.height / 2;
+    let hit = document.elementFromPoint(x, y);
+    for (let depth = 0; depth < 16 && hit?.shadowRoot?.elementFromPoint; depth += 1) {
+      const child = hit.shadowRoot.elementFromPoint(x, y);
+      if (!child || child === hit) break;
+      hit = child;
+    }
+    for (let depth = 0; depth < 16 && hit; depth += 1) {
+      if (hit === element || element.contains?.(hit)) return undefined;
+      hit = hit.getRootNode?.()?.host;
+    }
+    return "DOM_CLICK_OCCLUDED";
+  };
+`;
+
 /**
  * Expression evaluated in the managed page's main world. It intentionally
  * keeps label/reference lookups bounded and never emits node IDs, input values
@@ -683,6 +721,7 @@ interface HostState {
  * remain an explicit boundary and canvas/WebGL stays visual-only.
  */
 export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
+  ${MANAGED_DOM_CLICK_POINT_SCRIPT}
   const cssWidth = Number(window.innerWidth);
   const cssHeight = Number(window.innerHeight);
   const deviceScaleFactor = Number(window.devicePixelRatio);
@@ -690,6 +729,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const candidates = [];
   const seen = new Set();
   let truncated = false;
+  let visibleUntraversedFrame = false;
   const interactiveRoles = new Set(["button", "link", "checkbox", "combobox", "listbox", "menuitem", "option", "radio", "slider", "switch", "tab", "textbox", "treeitem"]);
   const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
   const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
@@ -764,7 +804,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     }
     return textFromElements(explicit, 8, 160, element);
   };
-  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
   const nameOf = (element, role) => {
     const candidates = [
       element.getAttribute("aria-label"),
@@ -778,7 +818,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       if (name !== undefined) return name;
     }
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
-    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
     return allowsTextName ? boundedText(element.textContent, 160) : undefined;
   };
   const optionDescription = (option) => {
@@ -801,6 +841,18 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none" || rect.width <= 0 || rect.height <= 0) return undefined;
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   };
+  const hasVisibleUntraversedFrame = (frame) => {
+    if (typeof frame.checkVisibility === "function" &&
+        frame.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) === false) return false;
+    const style = getComputedStyle(frame);
+    const rect = frame.getBoundingClientRect();
+    const opacity = typeof style.opacity === "string" ? Number(style.opacity) : Number.NaN;
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" ||
+        style.contentVisibility === "hidden" || Number.isFinite(opacity) && opacity === 0 ||
+        rect.width <= 0 || rect.height <= 0 || rect.x >= cssWidth || rect.y >= cssHeight ||
+        rect.x + rect.width <= 0 || rect.y + rect.height <= 0) return false;
+    return true;
+  };
   const visibleNativeSelectOptions = (element) => {
     if (element.localName !== "select") return undefined;
     const nodes = element.options !== undefined && element.options !== null
@@ -820,7 +872,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const isCanvasLike = (element, role) => element.localName === "canvas" || role === "canvas" || role === "webgl" || role === "bitmap";
   const isInteractive = (element, role) => {
     if (element.disabled === true) return true;
-    if (element.tabIndex >= 0 || element.isContentEditable === true) return true;
+    if (element.tabIndex >= 0 || element.isContentEditable === true || typeof element.onclick === "function") return true;
     if (role !== undefined && interactiveRoles.has(role.toLowerCase())) return true;
     return ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName);
   };
@@ -833,11 +885,11 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     seen.add(element);
     const role = roleOf(element);
     const frame = visibleFrame(element);
-    if (frame === undefined || !isInteractive(element, role) || isCanvasLike(element, role)) return;
+    if (frame === undefined || !isInteractive(element, role) || isCanvasLike(element, role) || clickPointRefusal(element, frame) !== undefined) return;
     const name = nameOf(element, role);
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
     const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : undefined;
-    const enabled = element.disabled !== true;
+    const enabled = element.disabled !== true && element.getAttribute("aria-disabled") !== "true";
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
     const optionProjection = visibleNativeSelectOptions(element);
@@ -864,6 +916,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     }
     const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
     for (const element of elements) {
+      if (element.localName === "iframe" && hasVisibleUntraversedFrame(element)) visibleUntraversedFrame = true;
       const role = roleOf(element);
       emit(element);
       if (element.shadowRoot) walk(element.shadowRoot);
@@ -880,7 +933,9 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   walk(document);
   return {
     candidates,
-    complete: !truncated,
+    // Main-document completeness does not cover visible iframe contents,
+    // which use a separate identity and are intentionally not traversed.
+    complete: !truncated && !visibleUntraversedFrame,
     coordinateSpace: "css",
     viewportMetrics: { cssWidth, cssHeight, deviceScaleFactor },
   };
@@ -899,7 +954,7 @@ export function validateOwnedWindowResolution(
     : hint.ownedProcessIds.includes(evidence.processId);
   const boundsMatch = hint?.browserBounds === undefined
     ? true
-    : evidence.windowBounds !== undefined && managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds);
+    : evidence.windowBounds !== undefined && managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds, hint.browserBoundsToCuaScale);
   if (!evidence.ownedByHost || evidence.hostProcessId !== browserProcessId || !processOwned || evidence.processId !== resolution.target.pid || evidence.windowId !== resolution.target.windowId || evidence.windowCount !== 1 || hint?.browserWindowId !== undefined && evidence.browserWindowId !== hint.browserWindowId || !boundsMatch) {
     throw new DomGroundingUnavailableError("managed browser window resolver ownership_mismatch: host ownership was not proven");
   }
@@ -912,19 +967,70 @@ export function validateOwnedWindowResolution(
 export function managedBrowserWindowBoundsMatch(
   left: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
   right: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  browserBoundsToCuaScale = 1,
 ): boolean {
-  if (left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height) return true;
-  // CDP reports browser bounds in device-independent pixels while CUA may
-  // report physical pixels.  Compare dimensions for one common scale and
-  // deliberately ignore the small frame-origin offset.  Process ownership
-  // and uniqueness remain mandatory; geometry is only a safe disambiguator.
-  const widthScale = left.width / right.width;
-  const heightScale = left.height / right.height;
-  const scaleDelta = Math.abs(widthScale - heightScale) / Math.max(widthScale, heightScale);
-  const leftAspect = left.width / left.height;
-  const rightAspect = right.width / right.height;
-  const aspectDelta = Math.abs(leftAspect - rightAspect) / Math.max(leftAspect, rightAspect);
-  return scaleDelta <= 0.08 && aspectDelta <= 0.08;
+  if (!Number.isFinite(browserBoundsToCuaScale) || browserBoundsToCuaScale < 1 || browserBoundsToCuaScale > 8) return false;
+  if (![left.x, left.y, right.x, right.y].every(Number.isSafeInteger) ||
+      ![left.width, left.height, right.width, right.height].every((value) => Number.isSafeInteger(value) && value > 0)) return false;
+  // CDP bounds are DIP. On Windows DWM and Linux X11 inventory use native
+  // screen units, while on macOS both sides use points/DIP. Scale evidence is
+  // collected from the selected page, never inferred from candidate geometry.
+  // Keep the existing 16-DIP frame-difference bound; missing evidence permits
+  // only a direct 1:1 comparison.
+  const tolerance = 16 * browserBoundsToCuaScale;
+  return Math.abs(left.x - right.x * browserBoundsToCuaScale) <= tolerance &&
+    Math.abs(left.y - right.y * browserBoundsToCuaScale) <= tolerance &&
+    Math.abs(left.width - right.width * browserBoundsToCuaScale) <= tolerance &&
+    Math.abs(left.height - right.height * browserBoundsToCuaScale) <= tolerance;
+}
+
+/**
+ * The managed browser and CUA SDK are both local to this Host process. Their
+ * platform-specific window geometry contracts are: Windows DWM physical
+ * pixels vs CDP DIP, Linux pinned X11 root pixels vs CDP DIP, and macOS
+ * CGWindow/Chromium points vs points. This ratio is deliberately separate
+ * from the DOM collector's CSS-to-screenshot deviceScaleFactor.
+ */
+export function browserBoundsToCuaScaleFromPageMetrics(
+  before: unknown,
+  after: unknown,
+  platform: NodeJS.Platform = process.platform,
+): number | undefined {
+  if (platform === "darwin") return 1;
+  if (platform !== "win32" && platform !== "linux") return undefined;
+  const beforeScale = parseManagedBrowserLayoutScale(before);
+  const afterScale = parseManagedBrowserLayoutScale(after);
+  if (beforeScale === undefined || afterScale === undefined ||
+      !closeEnough(beforeScale.pageZoom, afterScale.pageZoom) ||
+      !closeEnough(beforeScale.browserBoundsToCuaScale, afterScale.browserBoundsToCuaScale)) return undefined;
+  return beforeScale.browserBoundsToCuaScale;
+}
+
+interface ManagedBrowserLayoutScale {
+  readonly pageZoom: number;
+  readonly browserBoundsToCuaScale: number;
+}
+
+function parseManagedBrowserLayoutScale(value: unknown): ManagedBrowserLayoutScale | undefined {
+  if (!isRecord(value) || !isRecord(value.visualViewport) || !isRecord(value.cssVisualViewport)) return undefined;
+  const physicalWidth = value.visualViewport.clientWidth;
+  const physicalHeight = value.visualViewport.clientHeight;
+  const cssWidth = value.cssVisualViewport.clientWidth;
+  const cssHeight = value.cssVisualViewport.clientHeight;
+  const pageZoom = value.cssVisualViewport.zoom;
+  if (![physicalWidth, physicalHeight, cssWidth, cssHeight, pageZoom].every((item) =>
+    typeof item === "number" && Number.isFinite(item) && item > 0) || (pageZoom as number) > 8) return undefined;
+  const widthCssToPhysical = (physicalWidth as number) / (cssWidth as number);
+  const heightCssToPhysical = (physicalHeight as number) / (cssHeight as number);
+  if (!closeEnough(widthCssToPhysical, heightCssToPhysical)) return undefined;
+  const browserBoundsToCuaScale = ((widthCssToPhysical + heightCssToPhysical) / 2) / (pageZoom as number);
+  if (!Number.isFinite(browserBoundsToCuaScale) || browserBoundsToCuaScale < 1 || browserBoundsToCuaScale > 8) return undefined;
+  return { pageZoom: pageZoom as number, browserBoundsToCuaScale };
+}
+
+function closeEnough(left: number, right: number): boolean {
+  const tolerance = Math.max(1e-6, Math.max(Math.abs(left), Math.abs(right)) * 1e-6);
+  return Math.abs(left - right) <= tolerance;
 }
 
 export class ManagedBrowserHost {
@@ -987,6 +1093,7 @@ export class ManagedBrowserHost {
         "--no-default-browser-check",
         "--disable-sync",
         "--disable-extensions",
+        "--force-renderer-accessibility",
         "--new-window",
         ...launchUrls,
       ];
@@ -1009,9 +1116,11 @@ export class ManagedBrowserHost {
       stage = "create_startup_target";
       const startupTargetId = await createManagedBrowserPage(browserEndpoint, this.options.url, signal);
       const needsNavigationReadiness = this.options.url.startsWith("http://") || this.options.url.startsWith("https://");
-      // HTTP(S) needs a bounded redirect/DOM readiness window. Blank and data
-      // startup pages retain the original 3-second active-page selection cap.
-      const startupReadyDeadline = Date.now() + Math.min(this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, needsNavigationReadiness ? 8_000 : 3_000);
+      // HTTP(S) navigation honors the configured bounded startup timeout.
+      // Blank and data pages retain the short active-page selection budget.
+      const startupTimeoutMs = this.options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+      const startupReadyDeadline = Date.now() + (needsNavigationReadiness ? startupTimeoutMs : Math.min(startupTimeoutMs, 3_000));
+      stage = "resolve_startup_page";
       if (needsNavigationReadiness) {
         const startupPage = await waitForManagedBrowserNavigationReady(
           { id: startupTargetId, type: "page" },
@@ -1058,12 +1167,11 @@ export class ManagedBrowserHost {
       const tabId = selected.page.id as string;
       stage = "discover_owned_processes";
       const ownedProcessIds = await discoverManagedBrowserProcessIds(ownedProcessId, profileRoot, signal);
-      const windowHint: ManagedBrowserWindowBindingHint = {
-        browserWindowId: selected.browserWindowId,
-        ...(selected.browserBounds === undefined ? {} : { browserBounds: selected.browserBounds }),
-        ownedProcessIds: [...ownedProcessIds],
-        ...(this.options.onWindowResolutionDiagnostic === undefined ? {} : { onDiagnostic: this.options.onWindowResolutionDiagnostic }),
-      };
+      const windowHint = createManagedBrowserWindowBindingHint(
+        selected,
+        ownedProcessIds,
+        this.options.onWindowResolutionDiagnostic,
+      );
       stage = "resolve_owned_window";
       const resolution = await this.options.resolveOwnedWindowTarget(ownedProcessId, signal, windowHint);
       const windowTarget = validateOwnedWindowResolution(ownedProcessId, resolution, windowHint);
@@ -1317,7 +1425,9 @@ export class ManagedBrowserHost {
         ...(request.candidate.frame === undefined ? {} : { frame: request.candidate.frame }),
         fingerprint: request.candidate.fingerprint,
       });
-      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }, signal);
+      // Only a dispatched click represents a user gesture. Read-only probes
+      // must not grant activation to page code or consume popup permission.
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false, userGesture: !verifyFocusOnly && !validateOnly }, signal);
       const value = response?.result?.result?.value;
       if (!isRecord(value) || (value.status !== "completed" && value.status !== "refused" && value.status !== "failed")) {
         return { status: "failed", driverCode: "DOM_CLICK_EVALUATION_INVALID", message: "managed-browser DOM click evaluation returned an invalid result" };
@@ -1573,11 +1683,12 @@ export function buildManagedDomClickExpression(input: {
 }): string {
   const encoded = JSON.stringify(input);
   return String.raw`(function(target) {
+    ${MANAGED_DOM_CLICK_POINT_SCRIPT}
     const MAX_ELEMENTS = 512;
     const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
     const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
     const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
-    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 ? "generic" : undefined), 64);
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
     const boundedText = (value, max) => {
       if (typeof value !== "string") return undefined;
       const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
@@ -1661,7 +1772,7 @@ export function buildManagedDomClickExpression(input: {
         if (name !== undefined) return name;
       }
       const roleName = typeof role === "string" ? role.toLowerCase() : "";
-      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link";
+      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
       return allowsTextName ? boundedText(element.textContent, 160) : undefined;
     };
     const frameOf = (element) => {
@@ -1693,7 +1804,7 @@ export function buildManagedDomClickExpression(input: {
         seen.add(element);
         const role = roleOf(element);
         const frame = frameOf(element);
-        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || role !== "";
+        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || typeof element.onclick === "function" || role !== "";
         if (frame !== undefined && interactive && !["canvas", "img"].includes(element.localName)) {
           const name = nameOf(element, role);
           candidates.push({ element, role, name, frame, fingerprint: fingerprintOf(element, role, name) });
@@ -1705,7 +1816,7 @@ export function buildManagedDomClickExpression(input: {
     walk(document);
     const role = normalize(target.role, 64);
     const name = normalize(target.name, 160);
-    const roleMatches = candidates.filter((candidate) => candidate.role === role && candidate.name === name);
+    const roleMatches = candidates.filter((candidate) => candidate.role === role && normalize(candidate.name, 160) === name);
     const matches = roleMatches.filter((candidate) => candidate.fingerprint === target.fingerprint && sameFrame(candidate.frame, target.frame));
     if (matches.length === 0) {
       if (roleMatches.some((candidate) => sameFrame(candidate.frame, target.frame))) return { status: "refused", driverCode: "DOM_CLICK_CANDIDATE_STALE", message: "DOM candidate fingerprint changed" };
@@ -1720,22 +1831,11 @@ export function buildManagedDomClickExpression(input: {
       if (!editable || !document.hasFocus() || (element.getRootNode?.() ?? document).activeElement !== element) return { status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH", message: "managed-browser page/control does not own keyboard focus; no keyboard input was sent" };
       return { status: "completed", message: "managed-browser input focus verified" };
     }
-    if (target.validateOnly === true) {
-      // Native dispatch uses the observation-bound CSS center transformed by
-      // the Adapter, rather than the potentially drifted live frame center.
-      const frame = target.frame;
-      // A clipped public bbox has a different native center from the raw
-      // CSS frame. Reject rather than validate one point and dispatch another.
-      if (frame.x < 0 || frame.y < 0 || frame.x + frame.width > window.innerWidth || frame.y + frame.height > window.innerHeight) return { status: "refused", driverCode: "DOM_CLICK_CLIPPED", message: "managed-browser control is partly outside the viewport; scroll into full view and observe again; no input sent" };
-      let hit = document.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
-      for (let depth = 0; depth < 16 && hit?.shadowRoot?.elementFromPoint; depth += 1) {
-        const child = hit.shadowRoot.elementFromPoint(frame.x + frame.width / 2, frame.y + frame.height / 2);
-        if (!child || child === hit) break;
-        hit = child;
-      }
-      if (hit !== element && !element.contains?.(hit)) return { status: "refused", driverCode: "DOM_CLICK_OCCLUDED", message: "managed-browser click point is obscured; no input sent" };
-      return { status: "completed", message: "managed-browser click candidate verified; no input sent" };
-    }
+    const refusal = clickPointRefusal(element, target.frame);
+    if (refusal !== undefined) return { status: "refused", driverCode: refusal, message: refusal === "DOM_CLICK_CLIPPED"
+      ? "managed-browser control is partly outside the viewport; scroll into full view and observe again; no input sent"
+      : "managed-browser click point is obscured; no input sent" };
+    if (target.validateOnly === true) return { status: "completed", message: "managed-browser click candidate verified; no input sent" };
     try {
       // Programmatic click does not perform the browser's native focus default.
       // This assists an editable control; verifyFocus still gates later input.
@@ -1920,7 +2020,7 @@ export async function waitForDevToolsPort(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
-    if (child.exitCode !== null) throw new DomGroundingUnavailableError("managed browser exited before DevTools became ready");
+    if (managedBrowserLauncherFailed(child)) throw new DomGroundingUnavailableError("managed browser exited before DevTools became ready");
     try {
       const portFile = join(profileRoot, "DevToolsActivePort");
       const metadata = await stat(portFile);
@@ -1949,7 +2049,7 @@ export async function waitForDevToolsBrowserEndpoint(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
-    if (child.exitCode !== null) throw new DomGroundingUnavailableError("managed browser exited before DevTools endpoint became ready");
+    if (managedBrowserLauncherFailed(child)) throw new DomGroundingUnavailableError("managed browser exited before DevTools endpoint became ready");
     try {
       return await readEndpoint(port, signal);
     } catch (error) {
@@ -1959,6 +2059,18 @@ export async function waitForDevToolsBrowserEndpoint(
     await wait(50, signal);
   }
   throw new DomGroundingUnavailableError("managed browser DevTools endpoint startup timed out");
+}
+
+/**
+ * On Windows, a browser launcher may exit successfully while the owned browser
+ * process is still bringing up its DevTools endpoint. That exit is not proof of
+ * readiness: callers still require a fresh port file, live endpoint, and the
+ * existing process/window ownership checks. Failed or signaled children remain
+ * immediate startup failures.
+ */
+function managedBrowserLauncherFailed(child: ChildProcess): boolean {
+  if (child.signalCode !== null && child.signalCode !== undefined) return true;
+  return child.exitCode !== null && child.exitCode !== undefined && child.exitCode !== 0;
 }
 
 export async function cleanupManagedBrowser(
@@ -2213,18 +2325,20 @@ async function listDevToolsBrowserWebSocketUrl(port: number, signal: AbortSignal
   }
 }
 
-async function inspectManagedPageActivity(
+export async function inspectManagedPageActivity(
   page: ManagedBrowserDevToolsPage,
   browserWebSocketDebuggerUrl: string,
   signal: AbortSignal,
+  connect: (webSocketUrl: string, signal: AbortSignal) => Promise<Pick<LoopbackWebSocket, "command" | "close">> = LoopbackWebSocket.connect,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ManagedBrowserPageActivity | undefined> {
   const webSocketDebuggerUrl = page.webSocketDebuggerUrl;
   const targetId = page.id;
   if (typeof webSocketDebuggerUrl !== "string" || typeof targetId !== "string") return undefined;
-  let socket: LoopbackWebSocket | undefined;
-  let browserSocket: LoopbackWebSocket | undefined;
+  let socket: Pick<LoopbackWebSocket, "command" | "close"> | undefined;
+  let browserSocket: Pick<LoopbackWebSocket, "command" | "close"> | undefined;
   try {
-    browserSocket = await LoopbackWebSocket.connect(browserWebSocketDebuggerUrl, signal);
+    browserSocket = await connect(browserWebSocketDebuggerUrl, signal);
     const windowResponse = await browserSocket.command("Browser.getWindowForTarget", { targetId }, signal);
     const browserWindowId = windowResponse?.result?.windowId;
     if (!Number.isSafeInteger(browserWindowId) || browserWindowId <= 0) return undefined;
@@ -2239,8 +2353,17 @@ async function inspectManagedPageActivity(
     let visibilityState: ManagedBrowserPageActivity["visibilityState"] = "unloaded";
     let hasFocus: boolean | undefined;
     let navigationKey: string | undefined;
+    let pageMetricsBefore: unknown;
+    let pageMetricsAfter: unknown;
     try {
-      socket = await LoopbackWebSocket.connect(webSocketDebuggerUrl, signal);
+      socket = await connect(webSocketDebuggerUrl, signal);
+      if (platform === "win32" || platform === "linux") {
+        try {
+          pageMetricsBefore = await readManagedPageLayoutMetrics(socket, signal);
+        } catch (error) {
+          if (signal.aborted) throw error;
+        }
+      }
       const visibilityResponse = await socket.command("Runtime.evaluate", { expression: MANAGED_PAGE_ACTIVITY_SCRIPT, returnByValue: true, awaitPromise: false }, signal);
       const visibilityValue = visibilityResponse?.result?.result?.value;
       const candidateVisibility = isRecord(visibilityValue) ? visibilityValue.visibilityState : undefined;
@@ -2251,10 +2374,23 @@ async function inspectManagedPageActivity(
       if (isRecord(visibilityValue) && typeof visibilityValue.navigationKey === "string" && /^[0-9]+(?:\.[0-9]+)?$/u.test(visibilityValue.navigationKey)) {
         navigationKey = visibilityValue.navigationKey.slice(0, 64);
       }
-    } catch {
+      if (pageMetricsBefore !== undefined && (platform === "win32" || platform === "linux")) {
+        try {
+          pageMetricsAfter = await readManagedPageLayoutMetrics(socket, signal);
+        } catch (error) {
+          if (signal.aborted) throw error;
+        }
+      }
+    } catch (error) {
+      if (signal.aborted) throw error;
       // Browser-internal or transient page targets may reject Runtime.evaluate;
       // retain their window identity and treat them as non-active.
     }
+    const browserBoundsToCuaScale = browserBoundsToCuaScaleFromPageMetrics(
+      pageMetricsBefore,
+      pageMetricsAfter,
+      platform,
+    );
     return {
       page,
       browserWindowId,
@@ -2262,6 +2398,7 @@ async function inspectManagedPageActivity(
       ...(hasFocus === undefined ? {} : { hasFocus }),
       ...(navigationKey === undefined ? {} : { navigationKey }),
       ...(browserBounds === undefined ? {} : { browserBounds }),
+      ...(browserBoundsToCuaScale === undefined ? {} : { browserBoundsToCuaScale }),
     };
   } catch (error) {
     if (signal.aborted) throw error;
@@ -2270,6 +2407,11 @@ async function inspectManagedPageActivity(
     socket?.close();
     browserSocket?.close();
   }
+}
+
+async function readManagedPageLayoutMetrics(socket: Pick<LoopbackWebSocket, "command">, signal: AbortSignal): Promise<unknown> {
+  const response = await socket.command("Page.getLayoutMetrics", {}, signal);
+  return response?.result;
 }
 
 function parseBrowserBounds(value: unknown): ManagedBrowserPageActivity["browserBounds"] {

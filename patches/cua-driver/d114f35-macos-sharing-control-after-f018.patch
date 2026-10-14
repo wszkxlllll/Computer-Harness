@@ -1,0 +1,2330 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs
+index ee7b6c4..8055078 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs
+@@ -20,6 +20,7 @@ pub mod bindings;
+ pub mod cache;
+ pub mod enablement;
+ pub mod exact_target;
++pub(crate) mod ordinary_sharing_control;
+ pub mod tree;
+ pub mod window_scope;
+ 
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs
+new file mode 100644
+index 0000000..d1b7f40
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs
+@@ -0,0 +1,1406 @@
++//! Fail-closed classification for the system Window Sharing capture control.
++//!
++//! Only a complete, narrow AX tree can remove a same-process layer-0 control
++//! from ordinary-window z-order. Point hit testing and the all-layer occlusion
++//! snapshot deliberately do not call this module.
++
++#![allow(non_upper_case_globals)]
++
++use super::bindings::{
++    kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess, AXUIElementCopyAttributeValue,
++    AXUIElementCreateApplication, AXUIElementGetPid, AXUIElementGetTypeID, AXUIElementRef,
++    AXUIElementSetMessagingTimeout,
++};
++use core_foundation::{
++    array::CFArray,
++    base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType},
++    boolean::CFBoolean,
++    string::CFString,
++};
++use serde::Serialize;
++use std::{cell::RefCell, time::Instant};
++
++const MAX_WINDOWS: usize = 32;
++const MAX_NODES: usize = 2;
++const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.025;
++const EXPECTED_CONTROL: &str = "WindowSharingSessionButton";
++
++thread_local! {
++    static AX_DEADLINE: RefCell<Option<Instant>> = const { RefCell::new(None) };
++}
++
++struct DeadlineScope(Option<Instant>);
++
++impl Drop for DeadlineScope {
++    fn drop(&mut self) {
++        AX_DEADLINE.with(|deadline| *deadline.borrow_mut() = self.0);
++    }
++}
++
++fn use_deadline<T>(deadline: Instant, f: impl FnOnce() -> T) -> T {
++    let old = AX_DEADLINE.with(|cell| cell.replace(Some(deadline)));
++    let _scope = DeadlineScope(old);
++    f()
++}
++
++fn deadline_remaining() -> Option<std::time::Duration> {
++    AX_DEADLINE.with(|cell| {
++        cell.borrow()
++            .as_ref()
++            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
++    })
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++enum Checked<T> {
++    Value(T),
++    Missing,
++    Unsupported,
++    ReadError,
++    WrongType,
++    Truncated,
++}
++
++impl<T> Checked<T> {
++    fn status(&self) -> &'static str {
++        match self {
++            Self::Value(_) => "value",
++            Self::Missing => "missing",
++            Self::Unsupported => "unsupported",
++            Self::ReadError => "read_error",
++            Self::WrongType => "wrong_type",
++            Self::Truncated => "truncated",
++        }
++    }
++
++    fn map<U>(self, f: impl FnOnce(T) -> U) -> Checked<U> {
++        match self {
++            Self::Value(value) => Checked::Value(f(value)),
++            Self::Missing => Checked::Missing,
++            Self::Unsupported => Checked::Unsupported,
++            Self::ReadError => Checked::ReadError,
++            Self::WrongType => Checked::WrongType,
++            Self::Truncated => Checked::Truncated,
++        }
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum Classification {
++    SharingControl,
++    Ordinary,
++    Unknown,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum Decision {
++    ExcludedFromOrdinaryRank,
++    Retained,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum Reason {
++    ExactNarrowSharingControl,
++    IncompleteSnapshot,
++    TooManyWindows,
++    AxWindowsUnavailable,
++    AxWindowNotUnique,
++    IdentityMismatch,
++    RootRoleMismatch,
++    RootSubroleUnknown,
++    ModalOrMainOrFocused,
++    RootChildrenNotExact,
++    ChildRoleMismatch,
++    ChildHasChildren,
++    ContentAttributePresent,
++    SemanticMismatch,
++    SemanticUnavailable,
++    RelationUnknown,
++    FocusOrForegroundMismatch,
++    FocusOrForegroundUnknown,
++    FreshTailMismatch,
++    AttributeReadUnknown,
++    DeadlineExceeded,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum SemanticSource {
++    Identifier,
++    Title,
++    Description,
++    None,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub(crate) struct ClassificationDiagnostic {
++    schema: &'static str,
++    snapshot_status: &'static str,
++    candidate_pid: i32,
++    candidate_cgid: u32,
++    classification: Classification,
++    decision: Decision,
++    reason: Reason,
++    ax_windows_status: &'static str,
++    exact_ax_window_count: Option<usize>,
++    root_role_status: &'static str,
++    root_subrole_status: &'static str,
++    exact_child_count: Option<usize>,
++    child_role_status: &'static str,
++    semantic_source: SemanticSource,
++    focused_window_status: &'static str,
++    focused_element_status: &'static str,
++    front_process_status: &'static str,
++    relation_status: &'static str,
++    fresh_tail_status: &'static str,
++    point_occlusion_policy: &'static str,
++}
++
++impl ClassificationDiagnostic {
++    pub(crate) fn is_sharing_control(&self) -> bool {
++        self.classification == Classification::SharingControl
++    }
++
++    pub(crate) fn is_excluded(&self) -> bool {
++        self.classification == Classification::SharingControl
++            && self.decision == Decision::ExcludedFromOrdinaryRank
++            && self.fresh_tail_status == "matched"
++    }
++}
++
++impl ClassificationDiagnostic {
++    fn unknown(pid: i32, cgid: u32, reason: Reason, snapshot_status: &'static str) -> Self {
++        Self {
++            schema: "cua.ordinary_window_classification.v1",
++            snapshot_status,
++            candidate_pid: pid,
++            candidate_cgid: cgid,
++            classification: Classification::Unknown,
++            decision: Decision::Retained,
++            reason,
++            ax_windows_status: "not_checked",
++            exact_ax_window_count: None,
++            root_role_status: "not_checked",
++            root_subrole_status: "not_checked",
++            exact_child_count: None,
++            child_role_status: "not_checked",
++            semantic_source: SemanticSource::None,
++            focused_window_status: "not_checked",
++            focused_element_status: "not_checked",
++            front_process_status: "not_checked",
++            relation_status: "not_checked",
++            fresh_tail_status: "not_checked",
++            point_occlusion_policy: "retained",
++        }
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct Relation {
++    pid: i32,
++    cgid: Checked<u32>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct RootEvidence {
++    pid: Checked<i32>,
++    cgid: Checked<u32>,
++    role: Checked<String>,
++    subrole: Checked<String>,
++    modal: Checked<bool>,
++    main: Checked<bool>,
++    focused: Checked<bool>,
++    children: Checked<usize>,
++    forbidden_content: Checked<bool>,
++    window_relation: Checked<Relation>,
++    parent_relation: Checked<Relation>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ChildEvidence {
++    pid: Checked<i32>,
++    cgid: Checked<u32>,
++    role: Checked<String>,
++    modal: Checked<bool>,
++    main: Checked<bool>,
++    focused: Checked<bool>,
++    children: Checked<usize>,
++    forbidden_content: Checked<bool>,
++    identifier: Checked<String>,
++    title: Checked<String>,
++    description: Checked<String>,
++    window_relation: Checked<Relation>,
++    parent_relation: Checked<Relation>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct CandidateEvidence {
++    pid: i32,
++    cgid: u32,
++    snapshot_complete: bool,
++    ax_windows_count: Checked<usize>,
++    root: RootEvidence,
++    child: ChildEvidence,
++    focused_window: Checked<u32>,
++    focused_element_window: Checked<u32>,
++    front_process_matches_target: Option<bool>,
++    focus_window_target: u32,
++    semantic_source: SemanticSource,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct Classified {
++    classification: Classification,
++    reason: Reason,
++    semantic_source: SemanticSource,
++    root_role_status: &'static str,
++    root_subrole_status: &'static str,
++    exact_child_count: Option<usize>,
++    child_role_status: &'static str,
++    focused_window_status: &'static str,
++    focused_element_status: &'static str,
++    front_process_status: &'static str,
++    relation_status: &'static str,
++    ax_windows_status: &'static str,
++    ax_windows_count: Option<usize>,
++}
++
++fn result(e: &CandidateEvidence, class: Classification, reason: Reason) -> Classified {
++    Classified {
++        classification: class,
++        reason,
++        semantic_source: e.semantic_source,
++        root_role_status: e.root.role.status(),
++        root_subrole_status: e.root.subrole.status(),
++        exact_child_count: match e.root.children {
++            Checked::Value(n) => Some(n),
++            _ => None,
++        },
++        child_role_status: e.child.role.status(),
++        focused_window_status: e.focused_window.status(),
++        focused_element_status: e.focused_element_window.status(),
++        front_process_status: match e.front_process_matches_target {
++            Some(true) => "matches_target",
++            Some(false) => "different_process",
++            None => "unavailable",
++        },
++        relation_status: "checked",
++        ax_windows_status: e.ax_windows_count.status(),
++        ax_windows_count: match e.ax_windows_count {
++            Checked::Value(n) => Some(n),
++            _ => None,
++        },
++    }
++}
++
++fn read_required_false(value: &Checked<bool>) -> bool {
++    matches!(value, Checked::Value(false))
++}
++
++fn optional_false(value: &Checked<bool>) -> bool {
++    matches!(
++        value,
++        Checked::Value(false) | Checked::Missing | Checked::Unsupported
++    )
++}
++
++fn semantic_source(e: &CandidateEvidence) -> Result<SemanticSource, Reason> {
++    let id = match &e.child.identifier {
++        Checked::Value(value) if value == EXPECTED_CONTROL => Some(SemanticSource::Identifier),
++        Checked::Value(_) => return Err(Reason::SemanticMismatch),
++        Checked::Missing | Checked::Unsupported => None,
++        Checked::ReadError | Checked::WrongType | Checked::Truncated => {
++            return Err(Reason::SemanticUnavailable);
++        }
++    };
++    let title = match &e.child.title {
++        Checked::Value(value) if value == EXPECTED_CONTROL => Some(SemanticSource::Title),
++        Checked::Value(_) => return Err(Reason::SemanticMismatch),
++        Checked::Missing | Checked::Unsupported => None,
++        Checked::ReadError | Checked::WrongType | Checked::Truncated => {
++            return Err(Reason::SemanticUnavailable);
++        }
++    };
++    let description = match &e.child.description {
++        Checked::Value(value) if value == EXPECTED_CONTROL => Some(SemanticSource::Description),
++        Checked::Value(_) => return Err(Reason::SemanticMismatch),
++        Checked::Missing | Checked::Unsupported => None,
++        Checked::ReadError | Checked::WrongType | Checked::Truncated => {
++            return Err(Reason::SemanticUnavailable);
++        }
++    };
++    id.or(title)
++        .or(description)
++        .ok_or(Reason::SemanticUnavailable)
++}
++
++fn classify(e: &CandidateEvidence) -> Classified {
++    let unknown = |reason| result(e, Classification::Unknown, reason);
++    let ordinary = |reason| result(e, Classification::Ordinary, reason);
++    if !e.snapshot_complete {
++        return unknown(Reason::IncompleteSnapshot);
++    }
++    if !matches!(e.ax_windows_count, Checked::Value(1)) {
++        return unknown(match e.ax_windows_count {
++            Checked::Value(_) => Reason::AxWindowNotUnique,
++            Checked::Truncated => Reason::TooManyWindows,
++            _ => Reason::AxWindowsUnavailable,
++        });
++    }
++    if !matches!(e.root.pid, Checked::Value(pid) if pid == e.pid)
++        || !matches!(e.root.cgid, Checked::Value(cgid) if cgid == e.cgid)
++        || !matches!(e.child.pid, Checked::Value(pid) if pid == e.pid)
++        || !matches!(e.child.cgid, Checked::Value(cgid) if cgid == e.cgid)
++    {
++        return unknown(Reason::IdentityMismatch);
++    }
++    if !matches!(e.root.role, Checked::Value(ref role) if role == "AXWindow") {
++        return ordinary(Reason::RootRoleMismatch);
++    }
++    if !matches!(e.root.subrole, Checked::Unsupported) {
++        return unknown(Reason::RootSubroleUnknown);
++    }
++    if !read_required_false(&e.root.modal)
++        || !read_required_false(&e.root.main)
++        || !read_required_false(&e.root.focused)
++        || !optional_false(&e.child.modal)
++        || !optional_false(&e.child.main)
++        || !read_required_false(&e.child.focused)
++    {
++        return ordinary(Reason::ModalOrMainOrFocused);
++    }
++    if !matches!(e.root.children, Checked::Value(1)) {
++        return unknown(Reason::RootChildrenNotExact);
++    }
++    if !matches!(e.child.role, Checked::Value(ref role) if role == "AXButton") {
++        return ordinary(Reason::ChildRoleMismatch);
++    }
++    if !matches!(e.child.children, Checked::Value(0)) {
++        return unknown(Reason::ChildHasChildren);
++    }
++    if !matches!(e.root.forbidden_content, Checked::Value(false))
++        || !matches!(e.child.forbidden_content, Checked::Value(false))
++    {
++        return match (&e.root.forbidden_content, &e.child.forbidden_content) {
++            (Checked::Value(true), _) | (_, Checked::Value(true)) => {
++                ordinary(Reason::ContentAttributePresent)
++            }
++            _ => unknown(Reason::AttributeReadUnknown),
++        };
++    }
++    let semantic = match semantic_source(e) {
++        Ok(source) => source,
++        Err(reason @ Reason::SemanticMismatch) => return ordinary(reason),
++        Err(reason) => return unknown(reason),
++    };
++    if e.semantic_source != SemanticSource::None && e.semantic_source != semantic {
++        return unknown(Reason::SemanticMismatch);
++    }
++    if !relation_matches(&e.root.window_relation, e.pid, Some(e.cgid), true)
++        || !relation_matches(&e.root.parent_relation, e.pid, None, false)
++        || !relation_matches(&e.child.window_relation, e.pid, Some(e.cgid), false)
++        || !relation_matches(&e.child.parent_relation, e.pid, Some(e.cgid), false)
++    {
++        return unknown(Reason::RelationUnknown);
++    }
++    if !matches!(e.focused_window, Checked::Value(id) if id == e.focus_window_target)
++        || !matches!(e.focused_element_window, Checked::Value(id) if id == e.focus_window_target)
++        || e.focus_window_target == e.cgid
++    {
++        return unknown(Reason::FocusOrForegroundMismatch);
++    }
++    if e.front_process_matches_target != Some(true) {
++        return unknown(Reason::FocusOrForegroundUnknown);
++    }
++    let mut accepted = result(
++        e,
++        Classification::SharingControl,
++        Reason::ExactNarrowSharingControl,
++    );
++    accepted.semantic_source = semantic;
++    accepted
++}
++
++fn relation_matches(
++    value: &Checked<Relation>,
++    pid: i32,
++    cgid: Option<u32>,
++    required: bool,
++) -> bool {
++    match value {
++        Checked::Value(relation) if relation.pid == pid => match (cgid, &relation.cgid) {
++            (Some(expected), Checked::Value(actual)) => expected == *actual,
++            (None, Checked::Value(_)) => false,
++            (None, Checked::Missing | Checked::Unsupported) => true,
++            _ => false,
++        },
++        Checked::Missing | Checked::Unsupported if !required => true,
++        _ => false,
++    }
++}
++
++struct OwnedElement(AXUIElementRef);
++
++impl Drop for OwnedElement {
++    fn drop(&mut self) {
++        unsafe { CFRelease(self.0 as CFTypeRef) }
++    }
++}
++
++fn copy_value(element: AXUIElementRef, name: &str) -> Result<CFTypeRef, Checked<()>> {
++    unsafe {
++        if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++            return Err(Checked::ReadError);
++        }
++        let attr = CFString::new(name);
++        let mut value: CFTypeRef = std::ptr::null();
++        let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++        if error == kAXErrorSuccess && !value.is_null() {
++            Ok(value)
++        } else {
++            if !value.is_null() {
++                CFRelease(value);
++            }
++            Err(match error {
++                kAXErrorNoValue => Checked::Missing,
++                kAXErrorAttributeUnsupported => Checked::Unsupported,
++                _ => Checked::ReadError,
++            })
++        }
++    }
++}
++
++unsafe fn read_string(element: AXUIElementRef, name: &str) -> Checked<String> {
++    let value = match copy_value(element, name) {
++        Ok(value) => value,
++        Err(error) => return error.map(|_| String::new()),
++    };
++    if CFGetTypeID(value) != CFString::type_id() {
++        CFRelease(value);
++        return Checked::WrongType;
++    }
++    Checked::Value(CFString::wrap_under_create_rule(value as _).to_string())
++}
++
++unsafe fn read_bool(element: AXUIElementRef, name: &str) -> Checked<bool> {
++    let value = match copy_value(element, name) {
++        Ok(value) => value,
++        Err(error) => return error.map(|_| false),
++    };
++    if CFGetTypeID(value) != CFBoolean::type_id() {
++        CFRelease(value);
++        return Checked::WrongType;
++    }
++    Checked::Value(CFBoolean::wrap_under_create_rule(value as _).into())
++}
++
++unsafe fn read_pid(element: AXUIElementRef) -> Checked<i32> {
++    if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++        return Checked::ReadError;
++    }
++    let mut pid = 0_i32;
++    match AXUIElementGetPid(element, &mut pid) {
++        kAXErrorSuccess if pid > 0 => Checked::Value(pid),
++        _ => Checked::ReadError,
++    }
++}
++
++unsafe fn read_cgid(element: AXUIElementRef) -> Checked<u32> {
++    if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++        return Checked::ReadError;
++    }
++    let mut id = 0_u32;
++    match super::bindings::_AXUIElementGetWindow(element, &mut id) {
++        kAXErrorSuccess if id > 0 => Checked::Value(id),
++        _ => Checked::ReadError,
++    }
++}
++
++unsafe fn read_element(element: AXUIElementRef, name: &str) -> Checked<OwnedElement> {
++    let value = match copy_value(element, name) {
++        Ok(value) => value,
++        Err(error) => return error.map(|_| unreachable!()),
++    };
++    if CFGetTypeID(value) != AXUIElementGetTypeID() {
++        CFRelease(value);
++        return Checked::WrongType;
++    }
++    Checked::Value(OwnedElement(value as AXUIElementRef))
++}
++
++unsafe fn read_element_array(
++    element: AXUIElementRef,
++    name: &str,
++    limit: usize,
++) -> Checked<Vec<OwnedElement>> {
++    let value = match copy_value(element, name) {
++        Ok(value) => value,
++        Err(error) => return error.map(|_| Vec::new()),
++    };
++    if CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
++        CFRelease(value);
++        return Checked::WrongType;
++    }
++    let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
++    if array.len() as usize > limit {
++        return Checked::Truncated;
++    }
++    let mut elements = Vec::with_capacity(array.len() as usize);
++    for index in 0..array.len() {
++        let Some(item) = array.get(index) else {
++            return Checked::ReadError;
++        };
++        let item = *item;
++        if item.is_null() || CFGetTypeID(item) != AXUIElementGetTypeID() {
++            return Checked::WrongType;
++        }
++        core_foundation::base::CFRetain(item);
++        elements.push(OwnedElement(item as AXUIElementRef));
++    }
++    Checked::Value(elements)
++}
++
++unsafe fn read_presence(element: AXUIElementRef, name: &str) -> Checked<bool> {
++    match copy_value(element, name) {
++        Ok(value) => {
++            CFRelease(value);
++            Checked::Value(true)
++        }
++        Err(Checked::Missing) => Checked::Value(false),
++        Err(Checked::Unsupported) => Checked::Value(false),
++        Err(_) => Checked::ReadError,
++    }
++}
++
++unsafe fn forbidden_content_present(
++    element: AXUIElementRef,
++    allowed_visible_child: Option<AXUIElementRef>,
++) -> Checked<bool> {
++    for attr in ["AXVisibleChildren", "AXContents", "AXSheets"] {
++        match copy_value(element, attr) {
++            Err(Checked::Missing | Checked::Unsupported) => {}
++            Err(_) => return Checked::ReadError,
++            Ok(value) => {
++                if CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
++                    CFRelease(value);
++                    return Checked::WrongType;
++                }
++                let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
++                if array.len() > 2 {
++                    return Checked::Truncated;
++                }
++                if attr == "AXVisibleChildren" && array.len() > 1 {
++                    return Checked::Value(true);
++                }
++                for item in array.iter() {
++                    let item = *item;
++                    if item.is_null() || CFGetTypeID(item) != AXUIElementGetTypeID() {
++                        return Checked::WrongType;
++                    }
++                    let allowed = attr == "AXVisibleChildren"
++                        && allowed_visible_child.is_some_and(|child| {
++                            core_foundation::base::CFEqual(item, child as CFTypeRef) != 0
++                        });
++                    if !allowed {
++                        return Checked::Value(true);
++                    }
++                }
++            }
++        }
++    }
++    const CONTENT_ATTRS: [&str; 5] = [
++        "AXValue",
++        "AXText",
++        "AXSelectedText",
++        "AXSelectedTextRange",
++        "AXPlaceholderValue",
++    ];
++    for attr in CONTENT_ATTRS {
++        match read_presence(element, attr) {
++            Checked::Value(true) => return Checked::Value(true),
++            Checked::Value(false) => {}
++            _ => return Checked::ReadError,
++        }
++    }
++    Checked::Value(false)
++}
++
++unsafe fn read_relation(element: AXUIElementRef, name: &str) -> Checked<Relation> {
++    match read_element(element, name) {
++        Checked::Value(relation) => {
++            if !set_short_timeout(relation.0) {
++                return Checked::ReadError;
++            }
++            let pid = read_pid(relation.0);
++            let cgid = read_cgid(relation.0);
++            match (pid, cgid) {
++                (Checked::Value(pid), cgid) => Checked::Value(Relation { pid, cgid }),
++                _ => Checked::ReadError,
++            }
++        }
++        Checked::Missing => Checked::Missing,
++        Checked::Unsupported => Checked::Unsupported,
++        Checked::ReadError => Checked::ReadError,
++        Checked::WrongType => Checked::WrongType,
++        Checked::Truncated => Checked::Truncated,
++    }
++}
++
++unsafe fn set_short_timeout(element: AXUIElementRef) -> bool {
++    let remaining = deadline_remaining().unwrap_or(std::time::Duration::from_secs(1));
++    let seconds = remaining
++        .min(std::time::Duration::from_secs_f32(
++            AX_MESSAGE_TIMEOUT_SECONDS,
++        ))
++        .as_secs_f32();
++    timeout_setup_succeeded(
++        seconds,
++        if seconds > 0.0 {
++            AXUIElementSetMessagingTimeout(element, seconds)
++        } else {
++            -1
++        },
++    )
++}
++
++fn timeout_setup_succeeded(seconds: f32, status: i32) -> bool {
++    seconds > 0.0 && status == kAXErrorSuccess
++}
++
++#[derive(Debug, Clone, PartialEq)]
++struct WindowIdentity {
++    pid: i32,
++    cgid: u32,
++    layer: i32,
++    z: usize,
++    on_screen: bool,
++    bounds: [u64; 4],
++}
++
++impl WindowIdentity {
++    fn of(row: &crate::windows::WindowInfo) -> Self {
++        Self {
++            pid: row.pid,
++            cgid: row.window_id,
++            layer: row.layer,
++            z: row.z_index,
++            on_screen: row.is_on_screen,
++            bounds: [
++                row.bounds.x,
++                row.bounds.y,
++                row.bounds.width,
++                row.bounds.height,
++            ]
++            .map(f64::to_bits),
++        }
++    }
++}
++
++fn snapshot_is_complete(snapshot: &crate::windows::WindowEnumeration) -> bool {
++    snapshot.read_status == "ok"
++        && snapshot.raw_row_count.is_some()
++        && snapshot.malformed_row_count == 0
++}
++
++pub(crate) fn is_complete_snapshot(snapshot: &crate::windows::WindowEnumeration) -> bool {
++    snapshot_is_complete(snapshot)
++}
++
++fn same_snapshot_rows(
++    left: &crate::windows::WindowEnumeration,
++    right: &crate::windows::WindowEnumeration,
++) -> bool {
++    snapshot_is_complete(left)
++        && snapshot_is_complete(right)
++        && left.raw_row_count == right.raw_row_count
++        && left
++            .windows
++            .iter()
++            .map(WindowIdentity::of)
++            .collect::<Vec<_>>()
++            == right
++                .windows
++                .iter()
++                .map(WindowIdentity::of)
++                .collect::<Vec<_>>()
++}
++
++fn diagnostic_from_evidence(
++    e: &CandidateEvidence,
++    classified: Classified,
++    fresh_tail_status: &'static str,
++) -> ClassificationDiagnostic {
++    let excluded = classified.classification == Classification::SharingControl;
++    ClassificationDiagnostic {
++        schema: "cua.ordinary_window_classification.v1",
++        snapshot_status: if e.snapshot_complete {
++            "complete"
++        } else {
++            "incomplete"
++        },
++        candidate_pid: e.pid,
++        candidate_cgid: e.cgid,
++        classification: classified.classification,
++        decision: if excluded {
++            Decision::ExcludedFromOrdinaryRank
++        } else {
++            Decision::Retained
++        },
++        reason: classified.reason,
++        ax_windows_status: classified.ax_windows_status,
++        exact_ax_window_count: classified.ax_windows_count,
++        root_role_status: classified.root_role_status,
++        root_subrole_status: classified.root_subrole_status,
++        exact_child_count: classified.exact_child_count,
++        child_role_status: classified.child_role_status,
++        semantic_source: classified.semantic_source,
++        focused_window_status: classified.focused_window_status,
++        focused_element_status: classified.focused_element_status,
++        front_process_status: classified.front_process_status,
++        relation_status: classified.relation_status,
++        fresh_tail_status,
++        point_occlusion_policy: "retained",
++    }
++}
++
++fn early_unknown(
++    pid: i32,
++    cgid: u32,
++    reason: Reason,
++    snapshot_complete: bool,
++    ax_windows_status: &'static str,
++    count: Option<usize>,
++) -> ClassificationDiagnostic {
++    let mut value = ClassificationDiagnostic::unknown(
++        pid,
++        cgid,
++        reason,
++        if snapshot_complete {
++            "complete"
++        } else {
++            "incomplete"
++        },
++    );
++    value.ax_windows_status = ax_windows_status;
++    value.exact_ax_window_count = count;
++    value
++}
++
++unsafe fn candidate_evidence(
++    pid: i32,
++    cgid: u32,
++    focus_window_target: u32,
++    snapshot_complete: bool,
++) -> Result<CandidateEvidence, ClassificationDiagnostic> {
++    let app = AXUIElementCreateApplication(pid);
++    if app.is_null() {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::AxWindowsUnavailable,
++            snapshot_complete,
++            "read_error",
++            None,
++        ));
++    }
++    let app = OwnedElement(app);
++    if !set_short_timeout(app.0) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::AttributeReadUnknown,
++            snapshot_complete,
++            "timeout_setup_failed",
++            None,
++        ));
++    }
++    let mut windows = match read_element_array(app.0, "AXWindows", MAX_WINDOWS) {
++        Checked::Value(windows) => windows,
++        Checked::Truncated => {
++            return Err(early_unknown(
++                pid,
++                cgid,
++                Reason::TooManyWindows,
++                snapshot_complete,
++                "truncated",
++                None,
++            ));
++        }
++        other => {
++            return Err(early_unknown(
++                pid,
++                cgid,
++                Reason::AxWindowsUnavailable,
++                snapshot_complete,
++                other.status(),
++                None,
++            ));
++        }
++    };
++    let window_count = windows.len();
++    let mut matches = Vec::new();
++    let mut identity_unknown = false;
++    for (index, element) in windows.iter().enumerate() {
++        if !set_short_timeout(element.0) {
++            identity_unknown = true;
++            continue;
++        }
++        match read_cgid(element.0) {
++            Checked::Value(id) if id == cgid => matches.push(index),
++            Checked::Value(_) => {}
++            _ => identity_unknown = true,
++        }
++    }
++    if identity_unknown {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::IdentityMismatch,
++            snapshot_complete,
++            "identity_unknown",
++            Some(window_count),
++        ));
++    }
++    if matches.len() != 1 {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::AxWindowNotUnique,
++            snapshot_complete,
++            "value",
++            Some(matches.len()),
++        ));
++    }
++    let root = windows.swap_remove(matches[0]);
++    if !set_short_timeout(root.0) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::AttributeReadUnknown,
++            snapshot_complete,
++            "timeout_setup_failed",
++            Some(window_count),
++        ));
++    }
++
++    let root_children = read_element_array(root.0, "AXChildren", MAX_NODES);
++    let (root_child_count, child) = match root_children {
++        Checked::Value(mut children) => {
++            let count = children.len();
++            let child = (count == 1).then(|| children.remove(0));
++            (Checked::Value(count), child)
++        }
++        Checked::Truncated => (Checked::Truncated, None),
++        Checked::Missing => (Checked::Missing, None),
++        Checked::Unsupported => (Checked::Unsupported, None),
++        Checked::ReadError => (Checked::ReadError, None),
++        Checked::WrongType => (Checked::WrongType, None),
++    };
++    let default_child = ChildEvidence {
++        pid: Checked::ReadError,
++        cgid: Checked::ReadError,
++        role: Checked::ReadError,
++        modal: Checked::ReadError,
++        main: Checked::ReadError,
++        focused: Checked::ReadError,
++        children: Checked::ReadError,
++        forbidden_content: Checked::ReadError,
++        identifier: Checked::ReadError,
++        title: Checked::ReadError,
++        description: Checked::ReadError,
++        window_relation: Checked::ReadError,
++        parent_relation: Checked::ReadError,
++    };
++    let child_element_for_root = child.as_ref().map(|element| element.0);
++    let child_evidence = if let Some(child) = child.as_ref() {
++        if !set_short_timeout(child.0) {
++            default_child
++        } else {
++            let child_children = read_element_array(child.0, "AXChildren", 1);
++            // Mapping consumes and drops copied descendants immediately.
++            let child_count = child_children.map(|children| children.len());
++            ChildEvidence {
++                pid: read_pid(child.0),
++                cgid: read_cgid(child.0),
++                role: read_string(child.0, "AXRole"),
++                modal: read_bool(child.0, "AXModal"),
++                main: read_bool(child.0, "AXMain"),
++                focused: read_bool(child.0, "AXFocused"),
++                children: child_count,
++                forbidden_content: forbidden_content_present(child.0, None),
++                identifier: read_string(child.0, "AXIdentifier"),
++                title: read_string(child.0, "AXTitle"),
++                description: read_string(child.0, "AXDescription"),
++                window_relation: read_relation(child.0, "AXWindow"),
++                parent_relation: read_relation(child.0, "AXParent"),
++            }
++        }
++    } else {
++        default_child
++    };
++
++    let focused_window = match read_element(app.0, "AXFocusedWindow") {
++        Checked::Value(element) => {
++            if set_short_timeout(element.0) {
++                read_cgid(element.0)
++            } else {
++                Checked::ReadError
++            }
++        }
++        Checked::Missing => Checked::Missing,
++        Checked::Unsupported => Checked::Unsupported,
++        Checked::ReadError => Checked::ReadError,
++        Checked::WrongType => Checked::WrongType,
++        Checked::Truncated => Checked::Truncated,
++    };
++    let focused_element = match read_element(app.0, "AXFocusedUIElement") {
++        Checked::Value(element) => {
++            let element_pid = if set_short_timeout(element.0) {
++                read_pid(element.0)
++            } else {
++                Checked::ReadError
++            };
++            if !matches!(element_pid, Checked::Value(value) if value == pid) {
++                Checked::ReadError
++            } else {
++                match read_relation(element.0, "AXWindow") {
++                    Checked::Value(relation) => match relation.cgid {
++                        Checked::Value(id) => Checked::Value(id),
++                        other => other,
++                    },
++                    Checked::Missing | Checked::Unsupported => read_cgid(element.0),
++                    Checked::ReadError => Checked::ReadError,
++                    Checked::WrongType => Checked::WrongType,
++                    Checked::Truncated => Checked::Truncated,
++                }
++            }
++        }
++        Checked::Missing => Checked::Missing,
++        Checked::Unsupported => Checked::Unsupported,
++        Checked::ReadError => Checked::ReadError,
++        Checked::WrongType => Checked::WrongType,
++        Checked::Truncated => Checked::Truncated,
++    };
++    let front_process_matches_target =
++        crate::input::skylight::front_process_matches(pid, focus_window_target);
++
++    Ok(CandidateEvidence {
++        pid,
++        cgid,
++        snapshot_complete,
++        ax_windows_count: Checked::Value(1),
++        root: RootEvidence {
++            pid: read_pid(root.0),
++            cgid: read_cgid(root.0),
++            role: read_string(root.0, "AXRole"),
++            subrole: read_string(root.0, "AXSubrole"),
++            modal: read_bool(root.0, "AXModal"),
++            main: read_bool(root.0, "AXMain"),
++            focused: read_bool(root.0, "AXFocused"),
++            children: root_child_count,
++            forbidden_content: forbidden_content_present(root.0, child_element_for_root),
++            window_relation: read_relation(root.0, "AXWindow"),
++            parent_relation: read_relation(root.0, "AXParent"),
++        },
++        child: child_evidence,
++        focused_window,
++        focused_element_window: focused_element,
++        front_process_matches_target,
++        focus_window_target,
++        semantic_source: SemanticSource::None,
++    })
++}
++
++pub(crate) fn inspect_candidate(
++    pid: i32,
++    cgid: u32,
++    focus_window_target: u32,
++    snapshot_complete: bool,
++    deadline: Instant,
++) -> ClassificationDiagnostic {
++    if Instant::now() >= deadline {
++        return early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            None,
++        );
++    }
++    let evidence = use_deadline(deadline, || unsafe {
++        candidate_evidence(pid, cgid, focus_window_target, snapshot_complete)
++    });
++    match evidence {
++        Ok(mut evidence) => {
++            if Instant::now() >= deadline {
++                return early_unknown(
++                    pid,
++                    cgid,
++                    Reason::DeadlineExceeded,
++                    snapshot_complete,
++                    "deadline",
++                    None,
++                );
++            }
++            evidence.semantic_source = match semantic_source(&evidence) {
++                Ok(source) => source,
++                Err(_) => SemanticSource::None,
++            };
++            let classified = classify(&evidence);
++            diagnostic_from_evidence(&evidence, classified, "not_yet_reconciled")
++        }
++        Err(value) => value,
++    }
++}
++
++pub(crate) fn confirm_fresh_candidate(
++    prior: &ClassificationDiagnostic,
++    rechecked: &ClassificationDiagnostic,
++    pid: i32,
++    cgid: u32,
++    focus_window_target: u32,
++    before: &crate::windows::WindowEnumeration,
++    after: &crate::windows::WindowEnumeration,
++    after_focus_matches: Option<bool>,
++    after_focused_window: Option<u32>,
++    deadline: Instant,
++) -> ClassificationDiagnostic {
++    if Instant::now() >= deadline {
++        let mut value = ClassificationDiagnostic::unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            if snapshot_is_complete(after) {
++                "complete"
++            } else {
++                "incomplete"
++            },
++        );
++        value.fresh_tail_status = "deadline";
++        return value;
++    }
++    if prior.classification != Classification::SharingControl
++        || rechecked.classification != Classification::SharingControl
++        || !same_snapshot_rows(before, after)
++        || after_focus_matches != Some(true)
++        || after_focused_window != Some(focus_window_target)
++    {
++        let mut value = ClassificationDiagnostic::unknown(
++            pid,
++            cgid,
++            Reason::FreshTailMismatch,
++            if snapshot_is_complete(after) {
++                "complete"
++            } else {
++                "incomplete"
++            },
++        );
++        value.fresh_tail_status = "mismatch";
++        value.front_process_status = if after_focus_matches == Some(false) {
++            "different_process"
++        } else {
++            "unavailable_or_unverified"
++        };
++        value.focused_window_status = if after_focused_window == Some(focus_window_target) {
++            "matches_target"
++        } else {
++            "different_or_unknown"
++        };
++        return value;
++    }
++    let mut value = rechecked.clone();
++    value.fresh_tail_status = "matched";
++    value
++}
++
++pub(crate) fn retain_unconfirmed(
++    prior: &ClassificationDiagnostic,
++    deadline_expired: bool,
++) -> ClassificationDiagnostic {
++    let mut value = prior.clone();
++    value.classification = Classification::Unknown;
++    value.decision = Decision::Retained;
++    value.reason = if deadline_expired {
++        Reason::DeadlineExceeded
++    } else {
++        Reason::FreshTailMismatch
++    };
++    value.fresh_tail_status = if deadline_expired {
++        "deadline"
++    } else {
++        "unverified"
++    };
++    value
++}
++
++pub(crate) fn sharing_candidate_ids(
++    snapshot: &crate::windows::WindowEnumeration,
++    target_pid: i32,
++    target_cgid: u32,
++) -> Vec<u32> {
++    if !snapshot_is_complete(snapshot) {
++        return Vec::new();
++    }
++    let Some(target) = snapshot
++        .windows
++        .iter()
++        .find(|row| row.pid == target_pid && row.window_id == target_cgid && row.layer == 0)
++    else {
++        return Vec::new();
++    };
++    snapshot
++        .windows
++        .iter()
++        .filter(|row| {
++            row.pid == target_pid
++                && row.layer == 0
++                && row.is_on_screen
++                && row.window_id != target_cgid
++                && row.z_index > target.z_index
++        })
++        .map(|row| row.window_id)
++        .take(MAX_WINDOWS)
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn good() -> CandidateEvidence {
++        CandidateEvidence {
++            pid: 42,
++            cgid: 88,
++            snapshot_complete: true,
++            ax_windows_count: Checked::Value(1),
++            root: RootEvidence {
++                pid: Checked::Value(42),
++                cgid: Checked::Value(88),
++                role: Checked::Value("AXWindow".into()),
++                subrole: Checked::Unsupported,
++                modal: Checked::Value(false),
++                main: Checked::Value(false),
++                focused: Checked::Value(false),
++                children: Checked::Value(1),
++                forbidden_content: Checked::Value(false),
++                window_relation: Checked::Value(Relation {
++                    pid: 42,
++                    cgid: Checked::Value(88),
++                }),
++                parent_relation: Checked::Value(Relation {
++                    pid: 42,
++                    cgid: Checked::Unsupported,
++                }),
++            },
++            child: ChildEvidence {
++                pid: Checked::Value(42),
++                cgid: Checked::Value(88),
++                role: Checked::Value("AXButton".into()),
++                modal: Checked::Unsupported,
++                main: Checked::Unsupported,
++                focused: Checked::Value(false),
++                children: Checked::Value(0),
++                forbidden_content: Checked::Value(false),
++                identifier: Checked::Value(EXPECTED_CONTROL.into()),
++                title: Checked::Unsupported,
++                description: Checked::Unsupported,
++                window_relation: Checked::Value(Relation {
++                    pid: 42,
++                    cgid: Checked::Value(88),
++                }),
++                parent_relation: Checked::Value(Relation {
++                    pid: 42,
++                    cgid: Checked::Value(88),
++                }),
++            },
++            focused_window: Checked::Value(7),
++            focused_element_window: Checked::Value(7),
++            front_process_matches_target: Some(true),
++            focus_window_target: 7,
++            semantic_source: SemanticSource::Identifier,
++        }
++    }
++
++    fn row(window_id: u32, z_index: usize) -> crate::windows::WindowInfo {
++        crate::windows::WindowInfo {
++            window_id,
++            pid: 42,
++            app_name: String::new(),
++            title: String::new(),
++            bounds: crate::windows::WindowBounds {
++                x: 1.0,
++                y: 2.0,
++                width: 100.0,
++                height: 80.0,
++            },
++            layer: 0,
++            z_index,
++            is_on_screen: true,
++            current_space_id: None,
++            on_current_space: None,
++            space_ids: None,
++        }
++    }
++
++    fn snapshot(
++        rows: Vec<crate::windows::WindowInfo>,
++        malformed: usize,
++    ) -> crate::windows::WindowEnumeration {
++        crate::windows::WindowEnumeration {
++            raw_row_count: Some(rows.len() + malformed),
++            windows: rows,
++            current_space_id: None,
++            read_status: "ok",
++            malformed_row_count: malformed,
++        }
++    }
++
++    #[test]
++    fn exact_typed_narrow_control_is_the_only_positive_classification() {
++        let value = classify(&good());
++        assert_eq!(value.classification, Classification::SharingControl);
++        assert_eq!(value.reason, Reason::ExactNarrowSharingControl);
++    }
++
++    #[test]
++    fn ordinary_dialog_sheet_and_standard_windows_are_never_excluded() {
++        for role in ["AXDialog", "AXStandardWindow", "AXSystemDialog"] {
++            let mut e = good();
++            e.root.role = Checked::Value(role.into());
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        for subrole in [
++            "AXStandardWindow",
++            "AXDialog",
++            "AXSystemDialog",
++            "AXSheet",
++            "AXFloatingWindow",
++        ] {
++            let mut e = good();
++            e.root.subrole = Checked::Value(subrole.into());
++            assert_eq!(classify(&e).classification, Classification::Unknown);
++        }
++    }
++
++    #[test]
++    fn any_modal_main_or_focus_claim_retains_candidate() {
++        for which in 0..6 {
++            let mut e = good();
++            match which {
++                0 => e.root.modal = Checked::Value(true),
++                1 => e.root.main = Checked::Value(true),
++                2 => e.root.focused = Checked::Value(true),
++                3 => e.child.modal = Checked::Value(true),
++                4 => e.child.main = Checked::Value(true),
++                _ => e.child.focused = Checked::Value(true),
++            }
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++    }
++
++    #[test]
++    fn incomplete_or_wide_ax_tree_never_classifies_positive() {
++        let mut e = good();
++        e.snapshot_complete = false;
++        assert_eq!(classify(&e).classification, Classification::Unknown);
++        let mut e = good();
++        e.ax_windows_count = Checked::Truncated;
++        assert_eq!(classify(&e).reason, Reason::TooManyWindows);
++        let mut e = good();
++        e.root.children = Checked::Value(2);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = good();
++        e.child.children = Checked::Value(1);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = good();
++        e.child.forbidden_content = Checked::Value(true);
++        assert_eq!(classify(&e).reason, Reason::ContentAttributePresent);
++    }
++
++    #[test]
++    fn semantic_identifier_conflict_blocks_title_or_description_fallback() {
++        let mut e = good();
++        e.child.identifier = Checked::Value("DifferentControl".into());
++        e.child.title = Checked::Value(EXPECTED_CONTROL.into());
++        assert_eq!(classify(&e).reason, Reason::SemanticMismatch);
++        let mut e = good();
++        e.child.identifier = Checked::Unsupported;
++        e.child.title = Checked::Value(EXPECTED_CONTROL.into());
++        e.child.description = Checked::Unsupported;
++        e.semantic_source = SemanticSource::Title;
++        assert_eq!(classify(&e).classification, Classification::SharingControl);
++        let mut e = good();
++        e.child.identifier = Checked::Unsupported;
++        e.child.title = Checked::Unsupported;
++        e.child.description = Checked::Value(EXPECTED_CONTROL.into());
++        e.semantic_source = SemanticSource::Description;
++        assert_eq!(classify(&e).classification, Classification::SharingControl);
++    }
++
++    #[test]
++    fn identity_focus_relation_and_read_failures_retain() {
++        let mut e = good();
++        e.child.pid = Checked::Value(7);
++        assert_eq!(classify(&e).reason, Reason::IdentityMismatch);
++        let mut e = good();
++        e.child.cgid = Checked::Value(99);
++        assert_eq!(classify(&e).reason, Reason::IdentityMismatch);
++        let mut e = good();
++        e.focused_window = Checked::ReadError;
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = good();
++        e.front_process_matches_target = None;
++        assert_eq!(classify(&e).reason, Reason::FocusOrForegroundUnknown);
++        let mut e = good();
++        e.child.identifier = Checked::WrongType;
++        assert_eq!(classify(&e).reason, Reason::SemanticUnavailable);
++        let mut e = good();
++        e.child.parent_relation = Checked::ReadError;
++        assert_eq!(classify(&e).reason, Reason::RelationUnknown);
++    }
++
++    #[test]
++    fn deadline_and_malformed_global_snapshot_do_not_exclude() {
++        let expired = inspect_candidate(42, 88, 7, true, Instant::now());
++        assert_eq!(expired.reason, Reason::DeadlineExceeded);
++        let partial = snapshot(vec![row(7, 0), row(88, 1)], 1);
++        assert!(sharing_candidate_ids(&partial, 42, 7).is_empty());
++        let complete = snapshot(vec![row(7, 0), row(88, 1)], 0);
++        assert_eq!(sharing_candidate_ids(&complete, 42, 7), vec![88]);
++    }
++
++    #[test]
++    fn timeout_setup_failure_is_never_accepted() {
++        assert!(!timeout_setup_succeeded(0.025, -25200));
++        assert!(!timeout_setup_succeeded(0.0, kAXErrorSuccess));
++        assert!(timeout_setup_succeeded(0.025, kAXErrorSuccess));
++    }
++
++    #[test]
++    fn final_shared_tail_change_withdraws_every_provisional_exclusion() {
++        let evidence = good();
++        let classified = classify(&evidence);
++        let prior = diagnostic_from_evidence(&evidence, classified.clone(), "not_yet_reconciled");
++        let rechecked = diagnostic_from_evidence(&evidence, classified, "not_yet_reconciled");
++        let before = snapshot(vec![row(7, 0), row(88, 1)], 0);
++        let after = snapshot(vec![row(7, 0), row(88, 2)], 0);
++        let final_value = confirm_fresh_candidate(
++            &prior,
++            &rechecked,
++            42,
++            88,
++            7,
++            &before,
++            &after,
++            Some(true),
++            Some(7),
++            Instant::now() + std::time::Duration::from_secs(1),
++        );
++        assert_eq!(final_value.reason, Reason::FreshTailMismatch);
++        assert!(!final_value.is_excluded());
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight.rs b/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight.rs
+index 6b6cecf..13b7954 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight.rs
+@@ -49,19 +49,31 @@ fn validate_identity(value: &IdentityEvidence) -> bool {
+         || value.secured_plist_package_type != "APPL"
+         || !value.current_executable.is_absolute()
+         || value.current_executable.components().any(|part| {
+-            matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir)
++            matches!(
++                part,
++                std::path::Component::ParentDir | std::path::Component::CurDir
++            )
+         })
+         || value.current_executable != value.signed_main_executable
+     {
+         return false;
+     }
+-    let Some(macos) = value.current_executable.parent() else { return false; };
+-    let Some(contents) = macos.parent() else { return false; };
+-    let Some(bundle) = contents.parent() else { return false; };
++    let Some(macos) = value.current_executable.parent() else {
++        return false;
++    };
++    let Some(contents) = macos.parent() else {
++        return false;
++    };
++    let Some(bundle) = contents.parent() else {
++        return false;
++    };
+     bundle.file_name().is_some_and(|name| name == BUNDLE_NAME)
+         && contents.file_name().is_some_and(|name| name == "Contents")
+         && macos.file_name().is_some_and(|name| name == "MacOS")
+-        && value.current_executable.file_name().is_some_and(|name| name == EXECUTABLE)
++        && value
++            .current_executable
++            .file_name()
++            .is_some_and(|name| name == EXECUTABLE)
+         && value.signed_code_path == bundle
+ }
+ 
+@@ -100,7 +112,9 @@ impl Report {
+ fn evaluate(source: &mut impl EvidenceSource) -> Report {
+     match source.identity() {
+         Err(()) => return Report::refused("identity_unknown"),
+-        Ok(identity) if !validate_identity(&identity) => return Report::refused("identity_rejected"),
++        Ok(identity) if !validate_identity(&identity) => {
++            return Report::refused("identity_rejected")
++        }
+         Ok(_) => {}
+     }
+     // Exactly these two read-only probes, only after all self-identity checks pass.
+@@ -151,8 +165,11 @@ pub fn run_if_requested() -> Option<i32> {
+ mod native {
+     use super::{EvidenceSource, IdentityEvidence, IDENTIFIER};
+     use core_foundation::{
+-        base::{CFType, TCFType}, data::CFData, dictionary::{CFDictionary, CFDictionaryRef},
+-        string::{CFString, CFStringRef}, url::CFURL,
++        base::{CFType, TCFType},
++        data::CFData,
++        dictionary::{CFDictionary, CFDictionaryRef},
++        string::{CFString, CFStringRef},
++        url::CFURL,
+     };
+     use security_framework::os::macos::code_signing::{Flags, SecCode, SecRequirement};
+     use std::{ffi::c_void, path::PathBuf};
+@@ -160,7 +177,11 @@ mod native {
+     // Already-locked Security/CF dependencies; no shell command or new dependency.
+     #[link(name = "Security", kind = "framework")]
+     unsafe extern "C" {
+-        fn SecCodeCopySigningInformation(code: *const c_void, flags: u32, information: *mut CFDictionaryRef) -> i32;
++        fn SecCodeCopySigningInformation(
++            code: *const c_void,
++            flags: u32,
++            information: *mut CFDictionaryRef,
++        ) -> i32;
+         static kSecCodeInfoIdentifier: CFStringRef;
+         static kSecCodeInfoMainExecutable: CFStringRef;
+         static kSecCodeInfoPList: CFStringRef;
+@@ -170,17 +191,23 @@ mod native {
+     pub(super) struct SelfEvidence;
+ 
+     fn value(dict: &CFDictionary, key: CFStringRef) -> Result<CFType, ()> {
+-        if key.is_null() { return Err(()); }
++        if key.is_null() {
++            return Err(());
++        }
+         let raw = *dict.find(key.cast::<c_void>()).ok_or(())?;
+-        if raw.is_null() { return Err(()); }
++        if raw.is_null() {
++            return Err(());
++        }
+         // Values are borrowed from the owned dictionary; get-rule retains them.
+         Ok(unsafe { CFType::wrap_under_get_rule(raw) })
+     }
+ 
+     fn string_value(dict: &CFDictionary, key: &str) -> Result<String, ()> {
+         let key = CFString::new(key);
+-        value(dict, key.as_concrete_TypeRef())?.downcast::<CFString>()
+-            .map(|text| text.to_string()).ok_or(())
++        value(dict, key.as_concrete_TypeRef())?
++            .downcast::<CFString>()
++            .map(|text| text.to_string())
++            .ok_or(())
+     }
+ 
+     fn canonical_url(value: CFType) -> Result<PathBuf, ()> {
+@@ -191,25 +218,44 @@ mod native {
+     impl EvidenceSource for SelfEvidence {
+         fn identity(&mut self) -> Result<IdentityEvidence, ()> {
+             let code = SecCode::for_self(Flags::NONE).map_err(|_| ())?;
+-            let requirement: SecRequirement = format!("identifier \"{IDENTIFIER}\"").parse().map_err(|_| ())?;
++            let requirement: SecRequirement = format!("identifier \"{IDENTIFIER}\"")
++                .parse()
++                .map_err(|_| ())?;
+             let flags = Flags::STRICT_VALIDATE | Flags::NO_NETWORK_ACCESS;
+             code.check_validity(flags, &requirement).map_err(|_| ())?;
+             let mut raw: CFDictionaryRef = std::ptr::null();
+             let status = unsafe { SecCodeCopySigningInformation(code.as_CFTypeRef(), 0, &mut raw) };
+             // Error outputs have no documented ownership/type guarantee; never wrap them.
+-            if status != 0 { return Err(()); }
+-            if raw.is_null() { return Err(()); }
++            if status != 0 {
++                return Err(());
++            }
++            if raw.is_null() {
++                return Err(());
++            }
+             // Successful create-rule output owns +1; downcast checks its CF type.
+             let returned = unsafe { CFType::wrap_under_create_rule(raw.cast::<c_void>()) };
+             let info = returned.downcast::<CFDictionary>().ok_or(())?;
+             let signing_identifier = unsafe { value(&info, kSecCodeInfoIdentifier) }?
+-                .downcast::<CFString>().map(|text| text.to_string()).ok_or(())?;
+-            let plist = unsafe { value(&info, kSecCodeInfoPList) }?.downcast::<CFDictionary>().ok_or(())?;
+-            let signed_main_executable = canonical_url(unsafe { value(&info, kSecCodeInfoMainExecutable) }?)?;
+-            let unique = unsafe { value(&info, kSecCodeInfoUnique) }?.downcast::<CFData>().ok_or(())?;
+-            let signed_code_path = std::fs::canonicalize(code.path(Flags::NONE).map_err(|_| ())?.to_path().ok_or(())?)
+-                .map_err(|_| ())?;
+-            let current_executable = std::fs::canonicalize(std::env::current_exe().map_err(|_| ())?).map_err(|_| ())?;
++                .downcast::<CFString>()
++                .map(|text| text.to_string())
++                .ok_or(())?;
++            let plist = unsafe { value(&info, kSecCodeInfoPList) }?
++                .downcast::<CFDictionary>()
++                .ok_or(())?;
++            let signed_main_executable =
++                canonical_url(unsafe { value(&info, kSecCodeInfoMainExecutable) }?)?;
++            let unique = unsafe { value(&info, kSecCodeInfoUnique) }?
++                .downcast::<CFData>()
++                .ok_or(())?;
++            let signed_code_path = std::fs::canonicalize(
++                code.path(Flags::NONE)
++                    .map_err(|_| ())?
++                    .to_path()
++                    .ok_or(())?,
++            )
++            .map_err(|_| ())?;
++            let current_executable =
++                std::fs::canonicalize(std::env::current_exe().map_err(|_| ())?).map_err(|_| ())?;
+             let identity = IdentityEvidence {
+                 signature_valid: true,
+                 signing_identifier,
+@@ -254,21 +300,41 @@ mod tests {
+             secured_plist_executable: EXECUTABLE.into(),
+             secured_plist_package_type: "APPL".into(),
+             unique_identity_present: true,
+-            current_executable: exe.clone(), signed_main_executable: exe, signed_code_path: bundle,
++            current_executable: exe.clone(),
++            signed_main_executable: exe,
++            signed_code_path: bundle,
+         }
+     }
+ 
+     struct Fake {
+         evidence: Result<IdentityEvidence, ()>,
+-        ax: Result<bool, ()>, screen: Result<bool, ()>, calls: Vec<&'static str>,
++        ax: Result<bool, ()>,
++        screen: Result<bool, ()>,
++        calls: Vec<&'static str>,
+     }
+     impl Fake {
+-        fn good() -> Self { Self { evidence: Ok(good_identity()), ax: Ok(true), screen: Ok(true), calls: vec![] } }
++        fn good() -> Self {
++            Self {
++                evidence: Ok(good_identity()),
++                ax: Ok(true),
++                screen: Ok(true),
++                calls: vec![],
++            }
++        }
+     }
+     impl EvidenceSource for Fake {
+-        fn identity(&mut self) -> Result<IdentityEvidence, ()> { self.calls.push("identity"); self.evidence.clone() }
+-        fn accessibility(&mut self) -> Result<bool, ()> { self.calls.push("ax"); self.ax }
+-        fn screen_capture(&mut self) -> Result<bool, ()> { self.calls.push("screen"); self.screen }
++        fn identity(&mut self) -> Result<IdentityEvidence, ()> {
++            self.calls.push("identity");
++            self.evidence.clone()
++        }
++        fn accessibility(&mut self) -> Result<bool, ()> {
++            self.calls.push("ax");
++            self.ax
++        }
++        fn screen_capture(&mut self) -> Result<bool, ()> {
++            self.calls.push("screen");
++            self.screen
++        }
+     }
+ 
+     #[test]
+@@ -276,12 +342,20 @@ mod tests {
+         for args in [vec![], vec!["serve"], vec!["help"], vec!["version"]] {
+             let mut fake = Fake::good();
+             let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+-            assert!(evaluate_request(&args, &mut fake).is_none()); assert!(fake.calls.is_empty());
++            assert!(evaluate_request(&args, &mut fake).is_none());
++            assert!(fake.calls.is_empty());
+         }
+-        for args in [vec![COMMAND, "--socket", "secret"], vec!["--flag", COMMAND], vec![COMMAND, COMMAND]] {
++        for args in [
++            vec![COMMAND, "--socket", "secret"],
++            vec!["--flag", COMMAND],
++            vec![COMMAND, COMMAND],
++        ] {
+             let mut fake = Fake::good();
+             let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+-            assert_eq!(evaluate_request(&args, &mut fake).unwrap().outcome, "invalid_arguments");
++            assert_eq!(
++                evaluate_request(&args, &mut fake).unwrap().outcome,
++                "invalid_arguments"
++            );
+             assert!(fake.calls.is_empty());
+         }
+     }
+@@ -289,7 +363,8 @@ mod tests {
+     #[test]
+     fn wrong_signature_identifiers_plist_or_bundle_never_probe() {
+         let mutations: Vec<Box<dyn Fn(&mut IdentityEvidence)>> = vec![
+-            Box::new(|v| v.signature_valid = false), Box::new(|v| v.unique_identity_present = false),
++            Box::new(|v| v.signature_valid = false),
++            Box::new(|v| v.unique_identity_present = false),
+             Box::new(|v| v.signing_identifier = "com.trycua.driver.local".into()),
+             Box::new(|v| v.secured_plist_identifier = "other".into()),
+             Box::new(|v| v.secured_plist_executable = "other".into()),
+@@ -299,16 +374,23 @@ mod tests {
+             Box::new(|v| v.signed_code_path = PathBuf::from("/private/tmp/CuaDriverLocal.app")),
+         ];
+         for mutate in mutations {
+-            let mut fake = Fake::good(); mutate(fake.evidence.as_mut().unwrap());
++            let mut fake = Fake::good();
++            mutate(fake.evidence.as_mut().unwrap());
+             let report = evaluate(&mut fake);
+-            assert_eq!(report.outcome, "identity_rejected"); assert!(!report.self_identity_validated);
+-            assert_eq!(fake.calls, vec!["identity"]); assert_eq!(report.accessibility, None);
++            assert_eq!(report.outcome, "identity_rejected");
++            assert!(!report.self_identity_validated);
++            assert_eq!(fake.calls, vec!["identity"]);
++            assert_eq!(report.accessibility, None);
+         }
+     }
+ 
+     #[test]
+     fn bare_vendor_and_noncanonical_paths_fail_the_pure_identity_contract() {
+-        for bundle in ["CuaDriver.app", "CuaDriverLocal.app", "HarnessF005Diagnostic.app.other"] {
++        for bundle in [
++            "CuaDriver.app",
++            "CuaDriverLocal.app",
++            "HarnessF005Diagnostic.app.other",
++        ] {
+             let mut identity = good_identity();
+             let path = PathBuf::from("/private/tmp/fixture").join(bundle);
+             identity.signed_code_path = path.clone();
+@@ -317,26 +399,33 @@ mod tests {
+             assert!(!validate_identity(&identity));
+         }
+         let mut identity = good_identity();
+-        identity.current_executable = PathBuf::from("/private/tmp/x/../HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local");
++        identity.current_executable = PathBuf::from(
++            "/private/tmp/x/../HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local",
++        );
+         identity.signed_main_executable = identity.current_executable.clone();
+         assert!(!validate_identity(&identity));
+     }
+ 
+     #[test]
+     fn identity_unknown_is_not_permission_unknown_and_never_probes() {
+-        let mut fake = Fake::good(); fake.evidence = Err(());
++        let mut fake = Fake::good();
++        fake.evidence = Err(());
+         assert_eq!(evaluate(&mut fake), Report::refused("identity_unknown"));
+         assert_eq!(fake.calls, vec!["identity"]);
+     }
+ 
+     #[test]
+-    fn matching_fake_identity_invokes_each_read_only_probe_once_but_never_authenticates_principal() {
++    fn matching_fake_identity_invokes_each_read_only_probe_once_but_never_authenticates_principal()
++    {
+         let mut fake = Fake::good();
+         let report = evaluate_request(&[OsString::from(COMMAND)], &mut fake).unwrap();
+         assert_eq!(fake.calls, vec!["identity", "ax", "screen"]);
+-        assert_eq!(report.outcome, "observed_unverified"); assert!(report.self_identity_validated);
+-        assert_eq!(report.accessibility, Some(true)); assert_eq!(report.screen_capture, Some(true));
+-        assert!(!report.principal_verified); assert!(!report.ready_for_dispatch);
++        assert_eq!(report.outcome, "observed_unverified");
++        assert!(report.self_identity_validated);
++        assert_eq!(report.accessibility, Some(true));
++        assert_eq!(report.screen_capture, Some(true));
++        assert!(!report.principal_verified);
++        assert!(!report.ready_for_dispatch);
+     }
+ 
+     #[test]
+@@ -347,9 +436,13 @@ mod tests {
+             (Err(()), Ok(true), "permission_status_unknown"),
+             (Ok(true), Err(()), "permission_status_unknown"),
+         ] {
+-            let mut fake = Fake::good(); fake.ax = ax; fake.screen = screen;
++            let mut fake = Fake::good();
++            fake.ax = ax;
++            fake.screen = screen;
+             let report = evaluate(&mut fake);
+-            assert_eq!(report.outcome, outcome); assert!(!report.ready_for_dispatch); assert!(!report.principal_verified);
++            assert_eq!(report.outcome, outcome);
++            assert!(!report.ready_for_dispatch);
++            assert!(!report.principal_verified);
+             assert_eq!(fake.calls, vec!["identity", "ax", "screen"]);
+         }
+     }
+@@ -357,11 +450,18 @@ mod tests {
+     #[test]
+     fn reports_are_bounded_and_do_not_contain_identity_paths_or_errors() {
+         let mut fake = Fake::good();
+-        for report in [evaluate(&mut fake), Report::refused("identity_unknown"), Report::refused("invalid_arguments")] {
++        for report in [
++            evaluate(&mut fake),
++            Report::refused("identity_unknown"),
++            Report::refused("invalid_arguments"),
++        ] {
+             let json = serde_json::to_string(&report).unwrap();
+-            assert!(json.len() < 512); assert!(!json.contains("/private/tmp"));
+-            assert!(!json.contains(IDENTIFIER)); assert!(!json.contains("CFBundle"));
+-            assert!(json.contains("\"principalVerified\":false")); assert!(json.contains("\"readyForDispatch\":false"));
++            assert!(json.len() < 512);
++            assert!(!json.contains("/private/tmp"));
++            assert!(!json.contains(IDENTIFIER));
++            assert!(!json.contains("CFBundle"));
++            assert!(json.contains("\"principalVerified\":false"));
++            assert!(json.contains("\"readyForDispatch\":false"));
+         }
+     }
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight_independent.rs b/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight_independent.rs
+index e6873f8..c4d4d07 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight_independent.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/diagnostic_preflight_independent.rs
+@@ -6,60 +6,116 @@ fn fixture_identity() -> IdentityEvidence {
+     let bundle = PathBuf::from("/private/tmp/synthetic/HarnessF005Diagnostic.app");
+     let exe = bundle.join("Contents/MacOS/cua-driver-local");
+     IdentityEvidence {
+-        signature_valid: true, signing_identifier: IDENTIFIER.into(),
+-        secured_plist_identifier: IDENTIFIER.into(), secured_plist_executable: EXECUTABLE.into(),
+-        secured_plist_package_type: "APPL".into(), unique_identity_present: true,
+-        current_executable: exe.clone(), signed_main_executable: exe, signed_code_path: bundle,
++        signature_valid: true,
++        signing_identifier: IDENTIFIER.into(),
++        secured_plist_identifier: IDENTIFIER.into(),
++        secured_plist_executable: EXECUTABLE.into(),
++        secured_plist_package_type: "APPL".into(),
++        unique_identity_present: true,
++        current_executable: exe.clone(),
++        signed_main_executable: exe,
++        signed_code_path: bundle,
+     }
+ }
+ struct Fixture {
+-    identity: Result<IdentityEvidence, ()>, ax: Result<bool, ()>, cg: Result<bool, ()>, calls: Vec<&'static str>,
++    identity: Result<IdentityEvidence, ()>,
++    ax: Result<bool, ()>,
++    cg: Result<bool, ()>,
++    calls: Vec<&'static str>,
+ }
+ impl Fixture {
+-    fn new() -> Self { Self { identity: Ok(fixture_identity()), ax: Ok(true), cg: Ok(true), calls: vec![] } }
++    fn new() -> Self {
++        Self {
++            identity: Ok(fixture_identity()),
++            ax: Ok(true),
++            cg: Ok(true),
++            calls: vec![],
++        }
++    }
+ }
+ impl EvidenceSource for Fixture {
+-    fn identity(&mut self) -> Result<IdentityEvidence, ()> { self.calls.push("identity"); self.identity.clone() }
+-    fn accessibility(&mut self) -> Result<bool, ()> { self.calls.push("ax"); self.ax }
+-    fn screen_capture(&mut self) -> Result<bool, ()> { self.calls.push("cg"); self.cg }
++    fn identity(&mut self) -> Result<IdentityEvidence, ()> {
++        self.calls.push("identity");
++        self.identity.clone()
++    }
++    fn accessibility(&mut self) -> Result<bool, ()> {
++        self.calls.push("ax");
++        self.ax
++    }
++    fn screen_capture(&mut self) -> Result<bool, ()> {
++        self.calls.push("cg");
++        self.cg
++    }
+ }
+ fn rejection(mutate: impl FnOnce(&mut IdentityEvidence)) {
+-    let mut fixture = Fixture::new(); mutate(fixture.identity.as_mut().unwrap());
++    let mut fixture = Fixture::new();
++    mutate(fixture.identity.as_mut().unwrap());
+     let report = evaluate_request(&[COMMAND.into()], &mut fixture).unwrap();
+-    assert_eq!(report.outcome, "identity_rejected"); assert!(!report.self_identity_validated);
+-    assert!(!report.principal_verified); assert!(!report.ready_for_dispatch);
++    assert_eq!(report.outcome, "identity_rejected");
++    assert!(!report.self_identity_validated);
++    assert!(!report.principal_verified);
++    assert!(!report.ready_for_dispatch);
+     assert_eq!((report.accessibility, report.screen_capture), (None, None));
+     assert_eq!(fixture.calls, vec!["identity"]);
+ }
+ 
+ #[test]
+ fn sentinel_mixed_with_ordinary_commands_always_hard_refuses_without_evidence() {
+-    for args in [vec!["serve", COMMAND], vec![COMMAND, "serve"], vec!["history-purge", COMMAND], vec!["--help", COMMAND], vec![COMMAND, "Invalid"], vec![COMMAND, COMMAND]] {
+-        let args: Vec<OsString> = args.into_iter().map(Into::into).collect(); let mut fixture = Fixture::new();
+-        assert_eq!(evaluate_request(&args, &mut fixture), Some(Report::refused("invalid_arguments")));
++    for args in [
++        vec!["serve", COMMAND],
++        vec![COMMAND, "serve"],
++        vec!["history-purge", COMMAND],
++        vec!["--help", COMMAND],
++        vec![COMMAND, "Invalid"],
++        vec![COMMAND, COMMAND],
++    ] {
++        let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
++        let mut fixture = Fixture::new();
++        assert_eq!(
++            evaluate_request(&args, &mut fixture),
++            Some(Report::refused("invalid_arguments"))
++        );
+         assert!(fixture.calls.is_empty());
+     }
+ }
+ #[test]
+ fn non_unicode_extra_is_rejected_without_lossy_conversion_or_probe() {
+-    for args in [vec![COMMAND.into(), OsString::from_vec(vec![0xff])], vec![OsString::from_vec(vec![0xff]), COMMAND.into()]] {
+-        let mut fixture = Fixture::new(); assert_eq!(evaluate_request(&args, &mut fixture), Some(Report::refused("invalid_arguments"))); assert!(fixture.calls.is_empty());
++    for args in [
++        vec![COMMAND.into(), OsString::from_vec(vec![0xff])],
++        vec![OsString::from_vec(vec![0xff]), COMMAND.into()],
++    ] {
++        let mut fixture = Fixture::new();
++        assert_eq!(
++            evaluate_request(&args, &mut fixture),
++            Some(Report::refused("invalid_arguments"))
++        );
++        assert!(fixture.calls.is_empty());
+     }
+ }
+ #[test]
+ fn near_sentinel_and_non_unicode_without_exact_sentinel_preserve_ordinary_route() {
+-    for args in [vec![OsString::from("--diagnostic-preflight-only")], vec![OsString::from("diagnostic-preflight-only ")], vec![OsString::from_vec(vec![0xff])], vec![]] {
+-        let mut fixture = Fixture::new(); assert!(evaluate_request(&args, &mut fixture).is_none()); assert!(fixture.calls.is_empty());
++    for args in [
++        vec![OsString::from("--diagnostic-preflight-only")],
++        vec![OsString::from("diagnostic-preflight-only ")],
++        vec![OsString::from_vec(vec![0xff])],
++        vec![],
++    ] {
++        let mut fixture = Fixture::new();
++        assert!(evaluate_request(&args, &mut fixture).is_none());
++        assert!(fixture.calls.is_empty());
+     }
+ }
+ #[test]
+ fn invalid_signature_and_missing_unique_identity_never_probe() {
+-    rejection(|v| v.signature_valid = false); rejection(|v| v.unique_identity_present = false);
++    rejection(|v| v.signature_valid = false);
++    rejection(|v| v.unique_identity_present = false);
+ }
+ #[test]
+ fn empty_secured_fields_never_probe() {
+-    rejection(|v| v.signing_identifier.clear()); rejection(|v| v.secured_plist_identifier.clear());
+-    rejection(|v| v.secured_plist_executable.clear()); rejection(|v| v.secured_plist_package_type.clear());
++    rejection(|v| v.signing_identifier.clear());
++    rejection(|v| v.secured_plist_identifier.clear());
++    rejection(|v| v.secured_plist_executable.clear());
++    rejection(|v| v.secured_plist_package_type.clear());
+ }
+ #[test]
+ fn valid_signature_with_vendor_or_mismatched_identifiers_never_probe() {
+@@ -73,40 +129,101 @@ fn executable_and_package_type_are_exact_not_casefolded() {
+ }
+ #[test]
+ fn equivalent_looking_noncanonical_relative_path_is_rejected() {
+-    rejection(|v| { v.current_executable = PathBuf::from("HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local"); v.signed_main_executable = v.current_executable.clone(); v.signed_code_path = PathBuf::from("HarnessF005Diagnostic.app"); });
+-    rejection(|v| { v.current_executable = PathBuf::from("/private/tmp/other/../HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local"); v.signed_main_executable = v.current_executable.clone(); });
++    rejection(|v| {
++        v.current_executable =
++            PathBuf::from("HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local");
++        v.signed_main_executable = v.current_executable.clone();
++        v.signed_code_path = PathBuf::from("HarnessF005Diagnostic.app");
++    });
++    rejection(|v| {
++        v.current_executable = PathBuf::from(
++            "/private/tmp/other/../HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local",
++        );
++        v.signed_main_executable = v.current_executable.clone();
++    });
+ }
+ #[test]
+ fn all_consistent_but_wrong_bundle_layout_is_rejected() {
+-    for suffix in ["HarnessF005Diagnostic.app.other/Contents/MacOS/cua-driver-local", "HarnessF005Diagnostic.app/contents/MacOS/cua-driver-local", "HarnessF005Diagnostic.app/Contents/Resources/cua-driver-local", "HarnessF005Diagnostic.app/Contents/MacOS/cua-driver"] {
+-        rejection(|v| { v.current_executable = PathBuf::from("/private/tmp/synthetic").join(suffix); v.signed_main_executable = v.current_executable.clone(); v.signed_code_path = v.current_executable.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf(); });
++    for suffix in [
++        "HarnessF005Diagnostic.app.other/Contents/MacOS/cua-driver-local",
++        "HarnessF005Diagnostic.app/contents/MacOS/cua-driver-local",
++        "HarnessF005Diagnostic.app/Contents/Resources/cua-driver-local",
++        "HarnessF005Diagnostic.app/Contents/MacOS/cua-driver",
++    ] {
++        rejection(|v| {
++            v.current_executable = PathBuf::from("/private/tmp/synthetic").join(suffix);
++            v.signed_main_executable = v.current_executable.clone();
++            v.signed_code_path = v
++                .current_executable
++                .parent()
++                .unwrap()
++                .parent()
++                .unwrap()
++                .parent()
++                .unwrap()
++                .to_path_buf();
++        });
+     }
+ }
+ #[test]
+ fn signed_main_and_signed_code_path_must_both_bind_same_current_bundle() {
+-    rejection(|v| v.signed_main_executable = PathBuf::from("/private/tmp/other/HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local"));
+-    rejection(|v| v.signed_code_path = PathBuf::from("/private/tmp/other/HarnessF005Diagnostic.app"));
++    rejection(|v| {
++        v.signed_main_executable = PathBuf::from(
++            "/private/tmp/other/HarnessF005Diagnostic.app/Contents/MacOS/cua-driver-local",
++        )
++    });
++    rejection(|v| {
++        v.signed_code_path = PathBuf::from("/private/tmp/other/HarnessF005Diagnostic.app")
++    });
+ }
+ #[test]
+ fn unknown_identity_stops_before_any_probe() {
+-    let mut fixture = Fixture::new(); fixture.identity = Err(());
+-    assert_eq!(evaluate_request(&[COMMAND.into()], &mut fixture), Some(Report::refused("identity_unknown"))); assert_eq!(fixture.calls, vec!["identity"]);
++    let mut fixture = Fixture::new();
++    fixture.identity = Err(());
++    assert_eq!(
++        evaluate_request(&[COMMAND.into()], &mut fixture),
++        Some(Report::refused("identity_unknown"))
++    );
++    assert_eq!(fixture.calls, vec!["identity"]);
+ }
+ #[test]
+ fn all_nine_permission_combinations_remain_unverified_and_probe_exactly_once() {
+-    for ax in [Ok(true), Ok(false), Err(())] { for cg in [Ok(true), Ok(false), Err(())] {
+-        let mut fixture = Fixture::new(); fixture.ax = ax; fixture.cg = cg;
+-        let report = evaluate_request(&[COMMAND.into()], &mut fixture).unwrap(); assert!(report.self_identity_validated);
+-        assert_eq!((report.accessibility, report.screen_capture), (ax.ok(), cg.ok())); assert_eq!(fixture.calls, vec!["identity", "ax", "cg"]);
+-        assert!(!report.principal_verified); assert!(!report.ready_for_dispatch);
+-        let expected = if ax.is_err() || cg.is_err() { "permission_status_unknown" } else if ax == Ok(true) && cg == Ok(true) { "observed_unverified" } else { "permissions_not_granted" };
+-        assert_eq!(report.outcome, expected);
+-    } }
++    for ax in [Ok(true), Ok(false), Err(())] {
++        for cg in [Ok(true), Ok(false), Err(())] {
++            let mut fixture = Fixture::new();
++            fixture.ax = ax;
++            fixture.cg = cg;
++            let report = evaluate_request(&[COMMAND.into()], &mut fixture).unwrap();
++            assert!(report.self_identity_validated);
++            assert_eq!(
++                (report.accessibility, report.screen_capture),
++                (ax.ok(), cg.ok())
++            );
++            assert_eq!(fixture.calls, vec!["identity", "ax", "cg"]);
++            assert!(!report.principal_verified);
++            assert!(!report.ready_for_dispatch);
++            let expected = if ax.is_err() || cg.is_err() {
++                "permission_status_unknown"
++            } else if ax == Ok(true) && cg == Ok(true) {
++                "observed_unverified"
++            } else {
++                "permissions_not_granted"
++            };
++            assert_eq!(report.outcome, expected);
++        }
++    }
+ }
+ #[test]
+ fn public_report_cannot_serialize_raw_identity_material() {
+-    let mut fixture = Fixture::new(); let report = evaluate(&mut fixture); let json = serde_json::to_string(&report).unwrap();
+-    assert!(json.len() < 512); assert!(!json.contains("/private/tmp")); assert!(!json.contains(IDENTIFIER)); assert!(!json.contains(EXECUTABLE));
+-    let value: serde_json::Value = serde_json::from_str(&json).unwrap(); assert_eq!(value.as_object().unwrap().len(), 7);
+-    assert_eq!(value["principalVerified"], false); assert_eq!(value["readyForDispatch"], false);
++    let mut fixture = Fixture::new();
++    let report = evaluate(&mut fixture);
++    let json = serde_json::to_string(&report).unwrap();
++    assert!(json.len() < 512);
++    assert!(!json.contains("/private/tmp"));
++    assert!(!json.contains(IDENTIFIER));
++    assert!(!json.contains(EXECUTABLE));
++    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
++    assert_eq!(value.as_object().unwrap().len(), 7);
++    assert_eq!(value["principalVerified"], false);
++    assert_eq!(value["readyForDispatch"], false);
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
+index 8300ae2..a3cc3a1 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
+@@ -6,6 +6,7 @@
+ //! process, semantic key window, and WindowServer layer-0 order before it says
+ //! `activated: true`.
+ 
++use std::borrow::Borrow;
+ use std::time::{Duration, Instant};
+ 
+ use async_trait::async_trait;
+@@ -16,6 +17,7 @@ use cua_driver_core::{
+ };
+ use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+ use serde_json::{json, Value};
++use std::collections::HashSet;
+ 
+ use crate::ax::bindings::{
+     ax_get_window_id, copy_ax_windows, perform_action, set_bool_attr_true,
+@@ -56,7 +58,7 @@ fn def() -> &'static ToolDef {
+     })
+ }
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq)]
+ struct ExactWindowObservation {
+     workspace_frontmost_pid: Option<i32>,
+     front_process_matches_target: Option<bool>,
+@@ -64,6 +66,8 @@ struct ExactWindowObservation {
+     frontmost_ordinary_window_id: Option<u32>,
+     target_visible_ordinary: bool,
+     frontmost_row_diagnostic: FrontmostRowDiagnostic,
++    ordinary_window_classifications:
++        Vec<crate::ax::ordinary_sharing_control::ClassificationDiagnostic>,
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -147,7 +151,7 @@ impl FrontmostRowDiagnostic {
+ }
+ 
+ impl ExactWindowObservation {
+-    fn frontmost_pid(self, pid: i32) -> Option<i32> {
++    fn frontmost_pid(&self, pid: i32) -> Option<i32> {
+         match self.front_process_matches_target {
+             Some(true) => Some(pid),
+             Some(false) => None,
+@@ -155,19 +159,19 @@ impl ExactWindowObservation {
+         }
+     }
+ 
+-    fn process_activated(self, pid: i32) -> bool {
++    fn process_activated(&self, pid: i32) -> bool {
+         self.frontmost_pid(pid) == Some(pid)
+     }
+ 
+-    fn exact_window_focused(self, window_id: u32) -> bool {
++    fn exact_window_focused(&self, window_id: u32) -> bool {
+         self.focused_window_id == Some(window_id)
+     }
+ 
+-    fn exact_window_frontmost_ordinary(self, window_id: u32) -> bool {
++    fn exact_window_frontmost_ordinary(&self, window_id: u32) -> bool {
+         self.target_visible_ordinary && self.frontmost_ordinary_window_id == Some(window_id)
+     }
+ 
+-    fn exact_postcondition(self, pid: i32, window_id: u32) -> bool {
++    fn exact_postcondition(&self, pid: i32, window_id: u32) -> bool {
+         self.process_activated(pid)
+             && self.exact_window_focused(window_id)
+             && self.exact_window_frontmost_ordinary(window_id)
+@@ -181,12 +185,13 @@ enum ExactOutcome {
+     Failed,
+ }
+ 
+-fn classify_exact_outcome(
++fn classify_exact_outcome<O: Borrow<ExactWindowObservation>>(
+     request_accepted: bool,
+     pid: i32,
+     window_id: u32,
+-    observation: ExactWindowObservation,
++    observation: O,
+ ) -> ExactOutcome {
++    let observation = observation.borrow();
+     if observation.exact_postcondition(pid, window_id) {
+         ExactOutcome::Activated
+     } else if request_accepted
+@@ -200,18 +205,108 @@ fn classify_exact_outcome(
+     }
+ }
+ 
++#[cfg(test)]
+ fn select_frontmost_ordinary_window(
+     windows: &[crate::windows::WindowInfo],
+ ) -> Option<&crate::windows::WindowInfo> {
+     windows.iter().max_by_key(|window| window.z_index)
+ }
+ 
+-fn observe_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
+-    let windows = crate::windows::visible_windows();
++fn select_frontmost_ordinary_window_excluding<'a>(
++    windows: &'a [crate::windows::WindowInfo],
++    excluded: &HashSet<u32>,
++) -> Option<&'a crate::windows::WindowInfo> {
++    windows
++        .iter()
++        .filter(|window| !excluded.contains(&window.window_id))
++        .max_by_key(|window| window.z_index)
++}
++
++fn observe_exact_window(pid: i32, window_id: u32, deadline: Instant) -> ExactWindowObservation {
++    use crate::ax::ordinary_sharing_control as sharing;
++
++    let snapshot = crate::windows::visible_windows_with_space_snapshot();
++    let snapshot_complete = sharing::is_complete_snapshot(&snapshot);
++    let candidates = sharing::sharing_candidate_ids(&snapshot, pid, window_id);
++    let mut first_pass = Vec::with_capacity(candidates.len());
++    for candidate_cgid in candidates {
++        let first =
++            sharing::inspect_candidate(pid, candidate_cgid, window_id, snapshot_complete, deadline);
++        first_pass.push((candidate_cgid, first));
++    }
++
++    // Recheck every provisional positive under the same task deadline, then
++    // take one shared CG/focus/front tail after all AX reads have finished.
++    let mut rechecked = Vec::new();
++    for (candidate_cgid, first) in &first_pass {
++        if first.is_sharing_control() {
++            rechecked.push((
++                *candidate_cgid,
++                sharing::inspect_candidate(
++                    pid,
++                    *candidate_cgid,
++                    window_id,
++                    snapshot_complete,
++                    deadline,
++                ),
++            ));
++        }
++    }
++    let final_snapshot = if Instant::now() >= deadline
++        || !rechecked
++            .iter()
++            .any(|(_, value)| value.is_sharing_control())
++    {
++        None
++    } else {
++        Some(crate::windows::visible_windows_with_space_snapshot())
++    };
++    let final_front = final_snapshot
++        .as_ref()
++        .map(|_| crate::input::skylight::front_process_matches(pid, window_id));
++    let final_focus = final_snapshot
++        .as_ref()
++        .map(|_| crate::ax::bindings::focused_window_id_of_pid(pid));
++
++    let mut excluded = HashSet::new();
++    let mut ordinary_window_classifications = Vec::with_capacity(first_pass.len());
++    for (candidate_cgid, first) in first_pass {
++        if first.is_sharing_control() {
++            let second = rechecked
++                .iter()
++                .find(|(id, _)| *id == candidate_cgid)
++                .map(|(_, diagnostic)| diagnostic);
++            let confirmed = match (&final_snapshot, second) {
++                (Some(fresh), Some(second)) => sharing::confirm_fresh_candidate(
++                    &first,
++                    second,
++                    pid,
++                    candidate_cgid,
++                    window_id,
++                    &snapshot,
++                    fresh,
++                    final_front.flatten(),
++                    final_focus.flatten(),
++                    deadline,
++                ),
++                _ => sharing::retain_unconfirmed(&first, Instant::now() >= deadline),
++            };
++            if confirmed.is_excluded() {
++                excluded.insert(candidate_cgid);
++            }
++            ordinary_window_classifications.push(confirmed);
++        } else {
++            ordinary_window_classifications.push(first);
++        }
++    }
++    let windows = final_snapshot
++        .as_ref()
++        .map(|snapshot| snapshot.windows.as_slice())
++        .unwrap_or(&snapshot.windows);
+     let target_visible_ordinary = windows
+         .iter()
+         .any(|window| window.pid == pid && window.window_id == window_id && window.layer == 0);
+-    let frontmost_ordinary_window = select_frontmost_ordinary_window(&windows);
++    let frontmost_ordinary_window = select_frontmost_ordinary_window_excluding(windows, &excluded);
+     let frontmost_ordinary_window_id = frontmost_ordinary_window.map(|window| window.window_id);
+     ExactWindowObservation {
+         workspace_frontmost_pid: crate::apps::frontmost_pid(),
+@@ -224,6 +319,7 @@ fn observe_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
+             pid,
+             window_id,
+         ),
++        ordinary_window_classifications,
+     }
+ }
+ 
+@@ -233,7 +329,7 @@ fn wait_for_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
+     let mut observation;
+     loop {
+         let now = Instant::now();
+-        observation = observe_exact_window(pid, window_id);
++        observation = observe_exact_window(pid, window_id, deadline);
+         if observation.exact_postcondition(pid, window_id) {
+             let since = stable_since.get_or_insert(now);
+             if now.duration_since(*since) >= VERIFY_STABLE {
+@@ -277,13 +373,14 @@ fn raise_exact_ax_window(pid: i32, window_id: u32) -> bool {
+     }
+ }
+ 
+-fn exact_result(
++fn exact_result<O: Borrow<ExactWindowObservation>>(
+     pid: i32,
+     window_id: u32,
+     path: &'static str,
+     request_accepted: bool,
+-    observation: ExactWindowObservation,
++    observation: O,
+ ) -> ToolResult {
++    let observation = observation.borrow();
+     let outcome = classify_exact_outcome(request_accepted, pid, window_id, observation);
+     let activated = outcome == ExactOutcome::Activated;
+     let process_activated = observation.process_activated(pid);
+@@ -295,6 +392,9 @@ fn exact_result(
+         ExactOutcome::Partial => "partial",
+         ExactOutcome::Failed => "failed",
+     };
++    let ordinary_classification =
++        serde_json::to_value(&observation.ordinary_window_classifications)
++            .unwrap_or_else(|_| json!([]));
+     let structured = json!({
+         "status": status,
+         "code": if activated { "bring_to_front_exact_window_verified" } else { "bring_to_front_exact_window_unverified" },
+@@ -317,6 +417,7 @@ fn exact_result(
+             "focused_window_id": observation.focused_window_id,
+             "frontmost_ordinary_window_id": observation.frontmost_ordinary_window_id,
+             "frontmost_window_diagnostic": observation.frontmost_row_diagnostic.as_json(),
++            "ordinary_window_classification": ordinary_classification,
+         }
+     });
+     if activated {
+@@ -529,6 +630,7 @@ mod tests {
+             frontmost_ordinary_window_id,
+             target_visible_ordinary,
+             frontmost_row_diagnostic: FrontmostRowDiagnostic::from_row(None, 42, 7),
++            ordinary_window_classifications: Vec::new(),
+         }
+     }
+ 
+@@ -760,6 +862,10 @@ mod tests {
+             .as_object_mut()
+             .expect("observed object")
+             .remove("frontmost_window_diagnostic");
++        structured["observed"]
++            .as_object_mut()
++            .expect("observed object")
++            .remove("ordinary_window_classification");
+         assert_eq!(
+             structured,
+             json!({
+@@ -828,7 +934,7 @@ mod tests {
+             observation_with_frontmost_row(Some(&second), 42, 7),
+             observation_with_frontmost_row(Some(&final_row), 42, 7),
+         ];
+-        let final_observation = *observations.last().expect("final observation");
++        let final_observation = observations.last().expect("final observation").clone();
+         let result = exact_result(42, 7, "skylight_ax", true, final_observation);
+         let structured = result.structured_content.expect("structured result");
+         assert_eq!(structured["status"], "activated");
+@@ -943,6 +1049,10 @@ mod tests {
+                 .as_object_mut()
+                 .expect("observed object")
+                 .remove("frontmost_window_diagnostic");
++            structured["observed"]
++                .as_object_mut()
++                .expect("observed object")
++                .remove("ordinary_window_classification");
+             assert_eq!(structured, expected);
+         }
+     }

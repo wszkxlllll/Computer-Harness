@@ -149,16 +149,16 @@ export function PairingScreen() {
   return (
     <>
       <BrandHeader />
-      <main className="page-shell narrow-page">
+      <main id="main-content" className="page-shell narrow-page" aria-labelledby="pairing-title" tabIndex={-1}>
         <p className="eyebrow">连接 Harness</p>
-        <h1 className="page-title">{heading}</h1>
+        <h1 id="pairing-title" className="page-title" tabIndex={-1}>{heading}</h1>
         {pairState === "starting" && <div className="loading-panel" role="status">正在向电脑发送配对请求…</div>}
         {pairState === "checking" && <div className="loading-panel" role="status">正在确认手机连接状态…</div>}
         {pairState === "pending_local_confirmation" && (
           <div className="pair-state-box" role="status" aria-live="polite">
             <span className="pair-state-mark" aria-hidden="true">…</span>
             <p>配对请求已发送。请在电脑的“连接手机”页面确认。</p>
-            <p className="field-hint">扫码本身不会授权控制电脑。确认后，手机会自动进入任务列表。</p>
+            <p className="field-hint">扫码本身不会授权控制电脑。电脑确认后，此页会显示连接结果；连接成功后，请点“打开任务列表”。</p>
             <p className="field-hint">如果扫码应用内的浏览器无法打开页面，请使用“在系统浏览器中打开”后重试。</p>
           </div>
         )}

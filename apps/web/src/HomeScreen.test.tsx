@@ -1,19 +1,20 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRun, listRuns, listWindowTargets } from "./api";
+import { createRun, listRuns, listWindowTargets, previewWindowTarget } from "./api";
 import { HomeScreen } from "./HomeScreen";
 import { GoalComposer } from "./components/GoalComposer";
-import { ApiError, type BrowserSiteChoice, type WindowTargetList } from "./types";
+import { ApiError, type BrowserSiteChoice, type WindowCandidatePreview, type WindowTargetList } from "./types";
 import { PreferencesProvider } from "./PreferencesContext";
 import { PREFERENCES_STORAGE_KEY } from "./preferences";
 
 vi.mock("./api", async (importOriginal) => {
   const api = await importOriginal<typeof import("./api")>();
-  return { ...api, createRun: vi.fn(), listRuns: vi.fn(), listWindowTargets: vi.fn() };
+  return { ...api, createRun: vi.fn(), listRuns: vi.fn(), listWindowTargets: vi.fn(), previewWindowTarget: vi.fn() };
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
   localStorage.clear();
@@ -88,6 +89,22 @@ describe("home run-target selection", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/run/run-created"));
   });
 
+  it("focuses a failed submission message and associates it with the submit control", async () => {
+    vi.mocked(createRun).mockRejectedValue(new ApiError("电脑暂时不可用", 503, "HOST_ERROR"));
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Read this notice" } });
+    await screen.findByText("这里还没有任务");
+    expect(screen.getByRole("form", { name: "新任务表单" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    const error = await screen.findByRole("alert");
+    await waitFor(() => expect(document.activeElement).toBe(error));
+    expect(screen.getByRole("button", { name: "开始任务" }).getAttribute("aria-describedby")).toBe("goal-error");
+    expect(goal.getAttribute("aria-describedby")).toBe("goal-help");
+  });
+
   it("submits an explicit entire-desktop target without window discovery", async () => {
     vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
     renderHome();
@@ -108,6 +125,16 @@ describe("home run-target selection", () => {
     expect(listWindowTargets).not.toHaveBeenCalled();
   });
 
+  it("keeps Host-prepared recovery experiments out of the phone target choices", async () => {
+    renderHome();
+    await screen.findByLabelText("想让电脑做什么？");
+    openStartSelection();
+    expect(screen.getAllByRole("radio").map((radio) => (radio as HTMLInputElement).value))
+      .toEqual(["auto", "window", "browser", "desktop"]);
+    expect(listWindowTargets).not.toHaveBeenCalled();
+  });
+
+
   it.each([
     ["auto", /自动选择/, { mode: "auto" }],
     ["window", /手动选择窗口/, { mode: "window", targetToken: "opaque-a" }],
@@ -119,10 +146,10 @@ describe("home run-target selection", () => {
 
     const goal = await screen.findByLabelText("想让电脑做什么？");
     fireEvent.change(goal, { target: { value: `Run in ${_name} mode` } });
-    const switchInput = screen.getByRole("switch", { name: /跨应用完成任务/ }) as HTMLInputElement;
+    const switchInput = screen.getByRole("switch", { name: /允许切换其他应用/ }) as HTMLInputElement;
     expect(switchInput.checked).toBe(false);
     expect(switchInput.getAttribute("aria-describedby")).toBe("cross-window-run-switch-help");
-    expect(screen.getByText(/应用名和标题会发送给当前模型/)).toBeDefined();
+    expect(screen.getByText(/窗口名称、标题和相关网页内容可能随本次任务发送给所选服务/)).toBeDefined();
     fireEvent.click(switchInput);
 
     chooseStartMode(modeLabel);
@@ -131,6 +158,8 @@ describe("home run-target selection", () => {
     await screen.findByText("这里还没有任务");
     if (_name === "browser") {
       expect(screen.queryByRole("radio", { name: /本机已准备|临时空白/ })).toBeNull();
+      expect(screen.getByText(/电脑会打开网站，并按页面上的内容完成任务/)).toBeDefined();
+      expect(screen.getByText(/是否沿用登录状态，按电脑上的浏览器设置决定/)).toBeDefined();
     }
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
@@ -176,7 +205,7 @@ describe("home run-target selection", () => {
       .mockRejectedValueOnce(new ApiError("电脑暂时无法安全读取可用窗口。你可以改为手动选择窗口，或稍后重试。", 503, "WINDOW_DISCOVERY_FAILED"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"))
-      .mockRejectedValueOnce(new ApiError("电脑正在处理另一个任务。请等待当前任务结束后再开始。", 409, "RUN_BUSY"))
+      .mockRejectedValueOnce(new ApiError("电脑暂时无法开始新任务：现有任务尚未结束，或资源收尾尚未确认。请刷新任务列表后再试。", 409, "RUN_BUSY"))
       .mockRejectedValueOnce(new ApiError("temporary host error", 503, "HOST_ERROR"));
     renderHome();
 
@@ -412,6 +441,7 @@ describe("home run-target selection", () => {
     vi.mocked(listWindowTargets).mockResolvedValue({
       candidates: [{ token: "candidate-a", appName: "Browser", title: "Contacts" }],
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      omittedAmbiguousCount: 2,
     });
     vi.mocked(createRun).mockRejectedValue(new ApiError(
       "电脑无法唯一确定要操作的窗口。请从刷新后的列表中手动选择一个窗口。",
@@ -427,6 +457,7 @@ describe("home run-target selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
     expect(await screen.findByRole("radio", { name: /Browser.*Contacts/ })).toBeDefined();
+    expect(screen.getByText(/有 2 个候选未显示/u)).toBeDefined();
     expect((goal as HTMLTextAreaElement).value).toBe("Keep this goal after choosing a window");
     openStartSelection();
     expect((screen.getByRole("radio", { name: /手动选择窗口/ }) as HTMLInputElement).checked).toBe(true);
@@ -434,6 +465,188 @@ describe("home run-target selection", () => {
     expect(screen.getByRole("button", { name: "开始任务" }).hasAttribute("disabled")).toBe(true);
     expect(createRun).toHaveBeenCalledWith("Keep this goal after choosing a window", expect.any(String), { mode: "auto" }, defaultAssistantPreferences, false);
     expect(listWindowTargets).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires a fresh manual window confirmation when the goal changes and warns when the chosen app differs", async () => {
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [
+        { token: "notepad-token", appName: "Notepad", title: "Notes" },
+        { token: "wps-token", appName: "WPS Office", title: "Report.docx" },
+      ],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    vi.mocked(createRun).mockResolvedValue({ runId: "manual-run", status: "running" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Open the previous task" } });
+    await screen.findByText("这里还没有任务");
+    chooseStartMode(/手动选择窗口/);
+    fireEvent.click(await screen.findByRole("radio", { name: /Notepad.*Notes/ }));
+
+    fireEvent.change(goal, { target: { value: "请在WPS里写入新内容" } });
+    expect(screen.getByText("任务目标已更改，请重新点选窗口以确认新的起始目标。" )).toBeDefined();
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Notepad.*Notes/ }));
+    expect(screen.getByText(/任务开头提到了 wps，但当前手选窗口是 Notepad/u)).toBeDefined();
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "请在WPS里写入新内容",
+      expect.any(String),
+      { mode: "window", targetToken: "notepad-token" },
+      defaultAssistantPreferences,
+      false,
+    ));
+  });
+
+  it("requires viewing and explicitly confirming an exact live preview for repeated window labels", async () => {
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [
+        { token: "duplicate-a", appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true },
+        { token: "duplicate-b", appName: "Notepad.exe", title: "Untitled - Notepad", previewRequired: true },
+      ],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const preview: WindowCandidatePreview = {
+      previewToken: "P".repeat(32),
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    const failedSecondPreview: WindowCandidatePreview = { ...preview, previewToken: "Q".repeat(32), dataBase64: "bm90LWEtcG5n" };
+    const secondPreview: WindowCandidatePreview = { ...preview, previewToken: "R".repeat(32) };
+    let resolveSecondPreviewRetry!: (value: WindowCandidatePreview) => void;
+    const pendingSecondPreviewRetry = new Promise<WindowCandidatePreview>((resolve) => { resolveSecondPreviewRetry = resolve; });
+    vi.mocked(previewWindowTarget)
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValueOnce(failedSecondPreview)
+      .mockReturnValueOnce(pendingSecondPreviewRetry);
+    vi.mocked(createRun).mockResolvedValue({ runId: "previewed-run", status: "running" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "在 Notepad 中查看当前窗口" } });
+    await screen.findByText("这里还没有任务");
+    chooseStartMode(/手动选择窗口/);
+    expect(await screen.findByRole("group", { name: "候选列表第 1 项（当前顺序，不代表窗口身份）；应用：Notepad.exe；窗口标题：Untitled - Notepad" })).toBeDefined();
+    expect(screen.getByRole("group", { name: "候选列表第 2 项（当前顺序，不代表窗口身份）；应用：Notepad.exe；窗口标题：Untitled - Notepad" })).toBeDefined();
+    expect(document.getElementById("window-target-visual-limit")?.textContent).toContain("读屏无法读取截图，也无法由截图文字验证窗口身份");
+    const previewButtons = await screen.findAllByRole("button", { name: /查看此窗口预览，候选列表第/u });
+    const previewButton = previewButtons[0];
+    if (previewButton === undefined) throw new Error("expected a candidate preview action");
+    expect(previewButton.getAttribute("aria-describedby")).toBe("window-target-visual-limit");
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(previewButton);
+    const firstImage = await screen.findByRole("img", { name: /列表第 1 项.*Notepad\.exe.*Untitled - Notepad/u });
+    expect(createRun).not.toHaveBeenCalled();
+
+    fireEvent.load(firstImage);
+    const firstConfirmation = await screen.findByRole("button", { name: /确认这是目标窗口，候选列表第 1 项/u });
+    fireEvent.click(firstConfirmation);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+
+    const secondPreviewButton = screen.getByRole("button", { name: /查看此窗口预览，候选列表第 2 项/u });
+    fireEvent.click(secondPreviewButton);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
+    const images = screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u });
+    const secondImage = images[1];
+    if (secondImage === undefined) throw new Error("expected the second candidate screenshot");
+    fireEvent.error(secondImage);
+    expect(await screen.findByText("这张实时截图无法显示。请在电脑恢复目标窗口后刷新；仍看不清时不要选择。")).toBeDefined();
+    expect(screen.getAllByRole("button", { name: /确认这是目标窗口，候选列表第/u })).toHaveLength(1);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(createRun).not.toHaveBeenCalled();
+
+    const retryButtons = screen.getAllByRole("button", { name: /重新读取预览，候选列表第/u });
+    const secondCandidateRetry = retryButtons[1];
+    if (secondCandidateRetry === undefined) throw new Error("expected a retry action for the failed second candidate");
+    fireEvent.click(secondCandidateRetry);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(1));
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    resolveSecondPreviewRetry(secondPreview);
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u })).toHaveLength(2));
+    const retriedImages = screen.getAllByRole("img", { name: /列表第 .* 项.*Notepad\.exe.*Untitled - Notepad/u });
+    const retriedSecondImage = retriedImages[1];
+    if (retriedSecondImage === undefined) throw new Error("expected the retried second candidate screenshot");
+    fireEvent.load(retriedSecondImage);
+    const confirmations = await screen.findAllByRole("button", { name: /确认这是目标窗口，候选列表第/u });
+    expect(confirmations).toHaveLength(2);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(confirmations[1]!);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "在 Notepad 中查看当前窗口",
+      expect.any(String),
+      { mode: "window", targetToken: "duplicate-b", previewToken: secondPreview.previewToken },
+      defaultAssistantPreferences,
+      false,
+    ));
+    expect(vi.mocked(previewWindowTarget).mock.calls.map(([candidateToken]) => candidateToken)).toEqual([
+      "duplicate-a",
+      "duplicate-b",
+      "duplicate-b",
+    ]);
+  });
+
+  it("offers an optional preview for a unique window without changing direct selection", async () => {
+    vi.mocked(listWindowTargets).mockResolvedValue({
+      candidates: [{ token: "unique-window", appName: "Notepad.exe", title: "Notes" }],
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const preview: WindowCandidatePreview = {
+      previewToken: "P".repeat(32),
+      appName: "Notepad.exe",
+      title: "Notes",
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    };
+    vi.mocked(previewWindowTarget).mockResolvedValue(preview);
+    vi.mocked(createRun).mockResolvedValue({ runId: "optional-preview-run", status: "running" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "在 Notepad 中查看当前窗口" } });
+    await screen.findByText("这里还没有任务");
+    chooseStartMode(/手动选择窗口/);
+    const targetRadio = await screen.findByRole("radio", { name: /Notepad\.exe.*Notes/u });
+    targetRadio.focus();
+    fireEvent.keyDown(targetRadio, { key: " ", code: "Space" });
+    targetRadio.click();
+    fireEvent.keyUp(targetRadio, { key: " ", code: "Space" });
+    expect(document.activeElement).toBe(targetRadio);
+    expect((targetRadio as HTMLInputElement).checked).toBe(true);
+
+    const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
+    expect(startButton.disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /查看此窗口预览，候选列表第 1 项/u }));
+    const image = await screen.findByRole("img", { name: /列表第 1 项.*Notepad\.exe.*Notes/u });
+    expect(previewWindowTarget).toHaveBeenCalledWith("unique-window", expect.any(AbortSignal));
+    expect(startButton.disabled).toBe(false);
+    expect(createRun).not.toHaveBeenCalled();
+
+    fireEvent.load(image);
+    expect(await screen.findByText("可选预览已显示；此窗口仍可按标签直接选择。")).toBeDefined();
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "在 Notepad 中查看当前窗口",
+      expect.any(String),
+      { mode: "window", targetToken: "unique-window" },
+      defaultAssistantPreferences,
+      false,
+    ));
   });
 
   it("blocks every target mode while an active Run exists", async () => {
@@ -452,5 +665,49 @@ describe("home run-target selection", () => {
       expect((modeInput.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
     }
     expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("blocks new tasks while terminal cleanup is pending and reopens after refresh confirms release", async () => {
+    vi.mocked(listRuns)
+      .mockResolvedValueOnce([{ runId: "cleanup-run", goal: "Finished work", status: "finished", ownerState: "pending_cleanup" }])
+      .mockResolvedValueOnce([{ runId: "cleanup-run", goal: "Finished work", status: "finished", ownerState: "released" }]);
+    vi.mocked(createRun).mockResolvedValue({ runId: "after-cleanup", status: "created" });
+    renderHome();
+
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Start after cleanup" } });
+    await screen.findByRole("heading", { name: "电脑收尾尚未确认" });
+    const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
+    expect(startButton.disabled).toBe(true);
+    expect(screen.getByText(/确认前不会发送新任务/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新列表" }));
+    await waitFor(() => expect(startButton.disabled).toBe(false));
+    expect(screen.queryByRole("heading", { name: "电脑收尾尚未确认" })).toBeNull();
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "Start after cleanup",
+      expect.any(String),
+      { mode: "browser" },
+      defaultAssistantPreferences,
+      false,
+    ));
+  });
+
+  it("keeps legacy finished summaries without ownerState compatible", async () => {
+    vi.mocked(listRuns).mockResolvedValue([{
+      runId: "legacy-finished-run",
+      goal: "Finished on an older Host",
+      status: "finished",
+    }]);
+    vi.mocked(createRun).mockResolvedValue({ runId: "legacy-next", status: "created" });
+    renderHome();
+
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Continue using the older Host" } });
+    await screen.findByText("Finished on an older Host");
+    const startButton = screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement;
+    expect(startButton.disabled).toBe(false);
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalled());
   });
 });

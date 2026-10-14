@@ -7,8 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { runInNewContext } from "node:vm";
+import type { CuaDriverLike } from "./cua-sdk-contract.js";
 import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-grounding.js";
-import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
+import { resolveOwnedManagedBrowserWindow } from "./managed-browser-resolver.js";
+import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, browserBoundsToCuaScaleFromPageMetrics, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, createManagedBrowserWindowBindingHint, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, inspectManagedPageActivity, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserDevToolsPage, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
 describe("managed browser host pilot", () => {
   it("selects a platform browser and bounded executable candidates", () => {
@@ -21,18 +23,6 @@ describe("managed browser host pilot", () => {
       .toContain("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe");
     expect(managedBrowserExecutableCandidates("chromium", "linux"))
       .toContain("/usr/bin/chromium");
-  });
-  it("keeps the CDP page expression bounded to interactive content and documents boundaries", () => {
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("shadowRoot");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("deviceScaleFactor");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain('coordinateSpace: "css"');
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("iframe documents are intentionally not traversed");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("canvasLike");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("aria-labelledby");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).toContain("selectedOptions");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain("outerHTML");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain("nodeId");
-    expect(MANAGED_DOM_EVALUATION_SCRIPT).not.toContain(".value");
   });
 
   it("uses bounded accessible names and selected descriptions in a synthetic page", () => {
@@ -115,6 +105,44 @@ describe("managed browser host pilot", () => {
     expect(evaluation.candidates.length).toBeLessThanOrEqual(256);
   });
 
+  it.each([
+    { kind: "visible", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "block", complete: false, shadow: false, ancestorOpacityHidden: false },
+    { kind: "hidden", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "none", complete: true, shadow: false, ancestorOpacityHidden: false },
+    { kind: "offscreen", rect: { x: 1_100, y: 100, width: 400, height: 300 }, display: "block", complete: true, shadow: false, ancestorOpacityHidden: false },
+    { kind: "shadow-visible", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "block", complete: false, shadow: true, ancestorOpacityHidden: false },
+    { kind: "ancestor-opacity-hidden", rect: { x: 100, y: 100, width: 400, height: 300 }, display: "block", complete: true, shadow: false, ancestorOpacityHidden: true },
+    { kind: "partially-visible", rect: { x: -25, y: 100, width: 400, height: 300 }, display: "block", complete: false, shadow: false, ancestorOpacityHidden: false },
+  ] as const)("reports DOM coverage for a $kind untraversed iframe", ({ rect, display, complete, shadow, ancestorOpacityHidden }) => {
+    const frame = syntheticElement("iframe", { rect });
+    const ancestor = ancestorOpacityHidden ? syntheticElement("div", { children: [frame] }) : undefined;
+    const shadowHost = shadow ? syntheticElement("div") : undefined;
+    if (shadowHost !== undefined) {
+      Object.defineProperty(shadowHost, "shadowRoot", {
+        value: { querySelectorAll: (selector: string) => selector === "*" ? [frame] : [] },
+      });
+    }
+    const roots = shadowHost === undefined ? [ancestor ?? frame] : [shadowHost];
+    const page = new SyntheticDocument(roots);
+    const visibilityCheck = vi.fn((options: { checkOpacity: boolean; checkVisibilityCSS: boolean }) =>
+      !(ancestorOpacityHidden && options.checkOpacity && options.checkVisibilityCSS));
+    Object.defineProperty(frame, "checkVisibility", { value: visibilityCheck });
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: (element: SyntheticElement) => ({
+        display: element === frame ? display : "block",
+        visibility: "visible",
+        pointerEvents: "auto",
+        opacity: element === ancestor && ancestorOpacityHidden ? "0" : "1",
+      }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
+    }) as SyntheticEvaluation;
+
+    expect(evaluation.candidates).toEqual([]);
+    expect(evaluation.complete).toBe(complete);
+    expect(visibilityCheck).toHaveBeenCalledWith({ checkOpacity: true, checkVisibilityCSS: true });
+  });
+
   it("reuses label and aria-labelledby names when revalidating a DOM click", () => {
     const label = syntheticElement("label", { attrs: { for: "arrival" }, textContent: "Arrival time" });
     const labelledInput = syntheticElement("input", {
@@ -131,11 +159,13 @@ describe("managed browser host pilot", () => {
       attrs: { "aria-label": "user@example.com" },
       rect: { x: 10, y: 90, width: 120, height: 24 },
     });
-    const page = new SyntheticDocument([label, labelledInput, ariaLabel, ariaInput, emailButton]);
+    const previousArrow = syntheticElement("a", { rect: { x: 10, y: 130, width: 24, height: 24 } });
+    const page = new SyntheticDocument([label, labelledInput, ariaLabel, ariaInput, emailButton, previousArrow]);
     const context = {
       document: page,
       Element: SyntheticElement,
       getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1 },
     };
     const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
       ...context,
@@ -145,12 +175,13 @@ describe("managed browser host pilot", () => {
       { role: "textbox", name: "Arrival time", element: labelledInput },
       { role: "textbox", name: "Departure time", element: ariaInput },
       { role: "button", name: "user@example.com", element: emailButton },
+      { role: "link", name: undefined, element: previousArrow },
     ]) {
       const candidate = evaluation.candidates.find((item) => item.name === expected.name);
       expect(candidate).toBeDefined();
       const result = runInNewContext(buildManagedDomClickExpression({
         role: expected.role,
-        name: expected.name,
+        ...(expected.name === undefined ? {} : { name: expected.name }),
         frame: candidate?.frame as { x: number; y: number; width: number; height: number },
         fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
       }), context) as { status: string };
@@ -182,7 +213,124 @@ describe("managed browser host pilot", () => {
     expect(replacement.clicked).toBe(false);
   });
 
-  it("ignores non-input type and refuses occluded native click probes without dispatch", () => {
+  it("normalizes live accessible names symmetrically and keeps click validation fail-closed", () => {
+    const fullWidthName = "M6 芯片 速度迅疾如飞，性能表现更上一层楼，处理日常个人事务、专业工作和进行各类创作，都得心应手。 12 核中央处理器、12 核图形处理器、双 16 核神经网络引擎 RMB 6999 起 或 RMB 292/月 (24 期) 起";
+    const normalizedName = fullWidthName.normalize("NFKC");
+    const first = syntheticElement("input", { attrs: { type: "radio", "aria-label": fullWidthName } });
+    const page = new SyntheticDocument([first]);
+    const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
+    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
+    const binding = { role: "radio", name: fullWidthName, frame: candidate.frame as { x: number; y: number; width: number; height: number }, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate), validateOnly: true };
+
+    expect(candidate.name).toBe(fullWidthName);
+    expect(normalizedName).not.toBe(fullWidthName);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(first.clicked).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, name: "M6, Other, Price" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, frame: { ...binding.frame, x: binding.frame.x + 5 } }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+
+    const separateDuplicate = syntheticElement("input", {
+      attrs: { type: "radio", "aria-label": fullWidthName },
+      rect: { ...first.getBoundingClientRect(), y: first.getBoundingClientRect().y + 36 },
+    });
+    const separatePage = new SyntheticDocument([first, separateDuplicate]);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: separatePage }))
+      .toMatchObject({ status: "completed" });
+    expect(first.clicked).toBe(false);
+    expect(separateDuplicate.clicked).toBe(false);
+
+    const duplicate = syntheticElement("input", {
+      attrs: { type: "radio", "aria-label": fullWidthName },
+      rect: first.getBoundingClientRect(),
+    });
+    const ambiguousPage = new SyntheticDocument([first, duplicate]);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: ambiguousPage })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS" });
+    expect(first.clicked).toBe(false);
+    expect(duplicate.clicked).toBe(false);
+  });
+
+  it("round-trips a real nested onclick list item without treating cursor or text as interactive", () => {
+    const suggestionText = "上海虹桥shanghaihongqiao";
+    const child = syntheticElement("span", { textContent: "上海虹桥", rect: { x: 125, y: 388, width: 65, height: 19 } });
+    const phonetic = syntheticElement("span", { textContent: "shanghaihongqiao", rect: { x: 125, y: 407, width: 120, height: 16 } });
+    const suggestion = syntheticElement("li", {
+      children: [child, phonetic],
+      textContent: "上海虹桥shanghaihongqiao",
+      rect: { x: 125, y: 385.5, width: 334, height: 24 },
+      onclick: () => undefined,
+    });
+    const cursorOnly = syntheticElement("li", { textContent: "Not clickable", rect: { x: 10, y: 100, width: 100, height: 24 } });
+    const nonFunctionHandler = syntheticElement("li", { textContent: "Also not clickable", onclick: "javascript:alert(1)" });
+    const page = new SyntheticDocument([suggestion, cursorOnly, nonFunctionHandler]);
+    const context = {
+      document: page,
+      Element: SyntheticElement,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto", cursor: "pointer" }),
+      window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 },
+    };
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation;
+    const candidate = evaluation.candidates.find((item) => item.name === suggestionText)!;
+    const binding = {
+      role: "generic",
+      name: suggestionText,
+      frame: candidate.frame as { x: number; y: number; width: number; height: number },
+      fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate),
+    };
+
+    expect(candidate).toMatchObject({ tagName: "li", ariaRole: "generic", name: suggestionText, interactive: true });
+    expect(candidate.frame).toEqual({ x: 125, y: 385.5, width: 334, height: 24 });
+    expect(evaluation.candidates.some((item) => item.name === "Not clickable" || item.name === "Also not clickable")).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(suggestion.clicked).toBe(true);
+    expect(child.clicked).toBe(false);
+    expect(phonetic.clicked).toBe(false);
+
+    const occludedSuggestion = syntheticElement("li", {
+      textContent: suggestionText,
+      rect: suggestion.getBoundingClientRect(),
+      onclick: () => undefined,
+    });
+    const occludedPage = new SyntheticDocument([occludedSuggestion]);
+    occludedPage.hitTarget = syntheticElement("div");
+    const occludedContext = { ...context, document: occludedPage };
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, occludedContext) as SyntheticEvaluation).candidates).toEqual([]);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), occludedContext))
+      .toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+    expect(occludedSuggestion.clicked).toBe(false);
+
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, name: "上海南站" }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(runInNewContext(buildManagedDomClickExpression({ ...binding, frame: { ...binding.frame, x: binding.frame.x + 5 } }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    const withoutHandler = syntheticElement("li", { children: [child], textContent: suggestionText, rect: suggestion.getBoundingClientRect() });
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: new SyntheticDocument([withoutHandler]) })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_BBOX_MISMATCH" });
+    expect(withoutHandler.clicked).toBe(false);
+
+    const nestedDuplicate = syntheticElement("li", { textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined });
+    const ambiguous = syntheticElement("li", { children: [nestedDuplicate], textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined });
+    const ambiguousPage = new SyntheticDocument([ambiguous]);
+    ambiguousPage.hitTarget = nestedDuplicate;
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { ...context, document: ambiguousPage }) as SyntheticEvaluation).candidates.filter((item) => item.name === suggestionText)).toHaveLength(2);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), { ...context, document: ambiguousPage })).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CANDIDATE_AMBIGUOUS" });
+    expect(ambiguous.clicked).toBe(false);
+    expect(nestedDuplicate.clicked).toBe(false);
+
+    for (const disabled of [
+      syntheticElement("li", { textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined, disabled: true }),
+      syntheticElement("li", { textContent: suggestionText, rect: suggestion.getBoundingClientRect(), onclick: () => undefined, attrs: { "aria-disabled": "true" } }),
+    ]) {
+      const disabledPage = new SyntheticDocument([disabled]);
+      const disabledCandidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, { ...context, document: disabledPage }) as SyntheticEvaluation).candidates[0]!;
+      expect(disabledCandidate.state).toMatchObject({ enabled: false });
+      expect(runInNewContext(buildManagedDomClickExpression({
+        role: "generic",
+        name: suggestionText,
+        frame: disabledCandidate.frame as { x: number; y: number; width: number; height: number },
+        fingerprint: domCandidateFingerprint(disabledCandidate as DomGroundingRawCandidate),
+      }), { ...context, document: disabledPage })).toMatchObject({ status: "refused", driverCode: "GROUNDING_ELEMENT_DISABLED" });
+      expect(disabled.clicked).toBe(false);
+    }
+  });
+
+  it("ignores non-input types, refuses occluded click probes without dispatch, and removes their candidates", () => {
     const button = syntheticElement("button", { attrs: { type: "submit", "aria-label": "Go" } });
     const page = new SyntheticDocument([button]);
     const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
@@ -193,7 +341,12 @@ describe("managed browser host pilot", () => {
     page.hitTarget = syntheticElement("div");
     expect(runInNewContext(buildManagedDomClickExpression({ ...binding, validateOnly: true }), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
     expect(button.clicked).toBe(false);
+    expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_OCCLUDED" });
+    expect(button.clicked).toBe(false);
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates).toEqual([]);
+    page.hitTarget = button;
     expect(runInNewContext(buildManagedDomClickExpression(binding), context)).toMatchObject({ status: "completed" });
+    expect(button.clicked).toBe(true);
   });
 
   it.each([
@@ -201,31 +354,20 @@ describe("managed browser host pilot", () => {
     { x: 10, y: -10, width: 120, height: 24 },
     { x: 950, y: 10, width: 120, height: 24 },
     { x: 10, y: 790, width: 120, height: 24 },
-  ])("refuses a clipped editable native-click probe at %j without input", (rect) => {
+  ])("refuses a clipped click at %j in both dispatch modes without input", (rect) => {
     const input = syntheticElement("input", { attrs: { "aria-label": "Query" }, rect });
     const page = new SyntheticDocument([input]);
     const context = { document: page, Element: SyntheticElement, getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }), window: { innerWidth: 1000, innerHeight: 800, devicePixelRatio: 1 } };
-    const candidate = (runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates[0]!;
-    const result = runInNewContext(buildManagedDomClickExpression({ role: "textbox", name: "Query", frame: rect, fingerprint: domCandidateFingerprint(candidate as DomGroundingRawCandidate), validateOnly: true }), context);
-    expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CLIPPED" });
-    expect(input.clicked).toBe(false);
-    expect(page.activeElement).toBeNull();
+    const fingerprint = domCandidateFingerprint({ tagName: "input", ariaRole: "textbox", name: "Query", inputType: "text" });
+    for (const validateOnly of [false, true]) {
+      const result = runInNewContext(buildManagedDomClickExpression({ role: "textbox", name: "Query", frame: rect, fingerprint, validateOnly }), context);
+      expect(result).toMatchObject({ status: "refused", driverCode: "DOM_CLICK_CLIPPED" });
+      expect(input.clicked).toBe(false);
+      expect(page.activeElement).toBeNull();
+    }
+    expect((runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation).candidates).toEqual([]);
   });
 
-  it("keeps the local fixture coverage explicit for controls, canvas, shadow DOM and iframe boundaries", async () => {
-    // Fixture strings are supplementary; executable round-trip tests above
-    // and below exercise the production collector and fingerprint function.
-    const fixture = await readFile(new URL("./fixtures/managed-dom-fixture.html", import.meta.url), "utf8");
-    expect(fixture).toContain('role="button"');
-    expect(fixture).toContain("<input");
-    expect(fixture).toContain('type="checkbox"');
-    expect(fixture).toContain('type="radio"');
-    expect(fixture).toContain('type="range"');
-    expect(fixture).toContain("<canvas");
-    expect(fixture).toContain("attachShadow");
-    expect(fixture).toContain("<iframe");
-    expect(fixture).not.toContain("value=");
-  });
 
   it("requires an owned-window resolver and managed URL", () => {
     expect(() => new ManagedBrowserHost({ browser: "edge", url: "https://example.com" } as ManagedBrowserHostOptions)).toThrow(/owned-window resolver/iu);
@@ -294,6 +436,7 @@ describe("managed browser host pilot", () => {
       startupTimeoutMs: 100,
       resolveOwnedWindowTarget: async () => undefined,
       spawnManagedBrowser: (_executable, args) => {
+        expect(args).toContain("--force-renderer-accessibility");
         const profileArgument = args.find((argument) => argument.startsWith("--user-data-dir="));
         if (profileArgument === undefined) throw new Error("test did not receive the owned profile argument");
         profileRoot = profileArgument.slice("--user-data-dir=".length);
@@ -307,6 +450,40 @@ describe("managed browser host pilot", () => {
     expect(waitForProcessTree).toHaveBeenCalledOnce();
     expect(profileRoot).toBeDefined();
     await expect(access(profileRoot!)).rejects.toThrow();
+  });
+
+  it("enables renderer accessibility for an owned persistent managed profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-persistent-managed-accessibility-"));
+    const abort = new AbortController();
+    const child = { pid: 654323, exitCode: null } as unknown as ChildProcess;
+    let profileRoot: string | undefined;
+    const host = new ManagedBrowserHost({
+      browser: "edge",
+      url: "about:blank",
+      executablePath: process.execPath,
+      profileMode: "persistent",
+      profileLabel: "fixture-accessibility",
+      persistentProfileRoot: root,
+      startupTimeoutMs: 100,
+      resolveOwnedWindowTarget: async () => undefined,
+      spawnManagedBrowser: (_executable, args) => {
+        expect(args).toContain("--force-renderer-accessibility");
+        const profileArgument = args.find((argument) => argument.startsWith("--user-data-dir="));
+        if (profileArgument === undefined) throw new Error("test did not receive the owned persistent profile argument");
+        profileRoot = profileArgument.slice("--user-data-dir=".length);
+        abort.abort(new Error("fixture abort after persistent-profile spawn"));
+        return child;
+      },
+      cleanupHooks: { waitForProcessTree: async () => true, closeGracefully: async () => true },
+    });
+
+    try {
+      await expect(host.start(abort.signal)).rejects.toThrow("fixture abort after persistent-profile spawn");
+      expect(profileRoot).toBeDefined();
+      await expect(access(profileRoot!)).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("reports the exact startup phase with bounded redacted stderr and cleanup certainty", async () => {
@@ -634,6 +811,24 @@ describe("managed browser host pilot", () => {
     }
   });
 
+  it("waits for a fresh port when the Windows browser launcher exits successfully", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-launcher-exit-"));
+    const portFile = join(root, "DevToolsActivePort");
+    const launcherState: { exitCode: number | null; signalCode: string | null } = { exitCode: null, signalCode: null };
+    const child = launcherState as unknown as ChildProcess;
+    try {
+      const freshnessBoundaryMs = await prepareManagedBrowserDevToolsLaunch(root);
+      setTimeout(() => {
+        launcherState.exitCode = 0;
+        void writeFile(portFile, "4444\nfresh-browser-after-launcher-exit\n", "utf8");
+      }, 60);
+      await expect(waitForDevToolsPort(root, child, 1_000, new AbortController().signal, freshnessBoundaryMs))
+        .resolves.toEqual({ port: 4444 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("continues rejecting a DevTools port file whose explicit mtime predates launch", async () => {
     const root = await mkdtemp(join(tmpdir(), "computer-harness-devtools-old-mtime-"));
     const portFile = join(root, "DevToolsActivePort");
@@ -683,6 +878,22 @@ describe("managed browser host pilot", () => {
     })).rejects.toThrow(/startup timed out/iu);
   });
 
+  it("waits for a live DevTools endpoint after a clean launcher exit but rejects failed or signaled children", async () => {
+    const cleanLauncherExit = { exitCode: 0, signalCode: null } as unknown as ChildProcess;
+    let attempts = 0;
+    await expect(waitForDevToolsBrowserEndpoint(1234, cleanLauncherExit, 300, new AbortController().signal, async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("endpoint not ready");
+      return "ws://127.0.0.1:1234/devtools/browser/fresh";
+    })).resolves.toContain("fresh");
+    expect(attempts).toBeGreaterThanOrEqual(3);
+
+    await expect(waitForDevToolsBrowserEndpoint(1234, { exitCode: 2, signalCode: null } as unknown as ChildProcess, 1_000, new AbortController().signal))
+      .rejects.toThrow(/exited before DevTools endpoint became ready/iu);
+    await expect(waitForDevToolsBrowserEndpoint(1234, { exitCode: null, signalCode: "SIGTERM" } as unknown as ChildProcess, 1_000, new AbortController().signal))
+      .rejects.toThrow(/exited before DevTools endpoint became ready/iu);
+  });
+
   it("rejects missing, multi-window and mismatched ownership evidence", () => {
     expect(() => validateOwnedWindowResolution(10, undefined)).toThrow(/no exact target/iu);
     const base: ManagedBrowserWindowResolution = {
@@ -692,6 +903,86 @@ describe("managed browser host pilot", () => {
     expect(validateOwnedWindowResolution(10, base)).toEqual(base.target);
     expect(() => validateOwnedWindowResolution(10, { ...base, ownershipEvidence: { ...base.ownershipEvidence, windowCount: 2 } })).toThrow(/ownership_mismatch/iu);
     expect(() => validateOwnedWindowResolution(10, { ...base, ownershipEvidence: { ...base.ownershipEvidence, processId: 99 } })).toThrow(/ownership_mismatch/iu);
+  });
+
+  it.each([0.8, 1, 1.25, 1.5])("separates page zoom %s from local window scale using CDP viewport metrics", (pageZoom) => {
+    for (const osScale of [1, 1.25, 1.5]) {
+      const metrics = managedBrowserLayoutMetrics(pageZoom, osScale);
+      expect(browserBoundsToCuaScaleFromPageMetrics(metrics, metrics, "win32")).toBeCloseTo(osScale);
+      expect(browserBoundsToCuaScaleFromPageMetrics(metrics, metrics, "linux")).toBeCloseTo(osScale);
+    }
+  });
+
+  it("fails closed when trusted viewport scale evidence is absent, inconsistent, or changes", () => {
+    const valid = managedBrowserLayoutMetrics(1.25, 1.5);
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, valid, "win32")).toBe(1.5);
+    expect(browserBoundsToCuaScaleFromPageMetrics(undefined, valid, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, undefined, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, managedBrowserLayoutMetrics(1.5, 1.5), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, managedBrowserLayoutMetrics(1.25, 1), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics({ cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1 } }, valid, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics({
+      visualViewport: { clientWidth: 1600, clientHeight: 900 },
+      cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1 },
+    }, valid, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(managedBrowserLayoutMetrics(1, 0.8), managedBrowserLayoutMetrics(1, 0.8), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(undefined, undefined, "darwin")).toBe(1);
+    expect(browserBoundsToCuaScaleFromPageMetrics(valid, valid, "aix")).toBeUndefined();
+  });
+
+  it("uses trusted CDP geometry through activity, hint, both validators, and rejects a 2x sibling despite page DPR override", async () => {
+    const page: ManagedBrowserDevToolsPage = {
+      type: "page",
+      id: "bound-page",
+      webSocketDebuggerUrl: "ws://page-fixture",
+    };
+    const browserBounds = { left: 10, top: 10, width: 800, height: 600 };
+    const metrics = managedBrowserLayoutMetrics(1, 1);
+    const cdp = managedBrowserActivityCdpFixture({ browserBounds, layoutMetrics: [metrics, metrics], spoofedPageDpr: 2 });
+    const signal = new AbortController().signal;
+    const selected = await resolveManagedBrowserActivePageSet(
+      [page],
+      (target, activitySignal) => inspectManagedPageActivity(target, "ws://browser-fixture", activitySignal, cdp.connect, "win32"),
+      signal,
+      77,
+    );
+    expect(selected).toMatchObject({
+      page: { id: "bound-page" }, browserWindowId: 77, visibilityState: "visible",
+      browserBounds: { x: 10, y: 10, width: 800, height: 600 }, browserBoundsToCuaScale: 1,
+    });
+    expect(cdp.calls.filter((call) => call.method === "Page.getLayoutMetrics")).toHaveLength(2);
+    const runtimeCall = cdp.calls.find((call) => call.method === "Runtime.evaluate");
+    expect(runtimeCall?.params.expression).not.toContain("devicePixelRatio");
+
+    const hint = createManagedBrowserWindowBindingHint(selected!, [4321, 5432]);
+    expect(hint).toMatchObject({ browserWindowId: 77, browserBoundsToCuaScale: 1, ownedProcessIds: [4321, 5432] });
+    const driver = managedBrowserWindowListDriver([
+      { pid: 5432, window_id: 1, bounds: { x: 548, y: 82, width: 344, height: 206 } },
+      { pid: 5432, window_id: 2, bounds: { x: 10, y: 10, width: 800, height: 600 } },
+      { pid: 5432, window_id: 3, bounds: { x: 20, y: 20, width: 1600, height: 1200 } },
+    ]);
+    const resolution = await resolveOwnedManagedBrowserWindow(driver, "managed-session", 4321, signal, hint);
+    expect(resolution).toBeDefined();
+    expect(resolution!.target).toEqual({ pid: 5432, windowId: 2 });
+    expect(validateOwnedWindowResolution(4321, resolution!, hint)).toEqual(resolution!.target);
+  });
+
+  it("omits only the scale when trusted CDP metrics are missing or change during activity collection", async () => {
+    const page: ManagedBrowserDevToolsPage = { type: "page", id: "bound-page", webSocketDebuggerUrl: "ws://page-fixture" };
+    const missing = managedBrowserActivityCdpFixture({ layoutMetrics: [undefined] });
+    const missingActivity = await inspectManagedPageActivity(page, "ws://browser-fixture", new AbortController().signal, missing.connect, "win32");
+    expect(missingActivity).toMatchObject({ visibilityState: "visible", hasFocus: true });
+    expect(missingActivity?.browserBoundsToCuaScale).toBeUndefined();
+
+    const changed = managedBrowserActivityCdpFixture({ layoutMetrics: [managedBrowserLayoutMetrics(1.25, 1.5), managedBrowserLayoutMetrics(1.5, 1.5)] });
+    const changedActivity = await inspectManagedPageActivity(page, "ws://browser-fixture", new AbortController().signal, changed.connect, "win32");
+    expect(changedActivity).toMatchObject({ visibilityState: "visible", hasFocus: true });
+    expect(changedActivity?.browserBoundsToCuaScale).toBeUndefined();
+
+    const mac = managedBrowserActivityCdpFixture({ layoutMetrics: [], spoofedPageDpr: 2 });
+    const macActivity = await inspectManagedPageActivity(page, "ws://browser-fixture", new AbortController().signal, mac.connect, "darwin");
+    expect(macActivity?.browserBoundsToCuaScale).toBe(1);
+    expect(mac.calls.some((call) => call.method === "Page.getLayoutMetrics")).toBe(false);
   });
 
   it("revalidates the bound page set without confusing navigation or a replacement tab", () => {
@@ -818,6 +1109,7 @@ interface SyntheticElementOptions {
   readonly tabIndex?: number;
   readonly disabled?: boolean;
   readonly isContentEditable?: boolean;
+  readonly onclick?: unknown;
   readonly rect?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 }
 
@@ -830,10 +1122,12 @@ interface SyntheticCandidate {
 
 interface SyntheticEvaluation {
   readonly candidates: readonly SyntheticCandidate[];
+  readonly complete: boolean;
 }
 
 class SyntheticElement {
   public onFocus: (() => void) | undefined;
+  public readonly onclick: unknown;
   public readonly localName: string;
   public readonly children: readonly SyntheticElement[];
   public readonly labels: readonly SyntheticElement[] | undefined;
@@ -845,7 +1139,8 @@ class SyntheticElement {
   public readonly shadowRoot: undefined;
   public clicked = false;
   private readonly attrs: Readonly<Record<string, string>>;
-  private readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  private rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  private readonly usesDefaultRect: boolean;
 
   public constructor(localName: string, options: SyntheticElementOptions = {}) {
     this.localName = localName;
@@ -857,8 +1152,18 @@ class SyntheticElement {
     this.tabIndex = options.tabIndex ?? -1;
     this.disabled = options.disabled === true;
     this.isContentEditable = options.isContentEditable === true;
+    this.onclick = options.onclick;
     this.shadowRoot = undefined;
+    this.usesDefaultRect = options.rect === undefined;
     this.rect = options.rect ?? { x: 10, y: 10, width: 120, height: 24 };
+  }
+
+  public layoutDefaultAt(y: number): void {
+    if (this.usesDefaultRect) this.rect = { x: 10, y, width: 120, height: 24 };
+  }
+
+  public contains(element: SyntheticElement): boolean {
+    return this.descendants().includes(element);
   }
 
   public getAttribute(name: string): string | null {
@@ -900,13 +1205,27 @@ class SyntheticDocument {
   public activeElement: SyntheticElement | null = null;
   public focused = true;
   public hitTarget: SyntheticElement | undefined;
-  public elementFromPoint(): SyntheticElement | null { return this.hitTarget ?? this.allElements()[0] ?? null; }
+  public elementFromPoint(x: number, y: number): SyntheticElement | null {
+    if (this.hitTarget !== undefined) return this.hitTarget;
+    return this.allElements().find((element) => {
+      const rect = element.getBoundingClientRect();
+      return (["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || typeof element.onclick === "function")
+        && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+    }) ?? null;
+  }
   public hasFocus(): boolean { return this.focused; }
   private readonly roots: readonly SyntheticElement[];
 
   public constructor(roots: readonly SyntheticElement[]) {
     this.roots = roots;
-    for (const element of this.allElements()) element.onFocus = () => { this.activeElement = element; };
+    let y = 10;
+    for (const element of this.allElements()) {
+      element.onFocus = () => { this.activeElement = element; };
+      if (["a", "button", "input", "select", "textarea", "summary"].includes(element.localName)) {
+        element.layoutDefaultAt(y);
+        y += 36;
+      }
+    }
   }
 
   public querySelectorAll(selector: string): readonly SyntheticElement[] {
@@ -944,4 +1263,68 @@ function serverTextFrame(payload: Buffer, opcode: number, final: boolean): Buffe
   if (payload.length < 126) header[1] = payload.length;
   else { header[1] = 126; header.writeUInt16BE(payload.length, 2); }
   return Buffer.concat([header, payload]);
+}
+
+function managedBrowserActivityCdpFixture(options: {
+  readonly layoutMetrics: readonly (unknown | undefined)[];
+  readonly spoofedPageDpr?: number;
+  readonly browserBounds?: { readonly left: number; readonly top: number; readonly width: number; readonly height: number };
+}): {
+  readonly connect: Parameters<typeof inspectManagedPageActivity>[3];
+  readonly calls: Array<{ readonly url: string; readonly method: string; readonly params: Record<string, unknown> }>;
+} {
+  const calls: Array<{ readonly url: string; readonly method: string; readonly params: Record<string, unknown> }> = [];
+  let metricsRead = 0;
+  const connect: Parameters<typeof inspectManagedPageActivity>[3] = async (url, _signal) => ({
+    async command(method, params) {
+      calls.push({ url, method, params });
+      if (url === "ws://browser-fixture" && method === "Browser.getWindowForTarget") {
+        return { result: { windowId: 77 } };
+      }
+      if (url === "ws://browser-fixture" && method === "Browser.getWindowBounds") {
+        return { result: { bounds: options.browserBounds ?? { left: 8, top: 8, width: 820, height: 520 } } };
+      }
+      if (url === "ws://page-fixture" && method === "Page.getLayoutMetrics") {
+        return { result: options.layoutMetrics[metricsRead++] };
+      }
+      if (url === "ws://page-fixture" && method === "Runtime.evaluate") {
+        return { result: { result: { value: {
+          visibilityState: "visible",
+          hasFocus: true,
+          // Simulates a page-controlled DPR value. Production activity must
+          // not request or use it; window bounds use only Page metrics above.
+          ...(options.spoofedPageDpr === undefined ? {} : { pageDevicePixelRatio: options.spoofedPageDpr }),
+          navigationKey: "123.5",
+        } } } };
+      }
+      throw new Error(`unexpected CDP command ${method}`);
+    },
+    close() {},
+  });
+  return { connect, calls };
+}
+
+function managedBrowserLayoutMetrics(pageZoom: number, osScale: number): Record<string, unknown> {
+  const cssWidth = 800;
+  const cssHeight = 600;
+  const cssToPhysical = pageZoom * osScale;
+  return {
+    visualViewport: { clientWidth: cssWidth * cssToPhysical, clientHeight: cssHeight * cssToPhysical },
+    cssVisualViewport: { clientWidth: cssWidth, clientHeight: cssHeight, zoom: pageZoom },
+  };
+}
+
+function managedBrowserWindowListDriver(windows: readonly unknown[]): CuaDriverLike {
+  return {
+    async callTool() {
+      return {
+        isError: false,
+        degraded: false,
+        structuredJson: JSON.stringify({ windows }),
+        text: "",
+        images: [],
+        rawJson: "{}",
+      };
+    },
+  } as unknown as CuaDriverLike;
 }

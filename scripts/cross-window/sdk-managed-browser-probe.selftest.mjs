@@ -110,10 +110,10 @@ test("production app-runtime managed-browser assembly forwards only the explicit
     constructor(options) { delegateOptionsSeen.push(options); }
     async open() { return browserSession; }
     async listWindows() {
-      return [
+      return { options: [
         { windowRef: "offline-browser-ref", appName: "Microsoft Edge", title: "safe page", isCurrent: true },
         { windowRef: "offline-wps-ref", appName: "WPS Office", title: "HarnessProbe-offline-only", isCurrent: false },
-      ];
+      ], truncated: false, omittedCount: 0 };
     }
     async execute(session, action) {
       lifecycle.actionRefs.push(action.windowRef);
@@ -253,7 +253,7 @@ test("Host cleanup failure becomes a Runtime diagnostic and leaves the Applicati
             };
           }
           async execute() { throw new Error("the cleanup fixture does not execute computer actions"); }
-          async listWindows() { return []; }
+          async listWindows() { return { options: [], truncated: false, omittedCount: 0 }; }
           async close() { delegateCloseCalls += 1; }
         },
       };

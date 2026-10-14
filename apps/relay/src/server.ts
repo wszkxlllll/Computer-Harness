@@ -489,11 +489,11 @@ export function createRelayServer(config: RelayServerConfig): RelayServerHandle 
     }
     const bodyText = responseMessage.body ?? "";
     const bodyBytes = Buffer.from(bodyText, "utf8");
-    if (bodyBytes.byteLength > MAX_JSON_RESPONSE_BYTES || !isJsonContentType(responseMessage.contentType)) {
+    if (bodyBytes.byteLength > pending.route.maxResponseBytes || !isJsonContentType(responseMessage.contentType)) {
       writeError(response, 502, "invalid_host_json_response");
       return;
     }
-    let body = bodyText.length === 0 ? null : parseBoundedJson(bodyBytes, MAX_JSON_RESPONSE_BYTES);
+    let body = bodyText.length === 0 ? null : parseBoundedJson(bodyBytes, pending.route.maxResponseBytes);
     if (bodyText.length > 0 && body === null) {
       writeError(response, 502, "invalid_host_json_response");
       return;

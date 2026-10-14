@@ -410,7 +410,8 @@ async function runProtocolScenario({ modules, provider, contextMode, httpClient,
 
 function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId, scenarioConfig, requestLimit) {
   if (scenario.outcome !== "succeeded") {
-    throw new ProbeFailure("PROTOCOL_SCENARIO_FAILED", `${provider}/${contextMode}/${scenarioId} synthetic switch scenario did not succeed.`);
+    const failure = scenario.events.findLast((event) => event.type === "runtime.error");
+    throw new ProbeFailure("PROTOCOL_SCENARIO_FAILED", `${provider}/${contextMode}/${scenarioId} synthetic switch scenario did not succeed: ${failure?.message ?? "unknown runtime outcome"}`);
   }
   if (httpClient.records.length > requestLimit || httpClient.records.length !== scenario.snapshot.modelRequestCount) {
     throw new ProbeFailure("PROTOCOL_REQUEST_COUNT", `${provider}/${contextMode}/${scenarioId} exceeded the bounded request cap or model-request accounting differed.`);
@@ -448,27 +449,46 @@ function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId,
       .find((text) => text.includes("Available tools (semantic guidance; Runtime validates exact arguments):"));
     const listDescription = scenario.registry.get("list_windows")?.description;
     const switchDescription = scenario.registry.get("switch_window")?.description;
+    const typeTool = scenario.registry.modelTools().find((tool) => tool.name === "type");
+    const typeSchema = typeTool?.inputSchema;
+    const typeProperties = typeSchema !== null && typeof typeSchema === "object" && !Array.isArray(typeSchema) &&
+        typeSchema.properties !== null && typeof typeSchema.properties === "object" && !Array.isArray(typeSchema.properties)
+      ? typeSchema.properties
+      : undefined;
+    const typeTextDescription = typeProperties?.text !== null && typeof typeProperties?.text === "object" && !Array.isArray(typeProperties.text)
+      ? typeProperties.text.description
+      : undefined;
+    const typeElementRefDescription = typeProperties?.elementRef !== null && typeof typeProperties?.elementRef === "object" && !Array.isArray(typeProperties.elementRef)
+      ? typeProperties.elementRef.description
+      : undefined;
     const listLine = catalogText?.split("\n").find((line) => line.startsWith("- list_windows("));
     const switchLine = catalogText?.split("\n").find((line) => line.startsWith("- switch_window("));
+    // Runtime may filter type from this switch-only turn; validate its full
+    // presentation when offered, without widening the fixture's tool access.
+    const typeLine = catalogText?.split("\n").find((line) => line.startsWith("- type("));
+    const compact = (value) => value.replace(/\s+/gu, " ").trim();
     if (catalogText === undefined || listDescription === undefined || switchDescription === undefined ||
-        listDescription.length > 180 || switchDescription.length > 180 ||
-        !listLine?.endsWith(listDescription) || !switchLine?.endsWith(switchDescription) ||
-        !listDescription.startsWith("List opened windows (") ||
-        !listDescription.includes("windowRef, appName, title, isCurrent") ||
-        !listDescription.includes("untrusted") || !listDescription.includes("survive ordinary observations") ||
-        !listDescription.includes("expire on refresh, switch, Run end") ||
-        !switchDescription.includes("Switch to a listed open window using windowRef") ||
-        !switchDescription.includes("sole call this turn") ||
-        !switchDescription.includes("wait for a fresh observation before any further action")) {
-      throw new ProbeFailure("QWEN_TOOL_CATALOG_TRUNCATED", "Qwen outbound catalog omitted a complete cross-window safety instruction.");
+        typeof typeTool?.description !== "string" || typeof typeTextDescription !== "string" || typeof typeElementRefDescription !== "string" ||
+        !listLine?.endsWith(compact(listDescription)) || !switchLine?.endsWith(compact(switchDescription)) ||
+        (typeLine !== undefined && !typeLine.endsWith(compact(typeTool.description))) ||
+        !listDescription.startsWith("List {windows,truncated,omittedCount}") ||
+        !listDescription.includes("untrusted") || !listDescription.includes("survive observations") ||
+        !listDescription.includes("expire on refresh/switch/end") ||
+        !listDescription.includes("unlisted apps may exist") ||
+        !switchDescription.includes("not PID/HWND") || !switchDescription.includes("Desktop capture/input stays full") ||
+        !switchDescription.includes("native-window scope rebinds") || !switchDescription.includes("Already foreground: no-op") ||
+        !switchDescription.includes("Sole call this turn") || !switchDescription.includes("reobserve before next action") ||
+        (typeLine !== undefined && !typeLine.includes(`description=${JSON.stringify(compact(typeTextDescription))}`)) ||
+        (typeLine !== undefined && !typeLine.includes(`description=${JSON.stringify(compact(typeElementRefDescription))}`))) {
+      throw new ProbeFailure("QWEN_TOOL_CATALOG_TRUNCATED", "Qwen outbound catalog omitted a complete registered tool or parameter description.");
     }
   }
   const modelSwitches = [];
   let latestInventory;
   let latestListCallId;
   for (const event of scenario.events) {
-    if (event.type === "tool.call.completed" && event.result.callId === latestListCallId && Array.isArray(event.result.output)) {
-      latestInventory = event.result.output;
+    if (event.type === "tool.call.completed" && event.result.callId === latestListCallId && Array.isArray(event.result.output?.windows)) {
+      latestInventory = event.result.output.windows;
     }
     if (event.type !== "model.response.received" || event.turn.type !== "tool_calls") continue;
     for (const call of event.turn.calls) {
@@ -611,9 +631,9 @@ function latestWindowInventoryFromRequest(body) {
     if (start < 0) continue;
     try {
       const parsed = JSON.parse(content.slice(start));
-      if (parsed?.status === "completed" && Array.isArray(parsed.output) &&
-          parsed.output.some((option) => option !== null && typeof option === "object" && typeof option.windowRef === "string")) {
-        return parsed.output;
+      if (parsed?.status === "completed" && Array.isArray(parsed.output?.windows) &&
+          parsed.output.windows.some((option) => option !== null && typeof option === "object" && typeof option.windowRef === "string")) {
+        return parsed.output.windows;
       }
     } catch {
       // A different tool-result shape or a non-result message is not inventory evidence.
@@ -1138,7 +1158,7 @@ class SyntheticComputer {
       return { windowRef, appName: window.appName, title: window.title, isCurrent: this.activeTargetKey === window.key };
     });
     this.listedInventories.push(inventory);
-    return inventory;
+    return { options: inventory, truncated: false, omittedCount: 0 };
   }
 
   async observe(session, _observationId, signal) {
@@ -1263,8 +1283,8 @@ function summarizeScenario(scenario, provider, contextMode) {
   const inventoryResult = listCallId === undefined ? undefined : scenario.events.find((event) =>
     event.type === "tool.call.completed" && event.result.callId === listCallId,
   );
-  const inventoryOptions = inventoryResult?.type === "tool.call.completed" && Array.isArray(inventoryResult.result.output)
-    ? inventoryResult.result.output.filter((option) => option !== null && typeof option === "object" && !Array.isArray(option))
+  const inventoryOptions = inventoryResult?.type === "tool.call.completed" && Array.isArray(inventoryResult.result.output?.windows)
+    ? inventoryResult.result.output.windows.filter((option) => option !== null && typeof option === "object" && !Array.isArray(option))
         .map((option) => ({ windowRef: option.windowRef, appName: option.appName, title: option.title, isCurrent: option.isCurrent }))
     : [];
   const switchCall = modelTurns.flatMap((event) => event.type === "model.response.received" && event.turn.type === "tool_calls" ? event.turn.calls : [])

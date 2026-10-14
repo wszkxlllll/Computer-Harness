@@ -31,6 +31,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
   const [offset, setOffset] = useState<Point>({ x: 0, y: 0 });
   const [imageLoaded, setImageLoaded] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
+  const [imageRetry, setImageRetry] = useState(0);
 
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { imageLoadedRef.current = imageLoaded; }, [imageLoaded]);
@@ -143,6 +144,13 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
     setOffset({ x: 0, y: 0 });
   }
 
+  function retryImage() {
+    imageLoadedRef.current = false;
+    setImageLoaded(false);
+    setImageFailed(false);
+    setImageRetry((current) => current + 1);
+  }
+
   return (
     <div ref={backdropRef} className="screenshot-viewer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
       <section
@@ -167,6 +175,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
         {notice && <p className="notice notice-warning viewer-notice">{notice}</p>}
 
         <div
+          id="screenshot-viewer-stage"
           className="screenshot-viewer-stage"
           aria-label="截图画面。可拖动平移，也可双指缩放。"
           onPointerDown={onPointerDown}
@@ -180,6 +189,7 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
             <p className="notice notice-error viewer-image-error" role="alert">无法载入这张截图。可能已过期或当前连接无权查看；无法据此核对画面。</p>
           ) : (
             <img
+              key={imageRetry}
               className={`screenshot-viewer-image${imageLoaded ? " is-loaded" : ""}`}
               src={runAssetUrl(runId, assetId)}
               alt={alt}
@@ -192,10 +202,11 @@ export function ScreenshotViewer({ runId, assetId, title, alt, newerAssetId, not
           )}
         </div>
 
-        <div className="screenshot-viewer-controls" aria-label="截图缩放和平移控制">
-          <button className="button button-secondary" type="button" onClick={() => scaleBy(1 / 1.25)} aria-label="缩小截图">−</button>
-          <span className="viewer-zoom-level" role="status" aria-live="polite">{Math.round(scale * 100)}%</span>
-          <button className="button button-secondary" type="button" onClick={() => scaleBy(1.25)} aria-label="放大截图">＋</button>
+        <div className="screenshot-viewer-controls" role="group" aria-label="截图缩放和平移控制">
+          {imageFailed && <button className="button button-secondary" type="button" onClick={retryImage}>重新载入截图</button>}
+          <button className="button button-secondary" type="button" onClick={() => scaleBy(1 / 1.25)} aria-label="缩小截图" aria-controls="screenshot-viewer-stage" disabled={scale <= MIN_SCALE}>−</button>
+          <span className="viewer-zoom-level" role="status" aria-live="polite" aria-label={`当前缩放比例 ${Math.round(scale * 100)}%`}>{Math.round(scale * 100)}%</span>
+          <button className="button button-secondary" type="button" onClick={() => scaleBy(1.25)} aria-label="放大截图" aria-controls="screenshot-viewer-stage" disabled={scale >= MAX_SCALE}>＋</button>
           <button className="button button-secondary viewer-fit-button" type="button" onClick={fit}>适合屏幕</button>
           <div className="viewer-pan-controls" role="group" aria-label="平移截图">
             <button className="button button-secondary" type="button" onClick={() => pan(0, 48)} aria-label="向上平移截图">↑</button>

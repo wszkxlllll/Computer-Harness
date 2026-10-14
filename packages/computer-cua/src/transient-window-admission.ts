@@ -30,6 +30,13 @@ export function assessOwnedTransientWindowAdmission(input: {
       reason: "the pre-action parent Surface generation is no longer active",
     };
   }
+  if (candidate.noActivate === true) {
+    return {
+      decision: "rejected",
+      code: "WINDOW_SCOPE_REQUIRED",
+      reason: "the exact owned HWND is WS_EX_NOACTIVATE and cannot become an independent foreground Surface",
+    };
+  }
   if (input.baselineTruncated === true || inventory.truncated === true) {
     return {
       decision: "manual",
@@ -51,11 +58,11 @@ export function assessOwnedTransientWindowAdmission(input: {
       reason: "an independent transient child must have a distinct exact HWND",
     };
   }
-  if (candidate.target.pid !== parent.pid) {
+  if (candidate.target.pid !== parent.pid && !hasTrustedCrossProcessOwner(candidate, parent, inventory)) {
     return {
       decision: "rejected",
       code: "WINDOW_SCOPE_REQUIRED",
-      reason: "an owned transient child must belong to the authorized parent's exact PID",
+      reason: "a cross-process transient child requires a complete Win32 snapshot proving its exact owner PID/HWND",
     };
   }
   if (candidate.ownerPid === undefined || candidate.ownerWindowId === undefined) {
@@ -136,6 +143,7 @@ export function assessOwnedTransientWindowAdmission(input: {
   const ownedVisible: CuaWindowInfo[] = [];
   for (const window of inventory.windows) {
     if (window.ownerPid !== parent.pid || window.ownerWindowId !== parent.windowId) continue;
+    if (window.noActivate === true) continue;
     if (window.isOnScreen === undefined) {
       return {
         decision: "manual",
@@ -179,6 +187,15 @@ export function assessOwnedTransientWindowAdmission(input: {
     };
   }
   return { decision: "admitted" };
+}
+
+function hasTrustedCrossProcessOwner(
+  candidate: CuaWindowInfo,
+  parent: CuaWindowTarget,
+  inventory: CuaWindowInventory,
+): boolean {
+  return inventory.source === "win32_relationship_probe" && inventory.complete && inventory.truncated !== true &&
+    candidate.ownerPid === parent.pid && candidate.ownerWindowId === parent.windowId;
 }
 
 function identityKey(target: CuaWindowTarget): string {

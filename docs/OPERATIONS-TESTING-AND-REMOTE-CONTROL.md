@@ -61,7 +61,7 @@ pnpm exec vitest run packages/computer-cua/src/cua-driver-computer.test.ts
 pnpm --filter @computer-harness/web test
 ```
 
-根 `test` 经 `scripts/test.mjs` 执行 Vitest 和 Node TAP，不是只跑一个测试器。CI 配置包含 Ubuntu Node22/24、Windows Node22、macOS Node22；它运行离线构建/测试，不控制真实 macOS/Windows 桌面。本地未推送改动没有新的远端 CI 结果，不引用旧绿灯为本轮背书。
+根 `test` 经 `scripts/test.mjs` 执行 Vitest 和 Node TAP，不是只跑一个测试器。CI 包含 Windows/macOS 验证及 Node 22/24 兼容矩阵，具体以 workflow 为准；它运行离线构建/测试，不控制真实桌面。本地未推送改动没有新的远端 CI 结果，不引用旧绿灯为本轮背书。2026-10-13 集成版本的完整回归和远端检查见[交付记录](./pr26-integration-audit-2026-10-11.md)；Preview 与源码版本分别核对。
 
 新功能最低回归：全部关闭基线、单开、必要组合、双 Run 隔离、两 Provider 投影、相关后端、失败/Abort/清理。新增代码测试与模型/GUI实测分别保存，不能以模拟返回值冒充真实调用。
 

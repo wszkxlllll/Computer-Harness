@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getRun, runEventsUrl } from "../api";
 import { decideSequence, reconnectCursor } from "../event-sequence";
 import type { PendingRequestBase, RemoteEvent, RunNotice, RunSnapshot } from "../types";
@@ -34,9 +34,9 @@ function decodeNotice(event: RemoteEvent): RunNotice | undefined {
   if (!data || data.type !== "run.notice" || typeof data.noticeId !== "string" ||
       typeof data.text !== "string" || !Number.isSafeInteger(data.eventSequence) ||
       (data.delivery !== "polite" && data.delivery !== "interrupt") ||
-      !["progress", "approval", "question", "error", "result"].includes(String(data.kind))) return undefined;
+      !["progress", "approval", "question", "handoff", "error", "result"].includes(String(data.kind))) return undefined;
   const kind = data.kind as RunNotice["kind"];
-  if ((kind === "approval" || kind === "question") && typeof data.pendingRequestId !== "string") return undefined;
+  if ((kind === "approval" || kind === "question" || kind === "handoff") && typeof data.pendingRequestId !== "string") return undefined;
   return {
     noticeId: data.noticeId,
     kind,
@@ -71,50 +71,67 @@ function decodeEvent(message: MessageEvent<string>, runId: string): RemoteEvent 
 }
 
 export function useRunFeed(runId: string): RunFeedState {
-  const [snapshot, setSnapshot] = useState<RunSnapshot>();
+  const [snapshotState, setSnapshotState] = useState<{ runId: string; snapshot: RunSnapshot }>();
   const [pendingState, setPendingState] = useState<{ runId: string; sequence: number; request?: PendingRequestBase }>();
-  const [events, setEvents] = useState<RemoteEvent[]>([]);
+  const [eventState, setEventState] = useState<{ runId: string; events: RemoteEvent[] }>({ runId, events: [] });
   const [noticeState, setNoticeState] = useState<{ runId: string; notices: RunNotice[] }>({ runId, notices: [] });
-  const [connection, setConnection] = useState<FeedConnection>("loading");
-  const [error, setError] = useState<string>();
-  const snapshotRef = useRef<RunSnapshot | undefined>(undefined);
-  const lastSequenceRef = useRef<number>(-1);
+  const [connectionState, setConnectionState] = useState<{ runId: string; connection: FeedConnection }>({ runId, connection: "loading" });
+  const [errorState, setErrorState] = useState<{ runId: string; error?: string }>({ runId });
+  const activeRunIdRef = useRef(runId);
+  useLayoutEffect(() => { activeRunIdRef.current = runId; }, [runId]);
+  const feedEpochRef = useRef(0);
+  const snapshotRef = useRef<{ runId: string; snapshot: RunSnapshot } | undefined>(undefined);
+  const lastSequenceRef = useRef<{ runId: string; sequence: number }>({ runId, sequence: -1 });
   const sourceRef = useRef<EventSource | undefined>(undefined);
-  const restartFeedRef = useRef<((sequence: number) => void) | undefined>(undefined);
+  const restartFeedRef = useRef<{ runId: string; epoch: number; restart: (sequence: number) => void } | undefined>(undefined);
   const refreshQueuedRef = useRef(false);
   const refreshTimerRef = useRef<number | undefined>(undefined);
+  const snapshot = snapshotState?.runId === runId ? snapshotState.snapshot : undefined;
+  const events = eventState.runId === runId ? eventState.events : [];
+  const connection = connectionState.runId === runId ? connectionState.connection : "loading";
+  const error = errorState.runId === runId ? errorState.error : undefined;
 
-  const acceptSnapshot = useCallback((next: RunSnapshot) => {
-    if (snapshotRef.current && next.sequence < snapshotRef.current.sequence) return;
-    snapshotRef.current = next;
-    lastSequenceRef.current = Math.max(lastSequenceRef.current, next.sequence);
-    setSnapshot(next);
-    setError(undefined);
+  const acceptSnapshot = useCallback((next: RunSnapshot, expectedEpoch = feedEpochRef.current) => {
+    if (activeRunIdRef.current !== runId || feedEpochRef.current !== expectedEpoch || next.runId !== runId) return;
+    const currentSnapshot = snapshotRef.current?.runId === runId ? snapshotRef.current.snapshot : undefined;
+    const lastSequence = lastSequenceRef.current.runId === runId ? lastSequenceRef.current.sequence : -1;
+    if ((currentSnapshot && next.sequence < currentSnapshot.sequence) || next.sequence < lastSequence) return;
+    snapshotRef.current = { runId, snapshot: next };
+    lastSequenceRef.current = { runId, sequence: Math.max(lastSequence, next.sequence) };
+    setSnapshotState({ runId, snapshot: next });
+    setErrorState({ runId });
     setPendingState((current) => !current || current.runId !== runId || next.sequence >= current.sequence
       ? { runId, sequence: next.sequence, request: next.pendingRequest }
       : current);
   }, [runId]);
 
   const refresh = useCallback(async () => {
-    setConnection("reconnecting");
+    const requestEpoch = feedEpochRef.current;
+    if (activeRunIdRef.current === runId) setConnectionState({ runId, connection: "reconnecting" });
     try {
       const next = await getRun(runId);
-      acceptSnapshot(next);
-      restartFeedRef.current?.(reconnectCursor(next.sequence));
+      if (activeRunIdRef.current !== runId || feedEpochRef.current !== requestEpoch || next.runId !== runId) return next;
+      acceptSnapshot(next, requestEpoch);
+      const restart = restartFeedRef.current;
+      if (restart?.runId === runId && restart.epoch === requestEpoch) restart.restart(reconnectCursor(next.sequence));
       return next;
     } catch (caught) {
-      setConnection("offline");
-      setError(caught instanceof Error ? caught.message : "暂时无法刷新任务状态。");
+      if (activeRunIdRef.current === runId && feedEpochRef.current === requestEpoch) {
+        setConnectionState({ runId, connection: "offline" });
+        setErrorState({ runId, error: caught instanceof Error ? caught.message : "暂时无法刷新任务状态。" });
+      }
       throw caught;
     }
   }, [acceptSnapshot, runId]);
 
   useEffect(() => {
+    const feedEpoch = ++feedEpochRef.current;
     let stopped = false;
     const seenNoticeIds = new Set<string>();
     let source: EventSource | undefined;
     let reconnectWarningTimer: number | undefined;
     let openFeed: (sequence: number) => void = () => undefined;
+    const feedIsCurrent = () => !stopped && activeRunIdRef.current === runId && feedEpochRef.current === feedEpoch;
 
     const clearReconnectWarningTimer = () => {
       if (reconnectWarningTimer === undefined) return;
@@ -126,53 +143,57 @@ export function useRunFeed(runId: string): RunFeedState {
       if (reconnectWarningTimer !== undefined) return;
       reconnectWarningTimer = window.setTimeout(() => {
         reconnectWarningTimer = undefined;
-        if (!stopped) setError(RECONNECT_WARNING);
+        if (feedIsCurrent()) setErrorState({ runId, error: RECONNECT_WARNING });
       }, RECONNECT_WARNING_DELAY_MS);
     };
 
     const onMessage = (rawEvent: Event) => {
       const message = rawEvent as MessageEvent<string>;
+      if (!feedIsCurrent()) return;
       const event = decodeEvent(message, runId);
       if (!event || event.runId !== runId) return;
       const payloadType = typeof event.data?.type === "string" ? event.data.type : event.type;
       const needsResync = event.type === "run.resync_required" || payloadType === "resync_required" || payloadType === "run.resync_required";
       if (needsResync) {
-        setConnection("reconnecting");
+        setConnectionState({ runId, connection: "reconnecting" });
         source?.close();
         void getRun(runId).then((next) => {
-          if (stopped) return;
-          acceptSnapshot(next);
+          if (!feedIsCurrent() || next.runId !== runId) return;
+          acceptSnapshot(next, feedEpoch);
           openFeed(next.sequence);
         }).catch(() => {
-          if (!stopped) {
-            setConnection("offline");
-            setError("连接中断，尚未同步到最新状态。请检查网络后刷新。");
+          if (feedIsCurrent()) {
+            setConnectionState({ runId, connection: "offline" });
+            setErrorState({ runId, error: "连接中断，尚未同步到最新状态。请检查网络后刷新。" });
           }
         });
         return;
       }
-      const previous = lastSequenceRef.current;
+      const previous = lastSequenceRef.current.runId === runId ? lastSequenceRef.current.sequence : -1;
       const sequenceDecision = decideSequence(previous, event.sequence);
       if (sequenceDecision === "duplicate") return;
       if (sequenceDecision === "gap") {
-        setConnection("reconnecting");
+        setConnectionState({ runId, connection: "reconnecting" });
         source?.close();
         void getRun(runId).then((next) => {
-          if (stopped) return;
-          acceptSnapshot(next);
+          if (!feedIsCurrent() || next.runId !== runId) return;
+          acceptSnapshot(next, feedEpoch);
           openFeed(next.sequence);
         }).catch(() => {
-          if (!stopped) {
-            setConnection("offline");
-            setError("连接中断，尚未同步到最新状态。请检查网络后刷新。");
+          if (feedIsCurrent()) {
+            setConnectionState({ runId, connection: "offline" });
+            setErrorState({ runId, error: "连接中断，尚未同步到最新状态。请检查网络后刷新。" });
           }
         });
         return;
       }
 
-      lastSequenceRef.current = event.sequence;
+      lastSequenceRef.current = { runId, sequence: event.sequence };
       const normalized = { ...event, type: payloadType };
-      setEvents((current) => [...current.filter((item) => item.sequence !== event.sequence), normalized].slice(-12));
+      setEventState((current) => ({
+        runId,
+        events: [...(current.runId === runId ? current.events : []).filter((item) => item.sequence !== event.sequence), normalized].slice(-12),
+      }));
       const pendingUpdate = decodePendingRequestUpdate(normalized);
       if (pendingUpdate !== undefined) {
         setPendingState((current) => !current || current.runId !== runId || event.sequence >= current.sequence
@@ -193,18 +214,18 @@ export function useRunFeed(runId: string): RunFeedState {
         refreshTimerRef.current = window.setTimeout(() => {
           refreshTimerRef.current = undefined;
           refreshQueuedRef.current = false;
-          if (stopped) return;
+          if (!feedIsCurrent()) return;
           void getRun(runId).then((next) => {
-            if (!stopped) acceptSnapshot(next);
+            if (feedIsCurrent() && next.runId === runId) acceptSnapshot(next, feedEpoch);
           }).catch(() => {
-            if (!stopped) setConnection("reconnecting");
+            if (feedIsCurrent()) setConnectionState({ runId, connection: "reconnecting" });
           });
         }, 250);
       }
     };
 
     openFeed = (sequence: number) => {
-      if (stopped) return;
+      if (!feedIsCurrent()) return;
       source?.close();
       source = new EventSource(runEventsUrl(runId, reconnectCursor(sequence)), { withCredentials: true });
       sourceRef.current = source;
@@ -213,32 +234,37 @@ export function useRunFeed(runId: string): RunFeedState {
       source.addEventListener("run.resync_required", onMessage);
       source.onmessage = onMessage;
       source.onopen = () => {
+        if (!feedIsCurrent()) return;
         clearReconnectWarningTimer();
-        setConnection("live");
-        setError(undefined);
+        if (activeRunIdRef.current !== runId) return;
+        setConnectionState({ runId, connection: "live" });
+        setErrorState({ runId });
       };
       source.onerror = () => {
-        setConnection("reconnecting");
+        if (!feedIsCurrent()) return;
+        setConnectionState({ runId, connection: "reconnecting" });
         scheduleReconnectWarning();
       };
     };
-    restartFeedRef.current = openFeed;
+    restartFeedRef.current = { runId, epoch: feedEpoch, restart: openFeed };
 
     async function initialize() {
       try {
         const initial = await getRun(runId);
-        if (stopped) return;
-        acceptSnapshot(initial);
+        if (!feedIsCurrent() || initial.runId !== runId) return;
+        acceptSnapshot(initial, feedEpoch);
         openFeed(initial.sequence);
       } catch (caught) {
-        if (stopped) return;
-        setConnection("offline");
-        setError(caught instanceof Error ? caught.message : "暂时无法读取任务状态。");
+        if (feedIsCurrent()) {
+          setConnectionState({ runId, connection: "offline" });
+          setErrorState({ runId, error: caught instanceof Error ? caught.message : "暂时无法读取任务状态。" });
+        }
       }
     }
 
     const onOffline = () => {
-      setConnection("reconnecting");
+      if (!feedIsCurrent()) return;
+      setConnectionState({ runId, connection: "reconnecting" });
       scheduleReconnectWarning();
     };
     const onOnline = () => { void refresh().catch(() => undefined); };
@@ -260,7 +286,7 @@ export function useRunFeed(runId: string): RunFeedState {
       refreshQueuedRef.current = false;
       source?.close();
       sourceRef.current?.close();
-      restartFeedRef.current = undefined;
+      if (restartFeedRef.current?.runId === runId && restartFeedRef.current.epoch === feedEpoch) restartFeedRef.current = undefined;
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisibility);

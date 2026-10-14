@@ -7,6 +7,9 @@ const VALUE_OPTIONS = new Set([
   "--osworld-bridge",
   "--cua-window-pid",
   "--cua-window-id",
+  "--cua-recovery-window-pid",
+  "--cua-recovery-window-id",
+  "--reopen-saved-document",
   "--managed-browser-url",
   "--managed-browser-profile-mode",
   "--managed-browser-profile-label",
@@ -35,6 +38,7 @@ const VALUE_OPTIONS = new Set([
   "--fixture-result",
   "--monitor",
   "--grounding",
+  "--source-linked-finish-contract",
   "--window-selection",
 ]);
 
@@ -45,6 +49,7 @@ const FLAG_OPTIONS = new Set([
   "--tui",
   "--planning",
   "--window-switch",
+  "--recover-bound-window-missing",
   "--confirm-risk-guard-off",
   "--allow-window-title-sharing",
   "--help",

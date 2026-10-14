@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ComputerSessionId, RunId, RunOutcome, SurfaceId, Viewport } from "@computer-harness/protocol";
 import type { Computer, ComputerSession, RunController, ProviderAdapter } from "@computer-harness/runtime";
-import type { RunHandle, ResolvedRunConfig } from "./config.js";
+import type { RunCloseConfirmation, RunHandle, ResolvedRunConfig } from "./config.js";
 import { ApplicationSession, type ApplicationSessionConfig } from "./application-session.js";
 import { createRun } from "./run-factory.js";
 import { createRunEventFeed } from "./event-feed.js";
@@ -47,6 +47,38 @@ function fakeHandle(config: ResolvedRunConfig, outcome: RunOutcome): RunHandle {
 }
 
 describe("ApplicationSession", () => {
+  it("checks the final risk-guard selection while trusting injected Provider and Run factories", () => {
+    const credentials = { glmApiKey: "fixture-main-key" };
+    const layeredRisk = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-session"), riskModel: "qwen3.8-flash" },
+      dependencies: { credentials },
+    });
+    expect(() => layeredRisk.assertRunProviderConfiguration()).not.toThrow();
+    expect(() => layeredRisk.assertRunProviderConfiguration({ riskGuard: "off" })).not.toThrow();
+    expect(() => layeredRisk.assertRunProviderConfiguration({ riskGuard: "layered" })).toThrow(expect.objectContaining({
+      name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING",
+    }));
+
+    const sameModelRisk = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-same"), riskModel: "same" },
+      dependencies: { credentials },
+    });
+    expect(() => sameModelRisk.assertRunProviderConfiguration({ riskGuard: "layered" })).not.toThrow();
+
+    const customProvider = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-custom-provider"), riskGuard: "layered", riskModel: "qwen3.8-flash" },
+      dependencies: { credentials: {}, createProvider: vi.fn() },
+    });
+    expect(() => customProvider.assertRunProviderConfiguration()).not.toThrow();
+
+    const customRunFactory = new ApplicationSession({
+      config: { ...baseConfig("/tmp/provider-preflight-custom-run"), riskGuard: "layered", riskModel: "qwen3.8-flash" },
+      dependencies: { credentials: {} },
+      createRun: vi.fn(async () => fakeHandle({ ...baseConfig("/tmp/provider-preflight-custom-run"), runId: "fixture-run" as RunId, goal: "fixture" }, "succeeded")),
+    });
+    expect(() => customRunFactory.assertRunProviderConfiguration()).not.toThrow();
+  });
+
   it("creates independent Run directories and does not inherit the prior Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-"));
     const owner = new InProcessEnvironmentOwner();
@@ -158,6 +190,127 @@ describe("ApplicationSession", () => {
     }
   });
 
+  it("releases the current Run after exact late Computer cleanup confirms without rewriting its failed outcome", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-late-close-"));
+    const owner = new InProcessEnvironmentOwner();
+    const viewport: Viewport = { width: 2, height: 2, coordinateSpace: "physical" };
+    let lateCloseStarted!: () => void;
+    const closeStarted = new Promise<void>((resolve) => { lateCloseStarted = resolve; });
+    const computerCounts: Array<{ opens: number; closes: number; disposes: number }> = [];
+    const createComputer = vi.fn(async () => {
+      const index = computerCounts.length;
+      const counts = { opens: 0, closes: 0, disposes: 0 };
+      computerCounts.push(counts);
+      const computerSession: ComputerSession = {
+        id: `late-cleanup-${index}` as ComputerSessionId,
+        backend: "fixture",
+        viewport,
+        capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+        openedAt: "2026-09-17T00:00:00.000Z",
+      };
+      return {
+        async open() { counts.opens += 1; return computerSession; },
+        async observe() { return { capturedAt: "2026-09-17T00:00:00.000Z", viewport, surfaceRef: fixtureSurfaceRef, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
+        async execute() { throw new Error("fixture provider fails before actions"); },
+        async close() {
+          counts.closes += 1;
+          if (index === 0) {
+            lateCloseStarted();
+            await new Promise<void>((resolve) => setTimeout(resolve, 160));
+          }
+        },
+        async dispose() { counts.disposes += 1; },
+      } satisfies Computer;
+    });
+    const provider: ProviderAdapter = {
+      id: "late-cleanup-failure-provider",
+      async generate() { throw new Error("synthetic provider failure"); },
+    };
+    try {
+      const session = new ApplicationSession({
+        config: { ...baseConfig(outputDir), cleanupDeadlineMs: 100 },
+        owner,
+        dependencies: { createProvider: () => provider, createComputer },
+      });
+      const handle = await session.startRun("synthetic failed Run with late cleanup");
+      const firstClose = handle.close();
+      expect(handle.close()).toBe(firstClose);
+      await closeStarted;
+      await expect(session.waitForActiveRun()).resolves.toBe("failed");
+      await expect(firstClose).resolves.toEqual({
+        kind: "late-computer-cleanup-confirmed",
+        runId: handle.runId,
+        resolvedTimedOutComputerDiagnostics: [{
+          operation: "computer.close",
+          message: "cleanup deadline exceeded during computer.close",
+          status: "timed_out",
+        }],
+      });
+
+      const report = await handle.report();
+      expect(report.outcome).toBe("failed");
+      expect(report.summary.cleanupDiagnostics).toContainEqual({
+        operation: "computer.close",
+        message: "cleanup deadline exceeded during computer.close",
+        status: "timed_out",
+      });
+      expect(session.lastRun).toMatchObject({ outcome: "failed", ownerState: "released" });
+      expect(session.inspectEnvironment()).toBeUndefined();
+      expect(computerCounts[0]).toEqual({ opens: 1, closes: 1, disposes: 1 });
+
+      await session.startRun("fresh Run after confirmed cleanup");
+      await expect(session.waitForActiveRun()).resolves.toBe("failed");
+      expect(createComputer).toHaveBeenCalledTimes(2);
+      expect(computerCounts[1]).toEqual({ opens: 1, closes: 1, disposes: 1 });
+      expect(session.history.map((run) => run.outcome)).toEqual(["failed", "failed"]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["reject", "hang"] as const)("retains the Run lease when Computer close %s instead of confirming", async (mode) => {
+    const outputDir = await mkdtemp(join(tmpdir(), `harness-session-close-${mode}-`));
+    const owner = new InProcessEnvironmentOwner();
+    const viewport: Viewport = { width: 2, height: 2, coordinateSpace: "physical" };
+    const computerSession: ComputerSession = {
+      id: `close-${mode}` as ComputerSessionId,
+      backend: "fixture",
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-09-17T00:00:00.000Z",
+    };
+    const createComputer = vi.fn(async () => ({
+      async open() { return computerSession; },
+      async observe() { return { capturedAt: "2026-09-17T00:00:00.000Z", viewport, surfaceRef: fixtureSurfaceRef, screenshot: { mediaType: "image/png" as const, data: new Uint8Array([1]) } }; },
+      async execute() { throw new Error("fixture provider fails before actions"); },
+      async close() {
+        if (mode === "hang") await new Promise<void>(() => undefined);
+        throw new Error("synthetic close failure");
+      },
+      async dispose() {},
+    } satisfies Computer));
+    const provider: ProviderAdapter = {
+      id: `close-${mode}-provider`,
+      async generate() { throw new Error("synthetic provider failure"); },
+    };
+    try {
+      const session = new ApplicationSession({
+        config: { ...baseConfig(outputDir), cleanupDeadlineMs: 100 },
+        owner,
+        dependencies: { createProvider: () => provider, createComputer },
+      });
+      await session.startRun(`unconfirmed ${mode} cleanup`);
+      await expect(session.waitForActiveRun()).resolves.toBe("failed");
+      expect(session.status).toBe("blocked");
+      expect(session.lastRun).toMatchObject({ outcome: "failed", ownerState: "pending_cleanup" });
+      expect(session.inspectEnvironment()?.state).toBe("pending_cleanup");
+      await expect(session.startRun("must not cross unresolved cleanup")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createComputer).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("holds one same-environment owner while a Run is active and allows a distinct route", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-owner-"));
     const owner = new InProcessEnvironmentOwner();
@@ -190,7 +343,7 @@ describe("ApplicationSession", () => {
     }
   });
 
-  it("keeps the environment blocked after an unknown external side effect", async () => {
+  it("preserves an unknown outcome but releases the environment after confirmed resource cleanup", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-"));
     const owner = new InProcessEnvironmentOwner();
     const createRun = vi.fn(async (config: ResolvedRunConfig) => fakeHandle(config, "outcome_unknown"));
@@ -198,8 +351,152 @@ describe("ApplicationSession", () => {
       const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
       await session.startRun("uncertain task");
       await session.waitForActiveRun();
+      expect(session.status).toBe("idle");
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "released" });
+      expect(session.inspectEnvironment()).toBeUndefined();
+
+      await session.startRun("fresh task; never replay the previous action");
+      await session.waitForActiveRun();
+      expect(createRun).toHaveBeenCalledTimes(2);
+      expect(session.history.map((run) => run.outcome)).toEqual(["outcome_unknown", "outcome_unknown"]);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the environment blocked when an unknown Run has unresolved cleanup diagnostics", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-cleanup-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "outcome_unknown");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "outcome_unknown",
+        summary: { cleanupDiagnostics: [{ operation: "computer.close", message: "close timed out", status: "timed_out" }] },
+        snapshot: {} as never,
+        events: [],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("uncertain task with unresolved cleanup");
+      await session.waitForActiveRun();
       expect(session.status).toBe("blocked");
-      await expect(session.startRun("do not reuse")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "pending_cleanup" });
+      await expect(session.startRun("must wait for cleanup recovery")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createRun).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a late Computer confirmation cover another cleanup diagnostic", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-partial-close-confirmation-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "failed");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "failed",
+        summary: {
+          cleanupDiagnostics: [
+            { operation: "computer.close", message: "late close confirmed", status: "timed_out" },
+            { operation: "event_writer.close", message: "writer close failed" },
+          ],
+        },
+        snapshot: {} as never,
+        events: [],
+      }));
+      handle.close = vi.fn(async () => ({
+        kind: "late-computer-cleanup-confirmed" as const,
+        runId: config.runId!,
+        resolvedTimedOutComputerDiagnostics: [
+          { operation: "computer.close" as const, message: "late close confirmed", status: "timed_out" as const },
+        ],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("partial cleanup confirmation");
+      await session.waitForActiveRun();
+      expect(session.status).toBe("blocked");
+      expect(session.lastRun).toMatchObject({ outcome: "failed", ownerState: "pending_cleanup" });
+      expect(session.inspectEnvironment()?.state).toBe("pending_cleanup");
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["wrong RunId", (runId: RunId): RunCloseConfirmation => ({
+      kind: "late-computer-cleanup-confirmed",
+      runId: `${runId}-other` as RunId,
+      resolvedTimedOutComputerDiagnostics: [{ operation: "computer.close", message: "late close confirmed", status: "timed_out" }],
+    })],
+    ["malformed entry", (runId: RunId): RunCloseConfirmation => ({
+      kind: "late-computer-cleanup-confirmed",
+      runId,
+      resolvedTimedOutComputerDiagnostics: [{ operation: "event_writer.close", message: "late close confirmed", status: "timed_out" } as unknown as RunCloseConfirmation["resolvedTimedOutComputerDiagnostics"][number]],
+    })],
+    ["duplicate entry", (runId: RunId): RunCloseConfirmation => ({
+      kind: "late-computer-cleanup-confirmed",
+      runId,
+      resolvedTimedOutComputerDiagnostics: [
+        { operation: "computer.close", message: "late close confirmed", status: "timed_out" },
+        { operation: "computer.close", message: "late close confirmed", status: "timed_out" },
+      ],
+    })],
+  ] as const)("retains the lease for a %s close confirmation", async (_label, createConfirmation) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-invalid-close-confirmation-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "failed");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "failed",
+        summary: { cleanupDiagnostics: [{ operation: "computer.close", message: "late close confirmed", status: "timed_out" }] },
+        snapshot: {} as never,
+        events: [],
+      }));
+      handle.close = vi.fn(async () => createConfirmation(config.runId!));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("invalid cleanup confirmation");
+      await session.waitForActiveRun();
+      expect(session.status).toBe("blocked");
+      expect(session.lastRun).toMatchObject({ outcome: "failed", ownerState: "pending_cleanup" });
+      expect(session.inspectEnvironment()?.state).toBe("pending_cleanup");
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat missing or malformed cleanup diagnostics as confirmed cleanup", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-session-unknown-missing-cleanup-report-"));
+    const owner = new InProcessEnvironmentOwner();
+    const createRun = vi.fn(async (config: ResolvedRunConfig) => {
+      const handle = fakeHandle(config, "outcome_unknown");
+      handle.report = vi.fn(async () => ({
+        runId: config.runId!,
+        outcome: "outcome_unknown",
+        summary: {},
+        snapshot: {} as never,
+        events: [],
+      }));
+      return handle;
+    });
+    try {
+      const session = new ApplicationSession({ config: baseConfig(outputDir), owner, createRun });
+      await session.startRun("uncertain task with an incomplete cleanup report");
+      await session.waitForActiveRun();
+      expect(session.status).toBe("blocked");
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "pending_cleanup" });
+      await expect(session.startRun("must wait for confirmed cleanup")).rejects.toThrow(/pending_cleanup|owned by run/iu);
+      expect(createRun).toHaveBeenCalledTimes(1);
     } finally {
       await rm(outputDir, { recursive: true, force: true });
     }

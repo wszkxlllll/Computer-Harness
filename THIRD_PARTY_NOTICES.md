@@ -6,6 +6,8 @@
 
 ## 直接依赖
 
+2026-10-07增量：`packages/app-runtime`新增精确锁定的`pngjs@5.0.0`，用于Host候选预览缩略图；已读取本机该版本`package.json`与`LICENSE`，声明MIT。其余表格的核验日期仍为上方日期，不将本增量冒充完整传递依赖重新审计。
+
 | 包名与版本 | License | 用途与交付方式 | 核验来源 |
 | --- | --- | --- | --- |
 | [`@trycua/cua-driver@0.22.2`](https://www.npmjs.com/package/@trycua/cua-driver/v/0.22.2) | MIT | Runtime：`packages/computer-cua` 使用的 CUA TypeScript SDK 客户端；npm 包不包含单独运行的 CUA daemon。 | 锁文件 importer、npm 包 metadata；[CUA 0.22.2 上游 LICENSE](https://github.com/trycua/cua/blob/cua-driver-rs-v0.22.2/LICENSE.md) 声明 MIT。 |
@@ -23,6 +25,7 @@
 | [`ws@8.21.3`](https://www.npmjs.com/package/ws/v/8.21.3) | MIT | Runtime：Relay、Relay Connector 与实时语音连接，Node 运行依赖。 | 锁定版本的 npm metadata 与包内 `LICENSE`。 |
 | [`string-width@7.2.0`](https://www.npmjs.com/package/string-width/v/7.2.0) | MIT | Runtime：TUI 终端文本宽度和布局，Node 运行依赖。 | 锁定版本的 npm metadata 与包内 `license`。 |
 | [`qrcode@1.5.4`](https://www.npmjs.com/package/qrcode/v/1.5.4) | MIT | Runtime：Web 配对二维码，进入 Web 静态构建资源。 | 锁定版本的 npm metadata 与包内 `license`。 |
+| [`pngjs@5.0.0`](https://www.npmjs.com/package/pngjs/v/5.0.0) | MIT | Runtime：Host端对超限候选预览PNG生成有界缩略图，不进入Web bundle，不改模型Observation。 | 已安装精确版本`package.json`、`LICENSE`与lock importer；保留Luke Page及Original Contributors、Kuba Niegowski对应版权声明和许可文本。 |
 | [`react@19.3.0`](https://www.npmjs.com/package/react/v/19.3.0) | MIT | Runtime：Web UI，进入 Web 静态构建资源。 | 锁定版本的 npm metadata 与包内 `LICENSE`。 |
 | [`react-dom@19.3.0`](https://www.npmjs.com/package/react-dom/v/19.3.0) | MIT | Runtime：Web UI DOM renderer，进入 Web 静态构建资源。 | 锁定版本的 npm metadata 与包内 `LICENSE`。 |
 | [`zod@3.25.76`](https://www.npmjs.com/package/zod/v/3.25.76) | MIT | Runtime：轨迹和协议数据校验，Node 运行依赖。 | 锁定版本的 npm metadata 与包内 `LICENSE`。 |

@@ -225,6 +225,7 @@ describe("RunController cleanup deadlines", () => {
       { operation: "event_writer.close", message: "cleanup deadline exceeded before event_writer.close", status: "timed_out" },
       { operation: "computer.close", message: "cleanup deadline exceeded before computer.close", status: "timed_out" },
     ]);
+    await expect(controller.confirmLateComputerCleanup(25)).resolves.toBe(false);
   });
 
   it("returns after a hanging Computer close, blocks same-instance reuse, and keeps the old outcome", async () => {
@@ -264,6 +265,22 @@ describe("RunController cleanup deadlines", () => {
     const reusable = makeController(new ScriptedProvider([{ type: "finish", summary: "reusable" }]), computer, new ControlledWriter());
     await expect(reusable.start("reuse after close completed")).resolves.toBe("succeeded");
     expect(computer.openCalls).toBe(2);
+  });
+
+  it("confirms only the exact late Computer close within one memoized grace", async () => {
+    vi.useFakeTimers();
+    const computer = new ControlledComputer("late");
+    const controller = makeController(new ScriptedProvider([{ type: "finish", summary: "done" }]), computer, new ControlledWriter());
+    const outcome = controller.start("confirm late close");
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(outcome).resolves.toBe("succeeded");
+
+    const confirmation = controller.confirmLateComputerCleanup(25);
+    expect(controller.confirmLateComputerCleanup(5)).toBe(confirmation);
+    computer.finishLateClose();
+    await expect(confirmation).resolves.toBe(true);
+    await expect(controller.confirmLateComputerCleanup(5)).resolves.toBe(true);
+    expect(computer.closeCalls).toBe(1);
   });
 
   it("allows reuse after a timed-out Computer.dispose eventually completes", async () => {

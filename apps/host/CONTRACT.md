@@ -37,6 +37,19 @@ HttpOnly session cookie, and `X-CSRF-Token`. When bridged through the Relay,
 the Host accepts the normalized request only over the authenticated Host
 connection and validates the Host-issued opaque session token itself.
 
+## Host-local Run profile settings
+
+The Host may read these optional settings from its existing `--env-file`:
+
+- `HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1` (default `off`).
+  `foreground-caret-v1` is only for an explicitly verified candidate CUA
+  socket; it is not a general stock CUA 0.22 compatibility claim.
+- `HARNESS_OPERATION_GUIDANCE=off|catalog-v1` (default `off`).
+
+These are local Host configuration, not fields accepted by `POST /api/runs` or
+phone-selected Run features. The foreground-caret profile is never inferred
+from the socket name or driver version.
+
 ## Runs
 
 - `GET /api/windows` enumerates the currently visible CUA windows using a

@@ -98,6 +98,9 @@ describe("personal preferences screen", () => {
     fireEvent.click(screen.getByRole("radio", { name: "多解释步骤" }));
     fireEvent.change(screen.getByLabelText("偏好语言"), { target: { value: "en" } });
     fireEvent.change(screen.getByLabelText("补充回答说明"), { target: { value: "Group findings by topic." } });
+    const savedBeforeGuidance = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences;
+    expect(savedBeforeGuidance.assistant.additionalGuidance).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "保存补充说明" }));
 
     await waitFor(() => expect(document.documentElement.dataset.textSize).toBe("large"));
     const stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences;
@@ -183,7 +186,12 @@ describe("personal preferences screen", () => {
     expect(await screen.findByText("已准备（本机）")).toBeDefined();
     expect(screen.getByRole("group", { name: "新任务默认浏览器" })).toBeDefined();
     expect(screen.getByRole("radio", { name: /本机已准备的登录状态/ })).toBeDefined();
-    expect(screen.getByRole("radio", { name: /临时空白浏览器/ })).toBeDefined();
+    const temporaryBrowser = screen.getByRole("radio", { name: "临时空白浏览器" });
+    expect(temporaryBrowser).toBeDefined();
+    expect(temporaryBrowser.getAttribute("aria-labelledby")).toBe("managed-browser-default-session-temporary-title");
+    const browserChoiceDescription = temporaryBrowser.getAttribute("aria-describedby");
+    expect(browserChoiceDescription).toBe("managed-browser-default-session-temporary-description");
+    expect(document.getElementById(browserChoiceDescription!)?.textContent).toContain("每次使用新的空白临时配置");
     expect((screen.getByRole("radio", { name: /本机已准备的登录状态/ }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/登录状态仅保存在这台电脑/)).toBeDefined();
     const browserSection = screen.getByRole("region", { name: "浏览器与登录状态" });
@@ -271,6 +279,8 @@ describe("personal preferences screen", () => {
 
     fireEvent.change(guidance, { target: { value: "🙂".repeat(500) } });
     expect(screen.getByLabelText("500 / 600 个字符")).toBeDefined();
+    expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存补充说明" }));
     await waitFor(() => {
       const stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences;
       expect([...stored.assistant.additionalGuidance]).toHaveLength(500);
@@ -283,5 +293,34 @@ describe("personal preferences screen", () => {
       const stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences;
       expect(stored.assistant.additionalGuidance).toBe("");
     });
+  });
+
+  it("does not write on each character and keeps the save action keyboard focusable", () => {
+    renderPreferences();
+    const guidance = screen.getByRole("textbox", { name: "补充回答说明" }) as HTMLTextAreaElement;
+    const save = screen.getByRole("button", { name: "保存补充说明" }) as HTMLButtonElement;
+
+    fireEvent.change(guidance, { target: { value: "先" } });
+    fireEvent.change(guidance, { target: { value: "先整理" } });
+    fireEvent.change(guidance, { target: { value: "先整理要点" } });
+    expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toBeNull();
+
+    save.focus();
+    expect(document.activeElement).toBe(save);
+    expect(save.tabIndex).toBe(0);
+    fireEvent.click(save);
+    expect((JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY)!) as UserPreferences).assistant.additionalGuidance).toBe("先整理要点");
+  });
+
+  it("exposes setting labels and their descriptions through stable ID references", () => {
+    renderPreferences();
+    const contrast = screen.getByRole("switch", { name: "高对比度" });
+    expect(contrast.getAttribute("aria-labelledby")).toBe("high-contrast-title");
+    expect(contrast.getAttribute("aria-describedby")).toBe("high-contrast-description");
+    expect(document.getElementById("high-contrast-description")?.textContent).toBe("加深文字和边界，减少浅色区分。");
+
+    const language = screen.getByRole("combobox", { name: "偏好语言" });
+    expect(language.getAttribute("aria-describedby")).toBe("preferred-language-help");
+    expect(document.getElementById("preferred-language-help")?.textContent).toContain("只影响之后新建任务的回答语言");
   });
 });

@@ -121,6 +121,60 @@ describe("SurfaceRegistry pure state machine", () => {
     expect(isExecutableSurfaceRef(final, freshParent)).toBe(true);
   });
 
+  it("supports a strictly evidenced nested macOS sheet stack and invalidates popped refs", () => {
+    const registered = registerPeer(createSurfaceRegistry("computer-session-nested-mac-sheet"), BROWSER);
+    const activeRoot = activate(registered.state, registered.ref, BROWSER);
+    const saveTarget: NativeWindowIdentity = { pid: BROWSER.pid, hwnd: 4102 };
+    const save = value(pushChild(activeRoot, registered.ref, {
+      kind: "native_window", nativeWindow: saveTarget, owner: BROWSER, rootRole: "dialog",
+      visible: true, rootSemanticsVerified: true, interactionPolicy: "modal",
+      frontmostEvidence: "exact_foreground", admissionSource: "macos_attached_sheet_proof",
+    }));
+    const withSave = stateOf(pushChild(activeRoot, registered.ref, {
+      kind: "native_window", nativeWindow: saveTarget, owner: BROWSER, rootRole: "dialog",
+      visible: true, rootSemanticsVerified: true, interactionPolicy: "modal",
+      frontmostEvidence: "exact_foreground", admissionSource: "macos_attached_sheet_proof",
+    }));
+    const currentSave = currentSurfaceRef(withSave, save.surfaceId)!;
+    const gotoTarget: NativeWindowIdentity = { pid: BROWSER.pid, hwnd: 4103 };
+    const nested = pushChild(withSave, currentSave, {
+      kind: "native_window", nativeWindow: gotoTarget, owner: saveTarget, rootRole: "dialog",
+      visible: true, rootSemanticsVerified: true, interactionPolicy: "modal",
+      frontmostEvidence: "exact_foreground", admissionSource: "macos_attached_sheet_proof",
+    });
+    expect(nested.decision).toBe("applied");
+    const ancestorAlias = pushChild(withSave, currentSave, {
+      kind: "native_window", nativeWindow: BROWSER, owner: saveTarget, rootRole: "dialog",
+      visible: true, rootSemanticsVerified: true, interactionPolicy: "modal",
+      frontmostEvidence: "exact_foreground", admissionSource: "macos_attached_sheet_proof",
+    });
+    expect(ancestorAlias.decision).toBe("rejected");
+    const goto = value(nested);
+    const withGoto = stateOf(nested);
+    expect(goto.parentSurfaceId).toBe(save.surfaceId);
+    expect(isExecutableSurfaceRef(withGoto, goto)).toBe(true);
+    expect(isExecutableSurfaceRef(withGoto, currentSave)).toBe(false);
+
+    const currentSaveAfterNested = currentSurfaceRef(withGoto, save.surfaceId)!;
+    const poppedGoto = popChild(withGoto, goto, {
+      parent: currentSaveAfterNested, parentRevalidated: true, childAbsent: true,
+    });
+    const afterGotoPop = stateOf(poppedGoto);
+    expect(value(poppedGoto).surfaceId).toBe(save.surfaceId);
+    expect(isCurrentSurfaceRef(afterGotoPop, goto)).toBe(false);
+    expect(isExecutableSurfaceRef(afterGotoPop, goto)).toBe(false);
+    expect(isCurrentSurfaceRef(afterGotoPop, currentSave)).toBe(false);
+    expect(isExecutableSurfaceRef(afterGotoPop, currentSurfaceRef(afterGotoPop, save.surfaceId)!)).toBe(true);
+
+    const saveAfterPop = currentSurfaceRef(afterGotoPop, save.surfaceId)!;
+    const poppedSave = popChild(afterGotoPop, saveAfterPop, {
+      parent: currentSurfaceRef(afterGotoPop, registered.ref.surfaceId)!, parentRevalidated: true, childAbsent: true,
+    });
+    expect(value(poppedSave).surfaceId).toBe(registered.ref.surfaceId);
+    expect(isCurrentSurfaceRef(stateOf(poppedSave), registered.ref)).toBe(false);
+    expect(isExecutableSurfaceRef(stateOf(poppedSave), value(poppedSave))).toBe(true);
+  });
+
   it("keeps managed tab and DOM Surfaces under their browser window across peer round trips", () => {
     const browser = registerPeer(createSurfaceRegistry("computer-session-browser-lineage"), BROWSER);
     const wps = registerPeer(browser.state, WPS);
@@ -292,7 +346,7 @@ describe("SurfaceRegistry pure state machine", () => {
     const popupResult = pushChild(active, registered.ref, nonRootPopupRole);
 
     expect(overlayResult.decision).toBe("rejected");
-    expect(popupResult.decision).toBe("rejected");
+    expect(popupResult.decision).toBe("manual");
     expect(overlayResult.state).toBe(active);
     expect(popupResult.state).toBe(active);
     expect(overlayResult.state.surfaces.size).toBe(1);

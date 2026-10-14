@@ -1,6 +1,6 @@
 # Harness Relay
 
-当前交付包含本机可运行、可测试的 Relay 服务、Host 出站 WSS 连接器和 Web 前端静态托管入口。没有部署到公网，也没有进行手机扫码、跨网络可达性或性能验收；服务器的实际区域、操作系统、域名和 TLS 证书仍待配置。
+当前交付包含 Relay 服务、Host 出站 WSS 连接器和 Web 前端静态托管入口。团队隔离 Preview 已完成 HTTPS 公网部署、配对及部分手机真实任务验证，见[部署与验证记录](../../docs/voice-preview-deploy-phone-test-2026-09-29.md)；这不是面向所有人的无人值守公共 Demo，也不表示跨平台或所有任务已经验收。以下解释通信边界，当前请求合同以源码校验器及[Host 合同](../host/CONTRACT.md)为准。
 
 ## 数据路径与边界
 
@@ -13,7 +13,7 @@
 - 电脑只建立出站 WSS；Host 和 Relay 都默认只绑定回环地址，普通用户无需给电脑开放公网入站端口。
 - Relay 只转发明确列出的 `/api/session`、配对、Run、命令回执、SSE 和 Run asset 路由。`/api/local/*` 在任何情况下都拒绝；不接受客户端填写本机地址、任意路径或文件路径。
 - 配对二维码用 90 秒一次性凭据。Host 先向 Relay 注册凭据的 SHA-256 摘要；Relay 收到手机请求后再由电脑本机用户确认。Relay 为公开配对请求分配新的随机 ID，避免不同 Host 的本地 ID 冲突。
-- 配对后，手机通过 `GET /api/windows` 获取仅含 opaque token、应用名和标题的候选窗口。token 绑定设备、十分钟过期且单次使用；刷新候选列表会撤销该设备的旧 token 集。Host 启动 Run 前重新发现并核验目标身份，不能依赖旧列表。Relay 的 `/api/runs` 启动体只接受 `{commandId,goal,targetToken}`，拒绝 PID、HWND、窗口句柄和路径字段。
+- 配对后，手机通过 `GET /api/windows` 获取含 opaque token、应用名、标题及允许展示的关系信息的候选窗口。token绑定设备且有期限，刷新会撤销旧候选；同名或信息不足的候选须通过精确预览确认。Host启动Run前重新核验身份；`/api/runs`只接受校验器允许的目标与配置结构，不接受客户端提供原生PID、HWND或任意本机路径来绕过候选选择。
 - 通过确认后，Host 的不透明 session token 只在 Host 与 Relay 的认证 WSS 信道内传输；Relay 会在后续请求和 SSE 订阅信封中交还给对应 Host，绝不返回浏览器。Relay 另发随机 HttpOnly、SameSite=Strict、HTTPS 下带 Secure 的 Relay cookie。每次请求由该 cookie 选择固定的 Host 和 device；POST/DELETE 另检查同源 Origin 与 CSRF token。
 - SSE 按同一 device 和 Run 订阅。Host 或 Relay 断线时关闭流，浏览器通过事件游标重新订阅并刷新 Run 快照。Relay 不排队或重放 GUI 命令；已发出但未收到回执的 POST 返回 outcome-unknown，手机必须先刷新状态。
 - Relay 仅在进程内保留配对摘要、Relay cookie 到 Host session 的映射、待处理响应和活动 SSE；不写任务、截图或轨迹到磁盘。Relay 重启会清除这些映射，需重新配对。Host 重连不会清除 Relay 现存 session；未完成的命令不会被重发。

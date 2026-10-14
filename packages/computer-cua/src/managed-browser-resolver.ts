@@ -55,7 +55,7 @@ export async function resolveOwnedManagedBrowserWindow(
   const ownedProcessIds = new Set(hint?.ownedProcessIds ?? [hostProcessId]);
   let candidates = parsedWindows.filter((window) => ownedProcessIds.has(window.pid));
   const boundsMatchingCandidateCount = countBoundsMatches(candidates, hint?.browserBounds);
-  const geometryCompatibleCandidateCount = countGeometryCompatibleCandidates(candidates, hint?.browserBounds);
+  const geometryCompatibleCandidateCount = countGeometryCompatibleCandidates(candidates, hint?.browserBounds, hint?.browserBoundsToCuaScale);
   const base = diagnosticBase(hostProcessId, hint, parsedWindows.length, candidates.length, boundsMatchingCandidateCount, geometryCompatibleCandidateCount, candidates);
   if (candidates.length === 0) {
     emitDiagnostic(hint, base, "ownership_mismatch");
@@ -63,13 +63,8 @@ export async function resolveOwnedManagedBrowserWindow(
   }
   const browserBounds = hint?.browserBounds;
   if (browserBounds !== undefined) {
-    const exactCandidates = candidates.filter((window) => {
-      const bounds = window.bounds;
-      return bounds !== undefined && sameBounds(bounds, browserBounds);
-    });
-    candidates = exactCandidates.length > 0
-      ? exactCandidates
-      : candidates.filter((window) => window.bounds !== undefined && managedBrowserWindowBoundsMatch(window.bounds, browserBounds));
+    candidates = candidates.filter((window) => window.bounds !== undefined &&
+      managedBrowserWindowBoundsMatch(window.bounds, browserBounds, hint?.browserBoundsToCuaScale));
     if (candidates.length === 0) {
       emitDiagnostic(hint, base, "ownership_mismatch");
       throw new ManagedBrowserWindowResolutionError("ownership_mismatch");
@@ -142,9 +137,10 @@ function countBoundsMatches(
 function countGeometryCompatibleCandidates(
   candidates: readonly ParsedWindow[],
   browserBounds: ManagedBrowserWindowBindingHint["browserBounds"],
+  browserBoundsToCuaScale?: number,
 ): number {
   if (browserBounds === undefined) return 0;
-  return candidates.filter((candidate) => candidate.bounds !== undefined && managedBrowserWindowBoundsMatch(candidate.bounds, browserBounds)).length;
+  return candidates.filter((candidate) => candidate.bounds !== undefined && managedBrowserWindowBoundsMatch(candidate.bounds, browserBounds, browserBoundsToCuaScale)).length;
 }
 
 function calculateBoundsDifferences(
@@ -179,7 +175,7 @@ export function validateManagedBrowserWindowResolution(
   if (hint?.browserWindowId !== undefined && evidence.browserWindowId !== hint.browserWindowId) {
     throw new ManagedBrowserWindowResolutionError("ownership_mismatch");
   }
-  if (hint?.browserBounds !== undefined && (evidence.windowBounds === undefined || !managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds))) {
+  if (hint?.browserBounds !== undefined && (evidence.windowBounds === undefined || !managedBrowserWindowBoundsMatch(evidence.windowBounds, hint.browserBounds, hint.browserBoundsToCuaScale))) {
     throw new ManagedBrowserWindowResolutionError("ownership_mismatch");
   }
   return resolution.target;

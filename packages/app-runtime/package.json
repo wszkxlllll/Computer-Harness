@@ -24,6 +24,7 @@
     "@computer-harness/risk-guard": "workspace:*",
     "@computer-harness/runtime": "workspace:*",
     "@computer-harness/trajectory": "workspace:*",
-    "@computer-harness/voice": "workspace:*"
+    "@computer-harness/voice": "workspace:*",
+    "pngjs": "5.0.0"
   }
 }

@@ -9,17 +9,18 @@ import type {
 } from "@computer-harness/runtime";
 import { createHash } from "node:crypto";
 import { currentObservationAssessmentBinding, decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
-import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, ToolCallId, ToolResult } from "@computer-harness/protocol";
+import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, SourceLinkedFinishContract, SurfaceRef, ToolCallId, ToolResult } from "@computer-harness/protocol";
 import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
 import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
-import { selectHistoryEvents } from "./history.js";
+import { latestGuiHistoryGroup, selectHistoryEvents } from "./history.js";
 
 export interface DefaultContextCompilerOptions {
   systemPrompt?: string;
   mode?: "raw" | "recent";
   maxHistoryEvents?: number;
   maxInputTokens?: number;
+  maxWireInputTokens?: number;
   memoryMaxTokens?: number;
   memoryRecall?: MemoryRecallService;
   features?: RunFeatureConfig;
@@ -29,6 +30,7 @@ export class DefaultContextCompiler implements ContextCompiler {
   private readonly mode: "raw" | "recent";
   private readonly maxHistoryEvents: number;
   private readonly maxInputTokens: number | undefined;
+  private readonly maxWireInputTokens: number | undefined;
   private readonly memoryMaxTokens: number;
   private readonly memoryRecall: MemoryRecallService | undefined;
   private readonly features: RunFeatureConfig;
@@ -45,6 +47,8 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("maxHistoryEvents must be a positive integer");
     }
     this.maxInputTokens = options.maxInputTokens;
+    this.maxWireInputTokens = options.maxWireInputTokens;
+    validateInputBudgets(this.maxInputTokens, this.maxWireInputTokens);
     if (this.maxInputTokens !== undefined && (!Number.isInteger(this.maxInputTokens) || this.maxInputTokens < 1)) {
       throw new Error("maxInputTokens must be a positive integer");
     }
@@ -65,26 +69,61 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("latestObservation must match the latest observation.created event");
     }
     const latestObservation = input.latestObservation ?? latestEventObservation;
+    const authorizedDocumentEvidence = latestObservation?.authorizedSavedDocumentEvidence;
+    if (authorizedDocumentEvidence !== undefined &&
+        (latestObservation === undefined || latestObservation.runId !== input.runId ||
+         authorizedDocumentEvidence.observationId !== latestObservation.id ||
+         !sameObservationSurfaceRef(authorizedDocumentEvidence.surfaceRef, latestObservation.surfaceRef))) {
+      throw new Error("authorizedSavedDocumentEvidence must match the exact current Observation and Surface");
+    }
     const capturedAt = latestObservation === undefined ? undefined : canonicalCapturedAt(latestObservation.capturedAt);
+    const authorizedDocumentEvidenceText = authorizedDocumentEvidence === undefined
+      ? undefined
+      : authorizedDocumentEvidence.status === "authorized_file_absent"
+        ? "Host read-only observation: the exact Host-authorized output file was absent at this observation. This is file-state evidence only; it does not verify document contents or task success."
+        : authorizedDocumentEvidence.status === "verified_clean_current_document"
+          ? "Host read-only observation: the current clean document is bound to the Host-authorized output file. This verifies document binding only, not file contents, bytes, line endings, or task success."
+          : "Host read-only observation: the Host-authorized output/document binding could not be verified at this observation. Do not infer file presence, document contents, or task success.";
     const observationMetadataText = latestObservation === undefined
       ? undefined
-      : `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`;
+      : [
+          `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`,
+          ...(authorizedDocumentEvidenceText === undefined ? [] : [authorizedDocumentEvidenceText]),
+        ].join("\n");
     const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
-    const windowSwitchStateText = formatWindowSwitchState(input.computerSession, input.windowSwitchState, latestObservation?.grounding, latestObservation?.viewport);
+    const windowSwitchStateText = formatWindowSwitchState(
+      input.computerSession,
+      input.windowSwitchState,
+      latestObservation?.grounding,
+      latestObservation?.viewport,
+      latestObservation?.surfaceRef.kind,
+    );
     const windowSwitchStateTokens = windowSwitchStateText === undefined ? 0 : estimateTextTokens(windowSwitchStateText);
     const assessmentBinding = currentObservationAssessmentBinding(orderedEvents);
     let assessmentBindingText = assessmentBinding !== undefined && assessmentBinding.observationId === latestObservation?.id
-      ? `Current assessment reference: Observation ID ${assessmentBinding.observationId}; immediately preceding GUI action ID ${assessmentBinding.actionId}.${assessmentBinding.transition === undefined ? "" : ` Runtime Monitor transition for this exact action/Observation: ${assessmentBinding.transition} (action diagnostic only; it does not decide what semantic state the screenshot shows).`} The current screenshot is the evidence for any progress summary. If you include observationAssessment in this response, use these exact IDs.`
+      ? `Current assessment reference: Observation ID ${assessmentBinding.observationId}; immediately preceding GUI action ID ${assessmentBinding.actionId}.${assessmentBinding.transition === undefined ? "" : ` Runtime Monitor transition for this exact action/Observation: ${assessmentBinding.transition} (action diagnostic only; it does not decide what semantic state the screenshot shows).`} On this referenced turn, include observationAssessment in the normal action/control call despite the outer field being optional in the wire schema. Its progress field is REQUIRED: choose explicit null if this screenshot confirms no meaningful requested subgoal result and no concrete blocker; choose kind=milestone with a concise summary if it confirms any meaningful visible subgoal of the user's Goal, even when the whole Goal has later steps; choose kind=blocked only for a concrete blocker. Null means no speech notice. Do not delay a confirmed subgoal milestone until whole-task completion or report it as final success. For example, search results now displayed or requested content present in its destination can be a milestone while the task continues. Full shape: {"observationId":"${assessmentBinding.observationId}","actionId":"${assessmentBinding.actionId}","actionOutcome":"<accurate diagnostic enum>","evidence":"<brief non-sensitive screenshot fact>","progress":{"kind":"milestone","summary":"<describe only the confirmed result; tailor this wording>"}}. Replace placeholders with accurate current facts; do not copy private screen text or reuse a static summary. Base the choice on screenshot semantics, not on actionOutcome or Monitor transition; the result may predate the preceding action.`
       : undefined;
     const rawAssessmentBindingTokens = assessmentBindingText === undefined ? 0 : estimateTextTokens(assessmentBindingText);
     let assessmentBindingTokens = rawAssessmentBindingTokens;
     const features = input.features ?? this.features;
+    const allowance = input.requestBudget;
+    const knownBudget = typeof allowance === "object" && allowance !== null && Number.isSafeInteger(allowance.limit) && allowance.limit >= 3 && Number.isSafeInteger(allowance.remaining) && allowance.remaining >= 0 && allowance.remaining <= allowance.limit ? allowance : undefined;
+    const finishOnly = knownBudget?.remaining === 1;
+    const requestBudgetText = knownBudget === undefined || knownBudget.remaining > 2 ? "" : finishOnly
+      ? `This is the final model request. Call the exposed terminate tool exactly once with status success or failure and the complete user-facing result text. Use failure for every incomplete or unverified goal, preserve findings, and state requested fields that remain unknown. No other tool calls or memory writes are allowed. Do not claim completion unless the original goal is fully supported by evidence.`
+      : `Only ${knownBudget.remaining} model requests remain including this one. Prepare a concise evidence and unknown ledger now, preserving original scope and all requested fields; reserve the last request to terminate with the complete result.`;
+    const requestBudgetMessageText = requestBudgetText.length === 0 ? "" : `Runtime request budget: ${requestBudgetText}`;
     const baseTools = this.tools.modelTools("main", {
       ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
     });
-    const tools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(baseTools) : baseTools;
-    const systemPrompt = composeSystemPrompt(this.systemPrompt, features);
+    const allowedTools = finishOnly ? baseTools.filter((tool) => tool.category === "control" && tool.name === "terminate") : baseTools;
+    const actionDecoratedTools = features.riskGuard === "layered" ? decorateToolsWithActionEffects(allowedTools) : allowedTools;
+    const tools = actionDecoratedTools;
+    const sourceLinkedFinishText = input.sourceLinkedFinish === undefined
+      ? undefined
+      : formatSourceLinkedFinishContract(input.sourceLinkedFinish);
+    const systemPrompt = composeSystemPrompt(this.systemPrompt, features, input.computerSession?.platform);
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
       ? formatExecutionSegment(input.executionSegment)
@@ -116,13 +155,19 @@ export class DefaultContextCompiler implements ContextCompiler {
       { name: "plan" as const, text: planText ?? "", included: planText !== undefined },
       { name: "execution_segment" as const, text: executionSegmentText ?? "", included: executionSegmentText !== undefined },
       { name: "memory" as const, text: memoryText ?? "", included: memoryText !== undefined && memoryText.length > 0 },
+      { name: "source_linked_finish" as const, text: sourceLinkedFinishText ?? "", included: sourceLinkedFinishText !== undefined },
+      { name: "request_budget" as const, text: requestBudgetMessageText, included: requestBudgetMessageText.length > 0 },
     ];
     const fixedText = fixedBlocks.map((block) => block.text).join("\n");
     const estimatedFixedTextTokens = Math.ceil(fixedText.length / 4);
-    const historyCandidates = selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents);
-    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received"));
+    const pinnedGuiHistory = latestGuiHistoryGroup(orderedEvents);
+    const selectedHistory = new Set([...selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents), ...pinnedGuiHistory]);
+    const historyCandidates = orderedEvents.filter((event) => selectedHistory.has(event));
+    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received" || pinnedGuiHistory.includes(event)));
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
+    const maxWireInputTokens = input.context?.maxWireInputTokens ?? this.maxWireInputTokens;
+    validateInputBudgets(maxInputTokens, maxWireInputTokens);
     const rawAssistantPreferencesText = input.assistantPreferences === undefined
       ? undefined
       : formatAssistantPreferences(input.assistantPreferences);
@@ -147,11 +192,11 @@ export class DefaultContextCompiler implements ContextCompiler {
     let historyBudget: number | undefined;
     if (maxInputTokens !== undefined) {
       const fixedBudget = maxInputTokens - estimatedFixedTextTokens;
-      if (fixedBudget < 0) throw new Error("Context fixed blocks exceed maxInputTokens");
+      if (fixedBudget < 0) throw Object.assign(new Error("Context fixed blocks exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
       // Reserve budget for every authoritative user correction and the current
       // observation's capture metadata before optional projections.
       if (authoritativeHistoryTokens + observationMetadataTokens + windowSwitchStateTokens > fixedBudget) {
-        throw new Error("Authoritative user inputs and current observation/target metadata exceed maxInputTokens");
+        throw Object.assign(new Error("Authoritative user inputs, latest GUI history and current observation/target metadata exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
       }
       let remainingAfterAuthoritative = Math.max(0, fixedBudget - authoritativeHistoryTokens - observationMetadataTokens - windowSwitchStateTokens);
       if (rawAssistantPreferencesTokens > remainingAfterAuthoritative) {
@@ -177,7 +222,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       }
       if (groundingIncluded) remainingAfterAuthoritative -= rawGroundingTokens;
       historyBudget = authoritativeHistoryTokens + remainingAfterAuthoritative;
-      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget);
+      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget, pinnedGuiHistory);
     }
     const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
       ? estimateTextTokens(monitorGuidanceText)
@@ -186,6 +231,9 @@ export class DefaultContextCompiler implements ContextCompiler {
     const messages: ModelMessage[] = [
       { role: "user", content: [{ type: "text", text: input.goal }] },
     ];
+    if (requestBudgetMessageText.length > 0) {
+      messages.push({ role: "user", content: [{ type: "text", text: requestBudgetMessageText }] });
+    }
     if (assistantPreferencesText !== undefined && assistantPreferencesIncluded) {
       messages.push({ role: "user", content: [{ type: "text", text: assistantPreferencesText }] });
     }
@@ -284,6 +332,10 @@ export class DefaultContextCompiler implements ContextCompiler {
       messages.push({ role: "user", content: [{ type: "text", text: groundingText }] });
     }
 
+    if (sourceLinkedFinishText !== undefined) {
+      messages.push({ role: "user", content: [{ type: "text", text: sourceLinkedFinishText }] });
+    }
+
     if (windowSwitchStateText !== undefined) {
       messages.push({ role: "user", content: [{ type: "text", text: windowSwitchStateText }] });
     }
@@ -302,12 +354,27 @@ export class DefaultContextCompiler implements ContextCompiler {
         ],
       });
     }
+    const operationGuidanceText = input.operationGuidance === undefined
+      ? undefined
+      : formatOperationGuidance(input.operationGuidance.text);
+    const rawOperationGuidanceTokens = operationGuidanceText === undefined ? 0 : [...operationGuidanceText].length;
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
-    const estimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
-    const estimatedInputTokens = estimatedFixedTextTokens + estimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
-    if (maxInputTokens !== undefined && estimatedInputTokens > maxInputTokens) {
-      throw new Error("Context history exceeds maxInputTokens after selection");
+    const baseEstimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
+    const baseEstimatedInputTokens = estimatedFixedTextTokens + baseEstimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
+    if (maxInputTokens !== undefined && baseEstimatedInputTokens > maxInputTokens) {
+      throw Object.assign(new Error("Context history exceeds maxInputTokens after selection"), { code: "CONTEXT_INPUT_TOO_LARGE" });
+    }
+    const operationGuidanceIncluded = operationGuidanceText !== undefined &&
+      (maxInputTokens === undefined || baseEstimatedInputTokens + rawOperationGuidanceTokens <= maxInputTokens);
+    const operationGuidanceTokens = operationGuidanceIncluded ? rawOperationGuidanceTokens : 0;
+    const estimatedHistoryTextTokens = baseEstimatedHistoryTextTokens + operationGuidanceTokens;
+    const estimatedInputTokens = baseEstimatedInputTokens + operationGuidanceTokens;
+    if (operationGuidanceIncluded && operationGuidanceText !== undefined) {
+      // Keep the trusted, per-turn note at the prompt tail. It is the lowest
+      // priority text projection and never displaces the Goal, user corrections,
+      // selected history, or the current observation when the budget is tight.
+      messages.push({ role: "user", content: [{ type: "text", text: operationGuidanceText }] });
     }
     const selectedIds = new Set(selectedEvents.map((event) => event.eventId));
     const candidateIds = new Set(historyCandidates.map((event) => event.eventId));
@@ -327,7 +394,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       compilerVersion: "context-v2-rft4",
       runId: input.runId,
       stablePrefixHash: createHash("sha256").update(JSON.stringify({ system: systemPrompt, tools })).digest("hex"),
-      fixedBlocks: fixedBlocks.map((block) => ({ name: block.name, estimatedTokens: estimateTextTokens(block.text), included: block.included })),
+      fixedBlocks: fixedBlocks.filter((block) => block.name !== "request_budget").map((block) => ({ name: block.name, estimatedTokens: estimateTextTokens(block.text), included: block.included })),
       selectedEventIds: selectedEvents.map((event) => event.eventId),
       projectedEventIds,
       discardedEvents,
@@ -376,6 +443,14 @@ export class DefaultContextCompiler implements ContextCompiler {
         },
       }),
       observationIncluded: latestObservation !== undefined,
+      ...(input.operationGuidance === undefined ? {} : {
+        operationGuidance: {
+          id: input.operationGuidance.id,
+          fingerprint: input.operationGuidance.fingerprint,
+          included: operationGuidanceIncluded,
+          ...(!operationGuidanceIncluded ? { omittedReason: "budget" as const } : {}),
+        },
+      }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? {
         monitorGuidanceIncluded,
         ...(monitorGuidanceOmittedReason === undefined ? {} : { monitorGuidanceOmittedReason }),
@@ -408,6 +483,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       omittedHistoryEvents: Math.max(0, orderedEvents.length - selectedEvents.length),
       ...(input.context?.maxHistoryEvents === undefined && this.mode === "raw" ? {} : { maxHistoryEvents: input.context?.maxHistoryEvents ?? this.maxHistoryEvents }),
       ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxWireInputTokens === undefined ? {} : { maxWireInputTokens }),
       ...(memoryText === undefined ? {} : { estimatedMemoryTokens: memoryEstimatedTokens, memoryMaxTokens: input.context?.memoryMaxTokens ?? this.memoryMaxTokens }),
       ...(features.monitor === "guidance" && input.monitorGuidance !== undefined ? { estimatedMonitorGuidanceTokens: monitorGuidanceTokens, monitorGuidanceIncluded } : {}),
       ...(groundingCatalog === undefined ? {} : { estimatedGroundingTokens: groundingTokens, groundingIncluded }),
@@ -422,8 +498,28 @@ export class DefaultContextCompiler implements ContextCompiler {
   }
 }
 
+function sameObservationSurfaceRef(left: SurfaceRef, right: SurfaceRef): boolean {
+  return left.surfaceId === right.surfaceId && left.generation === right.generation && left.kind === right.kind &&
+    left.parentSurfaceId === right.parentSurfaceId && left.admissionSource === right.admissionSource;
+}
+
+function validateInputBudgets(text: number | undefined, wire: number | undefined): void {
+  for (const value of [text, wire]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) {
+      throw new Error("Context input budgets must be integers from 1 to 131072");
+    }
+  }
+  if (text !== undefined && wire !== undefined && text > wire) {
+    throw new Error("Context text budget must not exceed wire budget");
+  }
+}
+
 function estimateTextTokens(value: string): number {
   return Math.ceil(value.length / 4);
+}
+
+function formatOperationGuidance(text: string): string {
+  return `Current task operation note (advisory only; the Goal and existing permissions remain authoritative):\n${text}`;
 }
 
 function canonicalCapturedAt(value: string): string | undefined {
@@ -483,7 +579,8 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
   const projected = candidates.slice(0, Math.min(catalog.maxElements, 16));
   const sourceLabel = catalog.source === "hybrid" ? "UIA+DOM" : catalog.source.toUpperCase();
   const lines = [
-    `${sourceLabel} grounding (${catalog.completeness}; surface=${catalog.surfaceRef.kind}; observation-bound; refs expire after the next observation; use click_element then observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    `${sourceLabel} grounding (${catalog.completeness}; surface=${catalog.surfaceRef.kind}; observation-bound; refs expire after the next observation; if using click_element, use a current ref and observe before typing). For select_option, optionText must be copied exactly from the current native-select options list when present; never guess option text or use an index/value:`,
+    "This grounding catalog is a bounded candidate list, not a substitute for the screenshot; when partial or truncated, omitted controls may still be visible. On managed-browser content, a unique observed DOM match remains authoritative even when the catalog is partial, including known disabled state and live click-validation refusals. Only when no unique DOM match exists may a fresh non-container UIA ref use the checked native point path. A center point is not proof of a semantic effect. If a click is refused or the next observation shows no effect, do not retry the same target by changing refs; use a clear current screenshot point with click or another safe path.",
     ...(catalog.source === "hybrid" && catalog.degraded && !catalog.elements.some((element) => element.source === "dom")
       ? ["Managed browser content grounding is unavailable in this observation. Toolbar-only UIA does not establish the page content region. Use an available wait tool briefly, then use the automatic fresh observation after the page becomes ready; do not invent page refs, guess the content origin, or use drag as a substitute for a click."]
       : []),
@@ -498,7 +595,12 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
       const options = element.options === undefined
         ? ""
         : ` options=[${element.options.map((option) => `${compactLabel(option.text, 160)}:${option.enabled ? "enabled" : "disabled"}`).join(" | ")}]${element.optionsTruncated === true ? " optionsTruncated=true" : ""}`;
-      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}${options}`;
+      const textFormat = element.textFormat === undefined
+        ? ""
+        : element.textFormat.status === "over_limit"
+          ? " textFormat=ax-cfstring-v1/over_limit (AX CFString only; not file verification)"
+          : ` textFormat=ax-cfstring-v1/complete bytes=${element.textFormat.utf8Bytes} codePoints=${element.textFormat.codePointCount} LF=${element.textFormat.lineFeedCount} trailingLF=${element.textFormat.trailingLineFeedCount} CR=${element.textFormat.carriageReturnCount} (AX CFString format only; not file verification)`;
+      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}${options}${textFormat}`;
     }),
   ];
   const text = lines.join("\n");
@@ -541,4 +643,9 @@ function compactLabel(value: string, maxLength: number): string {
 
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function formatSourceLinkedFinishContract(contract: SourceLinkedFinishContract): string {
+  const fields = contract.fields.map((field) => `${field.fieldId} (${field.label}; ${field.required ? "required" : "optional"})`).join(", ");
+  return `Source-linked finish is enabled for this Run. The terminate call must include resultEvidence version source-linked-finish-v1 with one entry for each required field and no duplicate or unknown field IDs. Fields: ${fields}. For source_bound, submit only observationId and elementRef references to exact elements in committed Observation grounding; never submit a value, quote, copied text, or source label. Runtime will render canonical source fields from those references. Use inference with a bounded reason only when the result is inferred, or unknown with one supported reason when the field is not established. Keep free-form terminate text as a separate model report; it does not replace the canonical source-linked result. Multiple sources are preserved for review; do not choose a winner or claim semantic agreement.`;
 }

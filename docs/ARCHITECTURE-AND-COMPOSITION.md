@@ -2,6 +2,8 @@
 
 当前源码交接说明；项目状态与问题以 [PROJECT-HANDOFF](./PROJECT-HANDOFF.md) 为入口。
 
+2026-10-13 集成边界：Windows/macOS 共用一个 CuaDriverComputer，统一维护 Session、Surface、Observation、Receipt、Abort 和未知副作用；输入路由、Win 瞬态窗口证据、Mac sheet 证据及受限文稿身份分别落在私有模块，不持有整份 Session/Registry。来源结果的结束工具合同由 Runtime 工厂注册，Context/Provider 只投影；手机公共入口不承载测试专用文稿 profile。版本与测试见[集成记录](./pr26-integration-audit-2026-10-11.md)。
+
 ## 1. 一条执行链、多个应用入口
 
 ```text

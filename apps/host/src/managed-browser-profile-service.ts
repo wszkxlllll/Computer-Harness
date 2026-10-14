@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, link, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
   type EnvironmentLease,
@@ -45,6 +45,7 @@ export type LoadedManagedBrowserProfilePersistedState = ManagedBrowserProfilePer
 export interface ManagedBrowserProfileStateStore {
   load(): Promise<LoadedManagedBrowserProfilePersistedState | undefined>;
   save(state: ManagedBrowserProfilePersistedState): Promise<void>;
+  saveIfAbsent?(state: ManagedBrowserProfilePersistedState): Promise<boolean>;
 }
 
 export interface ManagedBrowserProfileServiceOptions {
@@ -88,9 +89,13 @@ const COMMANDS = Object.freeze({
 });
 
 /** Store local preference and explicit readiness confirmation beside the Host state. */
-export function defaultManagedBrowserProfileStatePath(profileRoot: string): string {
+export function defaultManagedBrowserProfileStatePath(profileRoot: string, profileLabel: string): string {
   const resolvedProfileRoot = resolve(profileRoot);
-  return resolve(dirname(resolvedProfileRoot), STATE_FILE_NAME);
+  return resolve(dirname(resolvedProfileRoot), `${STATE_FILE_NAME.slice(0, -5)}-${managedBrowserProfileIdentityHash(profileRoot, profileLabel)}.json`);
+}
+
+function legacyManagedBrowserProfileStatePath(profileRoot: string): string {
+  return resolve(dirname(resolve(profileRoot)), STATE_FILE_NAME);
 }
 
 export class FileManagedBrowserProfileStateStore implements ManagedBrowserProfileStateStore {
@@ -131,6 +136,31 @@ export class FileManagedBrowserProfileStateStore implements ManagedBrowserProfil
       await rm(temporaryPath, { force: true }).catch(() => undefined);
     }
   }
+
+  public async saveIfAbsent(state: ManagedBrowserProfilePersistedState): Promise<boolean> {
+    if (!isCurrentPersistedState(state)) throw new Error("managed browser state is invalid");
+    const directory = dirname(this.filePath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporaryPath = resolve(directory, `${basename(this.filePath)}.${randomUUID()}.tmp`);
+    let file: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      file = await open(temporaryPath, "wx", 0o600);
+      await file.writeFile(JSON.stringify(state) + "\n", { encoding: "utf8" });
+      await file.sync();
+      await file.close();
+      file = undefined;
+      try {
+        await link(temporaryPath, this.filePath);
+        return true;
+      } catch (error) {
+        if (isAlreadyExists(error)) return false;
+        throw error;
+      }
+    } finally {
+      await file?.close().catch(() => undefined);
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+  }
 }
 
 interface Deferred<T> {
@@ -152,6 +182,8 @@ interface PreparationOperation {
 /** Coordinates phone commands with the Host-owned visible browser lifecycle. */
 export class ManagedBrowserProfileService implements ManagedBrowserProfileController {
   private readonly store: ManagedBrowserProfileStateStore;
+  private readonly legacyStore: ManagedBrowserProfileStateStore | undefined;
+  private readonly usesDefaultStore: boolean;
   private readonly inspectProfile: typeof inspectManagedBrowserProfile;
   private readonly prepareProfile: typeof prepareManagedBrowserProfile;
   private readonly inspectProfileDirectory: NonNullable<ManagedBrowserProfileServiceOptions["inspectProfileDirectory"]>;
@@ -168,7 +200,13 @@ export class ManagedBrowserProfileService implements ManagedBrowserProfileContro
   private closed = false;
 
   public constructor(private readonly options: ManagedBrowserProfileServiceOptions) {
-    this.store = options.store ?? new FileManagedBrowserProfileStateStore(defaultManagedBrowserProfileStatePath(options.profileRoot));
+    this.usesDefaultStore = options.store === undefined;
+    this.store = options.store ?? new FileManagedBrowserProfileStateStore(
+      defaultManagedBrowserProfileStatePath(options.profileRoot, options.profileLabel),
+    );
+    this.legacyStore = this.usesDefaultStore
+      ? new FileManagedBrowserProfileStateStore(legacyManagedBrowserProfileStatePath(options.profileRoot))
+      : undefined;
     this.inspectProfile = options.inspectProfile ?? inspectManagedBrowserProfile;
     this.inspectProfileDirectory = options.inspectProfileDirectory ?? inspectManagedBrowserProfileDirectory;
     this.prepareProfile = options.prepareProfile ?? prepareManagedBrowserProfile;
@@ -430,10 +468,27 @@ export class ManagedBrowserProfileService implements ManagedBrowserProfileContro
     try {
       const state = await this.store.load();
       if (state !== undefined) {
-        this.defaultSession = state.defaultSession;
         const stateMatchesProfile = state.version === 2 && state.profileIdentityHash === this.profileIdentityHash;
-        this.readyConfirmed = stateMatchesProfile && state.readyConfirmed;
-        if (!stateMatchesProfile) await this.store.save(this.persistedState(false));
+        if (stateMatchesProfile) {
+          this.defaultSession = state.defaultSession;
+          this.readyConfirmed = state.readyConfirmed;
+        } else if (this.usesDefaultStore) {
+          throw new Error("managed browser profile state namespace does not match its identity");
+        }
+        return;
+      }
+      if (this.legacyStore !== undefined) {
+        const legacyState = await this.legacyStore.load();
+        if (legacyState?.version === 2 && legacyState.profileIdentityHash === this.profileIdentityHash) {
+          if (this.store.saveIfAbsent === undefined) throw new Error("managed browser state store cannot safely migrate legacy state");
+          await this.store.saveIfAbsent(this.persistedState(legacyState.readyConfirmed, legacyState.defaultSession));
+          const migratedState = await this.store.load();
+          if (migratedState?.version !== 2 || migratedState.profileIdentityHash !== this.profileIdentityHash) {
+            throw new Error("managed browser profile state migration could not be verified");
+          }
+          this.defaultSession = migratedState.defaultSession;
+          this.readyConfirmed = migratedState.readyConfirmed;
+        }
       }
     } catch {
       this.initializationFailed = true;
@@ -597,4 +652,9 @@ async function inspectManagedBrowserProfileDirectory(
 
 function isMissing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT";
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error as { code?: unknown }).code === "EEXIST";
 }

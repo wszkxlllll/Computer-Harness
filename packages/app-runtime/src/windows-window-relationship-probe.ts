@@ -38,11 +38,12 @@ const MAX_WINDOW_ROWS = 2_048;
 /**
  * Win32-only fallback for relationship metadata missing from CUA inventory.
  * Its embedded C# uses read-only EnumWindows/GetWindow/GetWindowThreadProcessId,
- * GetWindowRect/DwmGetWindowAttribute/IsWindowVisible/IsIconic/GetClassName
- * and GetForegroundWindow. Output bounds are DWM visible frame bounds only.
- * It never calls SetForegroundWindow, SendInput, GetWindowText, or any input API;
- * it does not collect title or UI text and emits only numeric fields and an
- * ASCII window class for the adapter's transient-child evidence policy.
+ * GetWindowRect/DwmGetWindowAttribute/IsWindowVisible/IsIconic/GetClassName,
+ * GetWindowText for top-level captions, process-basename metadata, and
+ * GetForegroundWindow. Output bounds are DWM visible frame bounds only. It
+ * never calls SetForegroundWindow, SendInput, or any input API; it does not
+ * inspect child controls or UI content. Labels are optional and do not affect
+ * topology completeness.
  * Rectangle reads use a temporary per-thread PMv2 DPI context, restored even
  * on failure; unavailable/failed DPI APIs leave the snapshot incomplete.
  */
@@ -76,8 +77,13 @@ export function createWindowsWindowRelationshipProbe(
       if (result.exitCode !== 0) throw new Error("Win32 window relationship probe exited unsuccessfully");
       if (result.stdout.byteLength > maxOutputBytes) throw new Error("Win32 window relationship probe output exceeded its limit");
       const bytes = Buffer.from(result.stdout);
-      if (bytes.some((byte) => byte > 0x7f)) throw new Error("Win32 window relationship probe output was not ASCII-safe JSON");
-      return parseWindowRelationshipProbeOutput(bytes.toString("utf8"), MAX_WINDOW_ROWS);
+      let output: string;
+      try {
+        output = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new Error("Win32 window relationship probe output was not valid UTF-8");
+      }
+      return parseWindowRelationshipProbeOutput(output, MAX_WINDOW_ROWS);
     },
   };
 }
@@ -146,7 +152,7 @@ export function parseWindowRelationshipProbeOutput(
 
 function parseProbeWindow(value: unknown): WindowRelationshipProbeWindow | undefined {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    "pid", "windowId", "ownerPid", "ownerWindowId", "isOnScreen", "minimized", "bounds", "windowClass",
+    "pid", "windowId", "ownerPid", "ownerWindowId", "isOnScreen", "minimized", "noActivate", "bounds", "windowClass", "title", "appName",
   ])) {
     throw new Error("Win32 window relationship probe returned an invalid window row");
   }
@@ -154,7 +160,10 @@ function parseProbeWindow(value: unknown): WindowRelationshipProbeWindow | undef
   const windowId = positiveInteger(value.windowId);
   const ownerPid = optionalOwnerId(value.ownerPid);
   const ownerWindowId = optionalOwnerId(value.ownerWindowId);
+  const noActivate = typeof value.noActivate === "boolean" ? value.noActivate : undefined;
   const bounds = parseBounds(value.bounds);
+  const title = optionalBoundedLabel(value.title, 240);
+  const appName = optionalBoundedLabel(value.appName, 128);
   if (pid === undefined || windowId === undefined || typeof value.isOnScreen !== "boolean" ||
       typeof value.minimized !== "boolean" || bounds === undefined ||
       (value.ownerPid !== null && value.ownerPid !== undefined && ownerPid === undefined) ||
@@ -172,9 +181,29 @@ function parseProbeWindow(value: unknown): WindowRelationshipProbeWindow | undef
     ...(ownerWindowId === undefined ? {} : { ownerWindowId }),
     isOnScreen: value.isOnScreen,
     minimized: value.minimized,
+    ...(noActivate === undefined ? {} : { noActivate }),
     bounds,
     ...(typeof value.windowClass === "string" ? { windowClass: value.windowClass } : {}),
+    ...(title === undefined ? {} : { title }),
+    ...(appName === undefined ? {} : { appName }),
   };
+}
+
+function optionalBoundedLabel(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const label = value.trim();
+  if (label.length === 0 || label.length > maxLength || /[\u0000-\u001f\u007f-\u009f]/u.test(label)) return undefined;
+  for (let index = 0; index < label.length; index += 1) {
+    const codeUnit = label.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = label.charCodeAt(index + 1);
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) return undefined;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return undefined;
+    }
+  }
+  return label;
 }
 
 function parseBounds(value: unknown): { x: number; y: number; width: number; height: number } | "zero_size" | undefined {
@@ -220,9 +249,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const POWERSHELL_PROBE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $source = @'
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -235,8 +266,11 @@ public static class HarnessReadOnlyWindowProbe {
     public long ownerWindowId { get; set; }
     public bool isOnScreen { get; set; }
     public bool minimized { get; set; }
+  public bool? noActivate { get; set; }
     public object bounds { get; set; }
     public string windowClass { get; set; }
+    public string title { get; set; }
+    public string appName { get; set; }
   }
   [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extra);
   [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
@@ -245,7 +279,10 @@ public static class HarnessReadOnlyWindowProbe {
   [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out RECT rect, int size);
   [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)] private static extern int GetWindowLongW(IntPtr hwnd, int index);
+  [DllImport("kernel32.dll", EntryPoint = "SetLastError")] private static extern void SetLastError(uint error);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int maxCount);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetWindowTextW")] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
   [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
   [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -253,18 +290,24 @@ public static class HarnessReadOnlyWindowProbe {
   private const uint GW_HWNDFIRST = 0;
   private const uint GW_HWNDNEXT = 2;
   private const uint DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+  private const int GWL_EXSTYLE = -20;
+  private const int WS_EX_NOACTIVATE = 0x08000000;
   private const int MAX_ENUMERATED_WINDOWS = 2048;
+  private const int MAX_TITLE_LENGTH = 240;
+  private const int MAX_APP_NAME_LENGTH = 128;
   private static bool complete;
   private static List<Row> rows;
   private static List<IntPtr> enumeratedHandles;
   private static HashSet<IntPtr> enumeratedHandleSet;
   private static List<long> zOrderWindowIds;
+  private static Dictionary<int, string> appNameByPid;
   private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr extra);
   public static bool Complete { get { return complete; } }
   public static long[] ZOrderWindowIds { get { return zOrderWindowIds.ToArray(); } }
   public static object[] ReadWindows() {
     complete = true;
     rows = new List<Row>();
+    appNameByPid = new Dictionary<int, string>();
     enumeratedHandles = new List<IntPtr>();
     enumeratedHandleSet = new HashSet<IntPtr>();
     zOrderWindowIds = new List<long>();
@@ -322,6 +365,7 @@ public static class HarnessReadOnlyWindowProbe {
         StringBuilder className = new StringBuilder(256);
         int classLength = GetClassName(hwnd, className, className.Capacity);
         if (classLength <= 0) { complete = false; return true; }
+        bool? noActivate = ReadNoActivate(hwnd);
         string windowClass = classLength > 0 ? className.ToString() : null;
         if (windowClass != null) {
           foreach (char character in windowClass) {
@@ -342,14 +386,58 @@ public static class HarnessReadOnlyWindowProbe {
           ownerWindowId = ownerWindowId,
           isOnScreen = IsWindowVisible(hwnd) && !minimized && intersectsDesktop,
           minimized = minimized,
+          noActivate = noActivate,
           bounds = new { x = rect.Left, y = rect.Top, width = width, height = height },
-          windowClass = windowClass
+          windowClass = windowClass,
+          title = ReadWindowTitle(hwnd),
+          appName = ReadAppName(pid)
         });
         return true;
       } catch { complete = false; return true; }
     }, IntPtr.Zero);
     if (!enumerated) complete = false;
     ReadZOrder();
+  }
+  private static string ReadWindowTitle(IntPtr hwnd) {
+    try {
+      // EnumWindows supplies top-level HWNDs. GetWindowText reads their caption
+      // without querying edit/control text from another process.
+      StringBuilder text = new StringBuilder(MAX_TITLE_LENGTH + 1);
+      int length = GetWindowText(hwnd, text, text.Capacity);
+      if (length <= 0) return null;
+      return BoundedLabel(text.ToString(0, Math.Min(length, MAX_TITLE_LENGTH)), MAX_TITLE_LENGTH);
+    } catch { return null; }
+  }
+  private static bool? ReadNoActivate(IntPtr hwnd) {
+    try {
+      SetLastError(0);
+      int extendedStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
+      int error = Marshal.GetLastWin32Error();
+      if (extendedStyle == 0 && error != 0) return null;
+      return (extendedStyle & WS_EX_NOACTIVATE) != 0;
+    } catch { return null; }
+  }
+  private static string ReadAppName(uint processId) {
+    if (processId > Int32.MaxValue) return null;
+    int pid = (int)processId;
+    string appName;
+    if (appNameByPid.TryGetValue(pid, out appName)) return appName;
+    appName = null;
+    try {
+      using (Process process = Process.GetProcessById(pid)) {
+        // ProcessName contains the executable's basename without an absolute path.
+        appName = BoundedLabel(process.ProcessName, MAX_APP_NAME_LENGTH);
+      }
+    } catch { }
+    appNameByPid[pid] = appName;
+    return appName;
+  }
+  private static string BoundedLabel(string value, int maxLength) {
+    if (String.IsNullOrWhiteSpace(value)) return null;
+    string label = value.Trim();
+    if (label.Length == 0 || label.Length > maxLength) return null;
+    foreach (char character in label) if (Char.IsControl(character)) return null;
+    return label;
   }
   private static void ReadZOrder() {
     zOrderWindowIds = new List<long>();

@@ -4,11 +4,13 @@ import { randomBytes } from "node:crypto";
 import WebSocket, { WebSocketServer } from "ws";
 import type { RemoteRunApi } from "@computer-harness/app-runtime";
 import { HostRelayConnector, type PairingTokenRegistration } from "./index.js";
+import { MAX_WINDOW_PREVIEW_RESPONSE_BYTES } from "./routing.js";
 
 interface FakeRelay {
   readonly origin: string;
   readonly port: number;
   readonly registrations: Map<string, number>;
+  readonly responses: Array<Record<string, unknown>>;
   readonly server: Server;
   send(message: Record<string, unknown>): void;
   close(): Promise<void>;
@@ -21,6 +23,7 @@ async function startFakeRelay(port = 0): Promise<FakeRelay> {
   const server = createServer();
   const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 12 * 1024 * 1024, perMessageDeflate: false });
   const registrations = new Map<string, number>();
+  const responses: Array<Record<string, unknown>> = [];
   let connectedHost: WebSocket | undefined;
   let closed = false;
   server.on("upgrade", (request, socket, head) => {
@@ -35,6 +38,7 @@ async function startFakeRelay(port = 0): Promise<FakeRelay> {
       });
       websocket.on("message", (data) => {
         const message = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (message.type === "bridge.response") responses.push(message);
         if (message.type === "host.hello") {
           websocket.send(JSON.stringify({ type: "relay.ready", protocolVersion: 1, hostId: message.hostId }));
         } else if (message.type === "host.pairing.register") {
@@ -58,6 +62,7 @@ async function startFakeRelay(port = 0): Promise<FakeRelay> {
     origin: `http://127.0.0.1:${address.port}`,
     port: address.port,
     registrations,
+    responses,
     server,
     send: (message) => {
       if (connectedHost?.readyState !== WebSocket.OPEN) throw new Error("fake relay has no connected Host");
@@ -139,6 +144,47 @@ describe("HostRelayConnector", () => {
       path: "/api/managed-browser-profile/preference",
       body: { defaultSession: "temporary" },
     }));
+  });
+
+  it("enforces the smaller route-specific candidate-preview response bound", async () => {
+    const hostId = "connector_preview_limit";
+    const credential = randomBytes(32).toString("base64url");
+    const relay = await startFakeRelay();
+    const oversizedPreview = "A".repeat(MAX_WINDOW_PREVIEW_RESPONSE_BYTES + 1);
+    const requestHandler = vi.fn(async () => ({ statusCode: 200, body: { dataBase64: oversizedPreview } }));
+    const connector = new HostRelayConnector({
+      relayUrl: relay.origin,
+      hostId,
+      credential,
+      allowInsecureLocalhost: true,
+      handlers: {
+        api: createRemoteApi(),
+        request: requestHandler,
+        authorizeSession: () => true,
+      },
+    });
+    activeConnectors.push(connector);
+    await connector.start();
+
+    relay.send({
+      type: "bridge.request",
+      requestId: "candidate_preview_too_large",
+      method: "POST",
+      path: "/api/windows/preview",
+      deviceId: "phone_preview_limit",
+      sessionToken: randomBytes(32).toString("base64url"),
+      csrfToken: randomBytes(24).toString("base64url"),
+      body: { candidateToken: "T".repeat(32) },
+    });
+    await waitFor(() => relay.responses.some((message) => message.requestId === "candidate_preview_too_large"));
+
+    const response = relay.responses.find((message) => message.requestId === "candidate_preview_too_large");
+    expect(requestHandler).toHaveBeenCalledTimes(1);
+    expect(response).toMatchObject({
+      statusCode: 502,
+      contentType: "application/json; charset=utf-8",
+    });
+    expect(JSON.stringify(response)).not.toContain(oversizedPreview);
   });
 
   it("reconnects and re-registers pairing token hashes without exposing raw tokens", async () => {

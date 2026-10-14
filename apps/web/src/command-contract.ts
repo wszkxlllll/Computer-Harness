@@ -18,11 +18,12 @@ export function responseCommand(snapshot: RunSnapshot, requestId: string, text: 
   return { expectedSequence: snapshot.sequence, type: "respond", requestId: pending.requestId, text: text.trim() };
 }
 
-export function windowChoiceCommand(snapshot: RunSnapshot, requestId: string, candidateToken: string): WebRunCommand | undefined {
+export function windowChoiceCommand(snapshot: RunSnapshot, requestId: string, candidateToken: string, previewToken?: string): WebRunCommand | undefined {
   const pending = snapshot.pendingRequest;
-  const candidateStillListed = pending?.candidates?.some((candidate) => candidate.token === candidateToken) === true;
-  if (!pending || pending.kind !== "window_handoff" || pending.requestId !== requestId || !candidateStillListed || snapshot.capabilities.windowHandoff !== true) return undefined;
-  return { expectedSequence: snapshot.sequence, type: "window.confirm", requestId: pending.requestId, candidateToken };
+  const candidate = pending?.candidates?.find((item) => item.token === candidateToken);
+  if (!pending || pending.kind !== "window_handoff" || pending.requestId !== requestId || candidate === undefined || snapshot.capabilities.windowHandoff !== true ||
+      candidate.previewRequired === true && (previewToken === undefined || !/^[A-Za-z0-9_-]{32}$/u.test(previewToken))) return undefined;
+  return { expectedSequence: snapshot.sequence, type: "window.confirm", requestId: pending.requestId, candidateToken, ...(previewToken === undefined ? {} : { previewToken }) };
 }
 
 export function ignoreWindowCommand(snapshot: RunSnapshot, requestId: string): WebRunCommand | undefined {

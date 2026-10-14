@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import WebSocket from "ws";
 import type { RemoteRunApi } from "@computer-harness/app-runtime";
 import { hashPairingToken, HostRelayConnector, type HostToRelayMessage } from "@computer-harness/relay-connector";
+import { MAX_WINDOW_PREVIEW_RESPONSE_BYTES } from "@computer-harness/relay-connector/routing";
 import { createRelayServer } from "./server.js";
 
 interface FakeHostMessage {
@@ -190,6 +191,25 @@ describe("local outbound relay transport", () => {
     host.send(bridgeResponse(windowChoicesRequest.requestId, windowChoices));
     expect(await (await windowChoicesPromise).json()).toEqual(windowChoices);
 
+    const oversizedPreviewPromise = fetch(`${origin}/api/windows/preview`, {
+      method: "POST",
+      headers: { Origin: origin, Cookie: relayCookie, "Content-Type": "application/json", "x-csrf-token": csrfToken },
+      body: JSON.stringify({ candidateToken: opaqueTargetToken }),
+    });
+    const oversizedPreviewRequest = await host.next((message) => message.type === "bridge.request" && message.path === "/api/windows/preview");
+    host.send(bridgeResponse(oversizedPreviewRequest.requestId, {
+      previewToken: "P".repeat(32),
+      capturedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      viewport: { width: 320, height: 240 },
+      mediaType: "image/png",
+      dataBase64: "A".repeat(MAX_WINDOW_PREVIEW_RESPONSE_BYTES),
+    }));
+    const oversizedPreviewResponse = await oversizedPreviewPromise;
+    expect(oversizedPreviewResponse.status).toBe(502);
+    expect(oversizedPreviewResponse.headers.get("cache-control")).toContain("no-store");
+    expect(await oversizedPreviewResponse.json()).toEqual({ error: "invalid_host_json_response" });
+
     const sessionSnapshotPromise = fetch(`${origin}/api/session`, { headers: { Cookie: relayCookie } });
     const snapshotRequest = await host.next((message) => message.type === "bridge.request" && message.path === "/api/session");
     expect(snapshotRequest).toMatchObject({ deviceId: "phone_one", sessionToken: hostSessionToken });
@@ -296,6 +316,15 @@ describe("local outbound relay transport", () => {
       { commandId: "cmd_redundant_target", goal: "start a run", targetToken: opaqueTargetToken, target: { mode: "auto" } },
       { commandId: "cmd_bad_window", goal: "start a run", target: { mode: "window", targetToken: "short" } },
       { commandId: "cmd_bad_browser", goal: "start a run", target: { mode: "browser", url: "ftp://example.com/" } },
+      { commandId: "cmd_native_switch_true", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", switchWindows: true } },
+      { commandId: "cmd_native_switch_false", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", switchWindows: false } },
+      { commandId: "cmd_native_profile", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890" } },
+      { commandId: "cmd_native_pid_extra", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", pid: 1234 } },
+      { commandId: "cmd_native_path_extra", goal: "start a run", target: { mode: "native-recovery", profileId: "Opaque_Profile_1234567890", path: "/private/document.txt" } },
+      { commandId: "cmd_native_missing_profile", goal: "start a run", target: { mode: "native-recovery" } },
+      { commandId: "cmd_native_wrong_profile", goal: "start a run", target: { mode: "native-recovery", profileId: 1234 } },
+      { commandId: "cmd_native_web_document", goal: "start a run", target: { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345" } },
+      { commandId: "cmd_hybrid_path_extra", goal: "start a run", target: { mode: "native-web-document", profileId: "Opaque_Hybrid_Profile_12345", path: "/private/output.txt" } },
     ];
     for (const body of invalidRunStarts) {
       const invalidRunStart = await fetch(`${origin}/api/runs`, {

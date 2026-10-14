@@ -42,6 +42,45 @@ describe("Jev window candidate selector", () => {
     expect(await selector.select("x", candidates, new AbortController().signal)).toEqual({ kind: "abstain", reason: "unavailable" });
   });
 
+  it("accepts the initial-selection gate from observed Jev output but keeps handoff at the stricter suggestion gate", async () => {
+    const responseFromObservedRun = () => response("w1", 0.86, { w1: 0.88, w2: 0, none: 0.12 });
+    const fetcher = vi.fn(async () => responseFromObservedRun()) as unknown as typeof fetch;
+    const selector = createJevWindowSelector("secret", fetcher);
+    await expect(selector.select("在记事本里写一条记录", candidates, new AbortController().signal, "initial"))
+      .resolves.toEqual({ kind: "matched", target: candidates[0] });
+    await expect(selector.select("在记事本里写一条记录", candidates, new AbortController().signal, "handoff"))
+      .resolves.toEqual({ kind: "abstain", reason: "uncertain" });
+  });
+
+  it("enforces each initial confidence boundary and rejects inconsistent or extra probability entries", async () => {
+    const choices = [
+      response("w1", 0.799, { w1: 0.9, w2: 0, none: 0.1 }),
+      response("w1", 0.99, { w1: 0.849, w2: 0, none: 0.151 }),
+      response("w1", 0.99, { w1: 0.85, w2: 0.5501, none: 0 }),
+      response("w1", 0.99, { w1: 0.9, w2: 0.92, none: 0 }),
+      response("w1", 0.99, { w1: 0.9, w2: 0, none: 0.1, extra: 0 } as Record<string, number>),
+    ];
+    const fetcher = vi.fn(async () => choices.shift()!) as unknown as typeof fetch;
+    const selector = createJevWindowSelector("secret", fetcher);
+    expect(await selector.select("goal", candidates, new AbortController().signal, "initial"))
+      .toEqual({ kind: "abstain", reason: "uncertain" });
+    expect(await selector.select("goal", candidates, new AbortController().signal, "initial"))
+      .toEqual({ kind: "abstain", reason: "uncertain" });
+    expect(await selector.select("goal", candidates, new AbortController().signal, "initial"))
+      .toEqual({ kind: "abstain", reason: "uncertain" });
+    expect(await selector.select("goal", candidates, new AbortController().signal, "initial"))
+      .toEqual({ kind: "abstain", reason: "uncertain" });
+    expect(await selector.select("goal", candidates, new AbortController().signal, "initial"))
+      .toEqual({ kind: "abstain", reason: "unavailable" });
+  });
+
+  it("accepts the exact initial threshold boundary despite floating-point margin representation", async () => {
+    const fetcher = vi.fn(async () => response("w1", 0.8, { w1: 0.85, w2: 0.55, none: 0 })) as unknown as typeof fetch;
+    const selector = createJevWindowSelector("secret", fetcher);
+    expect(await selector.select("goal", candidates, new AbortController().signal, "initial"))
+      .toEqual({ kind: "matched", target: candidates[0] });
+  });
+
   it("does not call TypeSafe for an empty or oversized candidate list", async () => {
     const fetcher = vi.fn() as unknown as typeof fetch;
     const selector = createJevWindowSelector("secret", fetcher);

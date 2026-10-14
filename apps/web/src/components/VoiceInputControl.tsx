@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Pcm16AudioChunk, VoiceAudioCaptureAdapter, VoiceInputEvent } from "@computer-harness/voice";
 import { VOICE_INPUT_MAX_DURATION_MS } from "@computer-harness/voice";
 import {
@@ -20,9 +20,10 @@ interface VoiceInputControlProps {
   onTranscript: (text: string) => void;
   onActiveChange?: (active: boolean) => void;
   createCaptureAdapter?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
+  returnFocusElement?: () => HTMLElement | null;
 }
 
-export function VoiceInputControl({ disabled = false, onTranscript, onActiveChange, createCaptureAdapter }: VoiceInputControlProps) {
+export function VoiceInputControl({ disabled = false, onTranscript, onActiveChange, createCaptureAdapter, returnFocusElement }: VoiceInputControlProps) {
   const capabilities = useContext(VoiceInputCapabilitiesContext);
   const [status, setStatus] = useState<ControlState>("idle");
   const [durationSeconds, setDurationSeconds] = useState(0);
@@ -33,6 +34,12 @@ export function VoiceInputControl({ disabled = false, onTranscript, onActiveChan
   const onActiveChangeRef = useRef(onActiveChange);
   onActiveChangeRef.current = onActiveChange;
   const stopTimer = useRef<number | undefined>(undefined);
+  const startButtonRef = useRef<HTMLButtonElement>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingFocusRef = useRef<"cancel" | "return" | undefined>(undefined);
+  const returnFocusElementRef = useRef(returnFocusElement);
+  returnFocusElementRef.current = returnFocusElement;
   const stopRecordingRef = useRef<((automatic: boolean) => Promise<void>) | undefined>(undefined);
   const sessionId = useRef<string | undefined>(undefined);
   const eventCursor = useRef(0);
@@ -41,6 +48,19 @@ export function VoiceInputControl({ disabled = false, onTranscript, onActiveChan
   const queueRef = useRef<SerialAudioUploadQueue<Awaited<ReturnType<typeof appendVoiceAudio>>> | undefined>(undefined);
   const capturePump = useRef<Promise<void> | undefined>(undefined);
   const startedAt = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    const pendingFocus = pendingFocusRef.current;
+    if (pendingFocus === undefined) return;
+    pendingFocusRef.current = undefined;
+    if (pendingFocus === "cancel") {
+      cancelButtonRef.current?.focus();
+      return;
+    }
+    const returnElement = returnFocusElementRef.current?.();
+    if (returnElement?.isConnected && !returnElement.hasAttribute("disabled")) returnElement.focus();
+    else startButtonRef.current?.focus();
+  }, [status]);
 
   useEffect(() => {
     if (status !== "recording") return;
@@ -66,6 +86,11 @@ export function VoiceInputControl({ disabled = false, onTranscript, onActiveChan
   function transition(next: ControlState): void {
     const wasActive = isActiveState(statusRef.current);
     const active = isActiveState(next);
+    if (!wasActive && active && document.activeElement === startButtonRef.current) pendingFocusRef.current = "cancel";
+    if (next === "finalizing" && document.activeElement === stopButtonRef.current) pendingFocusRef.current = "cancel";
+    if (wasActive && !active && (document.activeElement === stopButtonRef.current || document.activeElement === cancelButtonRef.current)) {
+      pendingFocusRef.current = "return";
+    }
     statusRef.current = next;
     setStatus(next);
     if (wasActive !== active) onActiveChangeRef.current?.(active);
@@ -178,7 +203,8 @@ export function VoiceInputControl({ disabled = false, onTranscript, onActiveChan
       return;
     }
     transition("finalizing");
-    if (automatic) setMessage("已到 60 秒上限，正在完成识别…");
+    const maxDurationSeconds = Math.ceil((capabilities?.maxDurationMs ?? VOICE_INPUT_MAX_DURATION_MS) / 1000);
+    if (automatic) setMessage(`已到 ${maxDurationSeconds} 秒上限，正在完成识别…`);
     try {
       await activeCapture.stop();
       await capturePump.current;
@@ -194,7 +220,7 @@ export function VoiceInputControl({ disabled = false, onTranscript, onActiveChan
       } else {
         const finalText = transcriptText(finalState);
         if (finalText) onTranscript(finalText);
-        if (automatic) setMessage("已到 60 秒上限，完整识别结果已填入输入框，请检查后再发送。");
+        if (automatic) setMessage(`已到 ${maxDurationSeconds} 秒上限，完整识别结果已填入输入框，请检查后再发送。`);
       }
       captureRef.current = undefined;
       queueRef.current = undefined;
@@ -243,25 +269,32 @@ export function VoiceInputControl({ disabled = false, onTranscript, onActiveChan
   }
 
   const active = isActiveState(status);
+  const maxDurationSeconds = Math.ceil((capabilities?.maxDurationMs ?? VOICE_INPUT_MAX_DURATION_MS) / 1000);
   return (
-    <div className="voice-input-control">
-      <div className="voice-input-actions">
+    <div className="voice-input-control" role="group" aria-label="语音输入">
+      <div className="voice-input-actions" role="group" aria-label="录音控制">
         {!active && (
-          <button className="button button-secondary voice-record-button" type="button" onClick={() => void startRecording()} disabled={disabled || capabilities === undefined || capabilities.available === false}>
-            {status === "finished" || status === "cancelled" || status === "error" ? "重新录音" : "按下说话"}
+          <button ref={startButtonRef} className="button button-secondary voice-record-button" type="button" onClick={() => void startRecording()} disabled={disabled || capabilities === undefined || capabilities.available === false}>
+            {status === "finished" || status === "cancelled" || status === "error" ? "重新录音" : "点击开始录音"}
           </button>
         )}
-        {status === "recording" && <button className="button button-primary voice-record-button" type="button" onClick={() => void stopRecording()} disabled={disabled}>停止录音</button>}
+        {status === "recording" && <button ref={stopButtonRef} className="button button-primary voice-record-button" type="button" onClick={() => void stopRecording()} disabled={disabled}>结束录音</button>}
         {(status === "starting" || status === "recording" || status === "finalizing") && (
-          <button className="button button-secondary voice-cancel-button" type="button" onClick={() => void cancelRecording()} disabled={disabled}>取消</button>
+          <button ref={cancelButtonRef} className="button button-secondary voice-cancel-button" type="button" onClick={() => void cancelRecording()} disabled={disabled}>取消</button>
         )}
-        {status === "recording" && <span className="voice-record-duration" aria-label={"录音 " + formatDuration(durationSeconds)}>{formatDuration(durationSeconds)}</span>}
+        {status === "recording" && <span className="voice-record-duration" role="timer" aria-live="off" aria-label={"录音时长 " + formatDuration(durationSeconds)}>{formatDuration(durationSeconds)}</span>}
       </div>
+      {status === "idle" && capabilities?.available !== false && (
+        <p className="voice-input-status voice-input-guidance">
+          <span>点击“开始录音”才会请求麦克风；最长 {maxDurationSeconds} 秒。</span>
+          <span>识别后检查文字，再手动发送。</span>
+        </p>
+      )}
       {status === "starting" && <p className="voice-input-status" role="status">正在准备麦克风和语音识别…</p>}
-      {status === "recording" && <p className="voice-input-status" role="status">正在录音。再次按“停止录音”后，识别结果会填入输入框供你编辑。</p>}
+      {status === "recording" && <p className="voice-input-status" role="status">正在录音，最长 {maxDurationSeconds} 秒。点“结束录音”后检查文字，再手动发送。</p>}
       {status === "finalizing" && <p className="voice-input-status" role="status">正在完成识别…</p>}
       {transcript && active && <p className="voice-input-transcript" aria-live="off"><strong>实时转写：</strong>{transcript}</p>}
-      {status === "finished" && transcript && <p className="voice-input-status" role="status">识别结果已填入输入框，请检查并编辑后再发送。</p>}
+      {status === "finished" && transcript && <p className="voice-input-status" role="status">识别结果已填入输入框；检查后再手动发送。</p>}
       {message && <p className={status === "error" ? "voice-input-error" : "voice-input-status"} role={status === "error" ? "alert" : "status"}>{message}</p>}
       {capabilities !== undefined && !capabilities.available && status === "idle" && (
         <p className="voice-input-status" role="note">语音输入尚不可用，仍可直接输入文字。</p>

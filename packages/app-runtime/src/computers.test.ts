@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDefaultToolRegistry, type Computer } from "@computer-harness/runtime";
-import type { ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowOption } from "@computer-harness/protocol";
+import type { ComputerSessionDescriptor, ComputerWindowCandidate, ComputerWindowList } from "@computer-harness/protocol";
 import { defaultManagedBrowserKind, type DomGroundingTransport, type ManagedBrowserHost, type ManagedBrowserHostOptions, type ManagedBrowserTarget, type CuaBootstrapSession } from "@computer-harness/computer-cua";
 import { createComputer, prepareComputerRunAssembly } from "./computers.js";
 
@@ -33,9 +33,11 @@ const nativeWindowCandidate: ComputerWindowCandidate = {
   title: "Review draft",
 };
 
-const managedWindowInventory: readonly ComputerWindowOption[] = [
-  { windowRef: "fixture-wps-ref", appName: "WPS", title: "Review draft", isCurrent: false },
-];
+const managedWindowInventory: ComputerWindowList = {
+  options: [{ windowRef: "fixture-wps-ref", appName: "WPS", title: "Review draft", isCurrent: false }],
+  truncated: false,
+  omittedCount: 0,
+};
 
 describe("prepareComputerRunAssembly", () => {
   it("keeps CUA grounding and window tool limits with Computer assembly", () => {
@@ -47,6 +49,24 @@ describe("prepareComputerRunAssembly", () => {
     const desktop = prepareComputerRunAssembly({ kind: "cua", socketPath: "fixture.sock", screenshotDir: "screenshots" }, "off");
     expect(desktop.enabledToolNames(registry)).toBeUndefined();
     expect(desktop.groundingTools).toEqual([]);
+    expect(desktop.toolPresentationOverrides).toEqual([]);
+
+    const caretProfile = prepareComputerRunAssembly({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      multilineTypeProfile: "foreground-caret-v1",
+    }, "off");
+    expect(caretProfile.config).toMatchObject({ multilineTypeProfile: "foreground-caret-v1" });
+    expect(caretProfile.toolPresentationOverrides.map((override) => override.name)).toEqual(
+      process.platform === "win32" ? ["type"] : [],
+    );
+    if (process.platform === "win32") {
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("intended to insert at the current caret or replace the current selection");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("driver completion does not verify the resulting content");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).not.toContain("preserves the current caret or selection");
+      expect(caretProfile.toolPresentationOverrides[0]?.inputPropertyDescriptions.elementRef).toContain("append-to-end");
+    }
 
     const backgroundWindow = prepareComputerRunAssembly({
       kind: "cua",
@@ -279,11 +299,26 @@ describe("createComputer", () => {
     );
 
     expect(received).toMatchObject({ socketPath: "fixture.sock", screenshotDir: "screenshots", windowTarget: { pid: 1234, windowId: 5678 } });
+    expect(received).not.toHaveProperty("multilineTypeProfile");
     if (process.platform === "win32") {
       expect(received?.windowRelationshipProbe).toMatchObject({ read: expect.any(Function) });
     } else {
       expect(received).not.toHaveProperty("windowRelationshipProbe");
     }
+  });
+
+  it("passes a locally configured multiline typing profile to the CUA adapter", async () => {
+    let received: Record<string, unknown> | undefined;
+    class CapturingComputer {
+      public constructor(options: Record<string, unknown>) { received = options; }
+    }
+
+    await createComputer(
+      { kind: "cua", socketPath: "candidate.sock", screenshotDir: "screenshots", multilineTypeProfile: "foreground-caret-v1" },
+      { importCuaComputer: async () => ({ CuaDriverComputer: CapturingComputer as unknown as new (options: Record<string, unknown>) => Computer }) },
+    );
+
+    expect(received).toMatchObject({ multilineTypeProfile: "foreground-caret-v1" });
   });
 
   it("allows explicit probe injection and an explicit opt-out of the Windows fallback", async () => {

@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { BrowserSiteChoice, RunTarget } from "../types";
-import { isValidBrowserUrl } from "../run-target";
+import { appNameMatchesHint, explicitApplicationHint, isValidBrowserUrl } from "../run-target";
 import { WindowTargetPicker, type WindowTargetPickerProps } from "./WindowTargetPicker";
 import { VoiceInputControl } from "./VoiceInputControl";
 import type { VoiceAudioCaptureAdapter } from "@computer-harness/voice";
@@ -14,6 +14,7 @@ interface GoalComposerProps {
   browserUrl: string;
   commonSiteChoices?: readonly BrowserSiteChoice[];
   onTargetModeChange: (mode: RunTarget["mode"]) => void;
+  onGoalChange?: (goal: string) => void;
   onBrowserUrlChange: (url: string) => void;
   targetPicker: WindowTargetPickerProps;
   voiceCaptureAdapterFactory?: (chunkBytes: number) => VoiceAudioCaptureAdapter;
@@ -30,6 +31,7 @@ export function GoalComposer({
   browserUrl,
   commonSiteChoices = [],
   onTargetModeChange,
+  onGoalChange = () => undefined,
   onBrowserUrlChange,
   targetPicker,
   voiceCaptureAdapterFactory,
@@ -40,8 +42,14 @@ export function GoalComposer({
   const [goal, setGoal] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
   const [switchWindows, setSwitchWindows] = useState(false);
+  const goalInputRef = useRef<HTMLTextAreaElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
   const formDisabled = disabled || busy || voiceActive;
   const parsedBrowserUrl = browserUrl.trim();
+  const selectedWindow = targetPicker.candidates.find((candidate) => candidate.token === targetPicker.selectedToken);
+  const explicitHint = explicitApplicationHint(goal);
+  const selectedWindowConflictsWithGoal = targetMode === "window" && selectedWindow !== undefined && explicitHint !== undefined &&
+    !appNameMatchesHint(selectedWindow.appName, explicitHint);
   const browserUrlValid = !parsedBrowserUrl || isValidBrowserUrl(parsedBrowserUrl);
   const browserUrlInvalid = Boolean(parsedBrowserUrl) && !isValidBrowserUrl(parsedBrowserUrl);
   const validCommonSiteChoices = commonSiteChoices.flatMap((choice) => {
@@ -49,14 +57,23 @@ export function GoalComposer({
     return choice.label.trim() && isValidBrowserUrl(url) ? [{ label: choice.label, url }] : [];
   });
 
+  useEffect(() => {
+    if (error) errorRef.current?.focus();
+  }, [error]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = goal.trim();
-    if (!value || !canStart || disabled || busy || voiceActive) return;
+    if (!value.trim() || !canStart || disabled || busy || voiceActive) return;
     if (targetMode === "window") {
       const targetToken = targetPicker.selectedToken;
       if (!targetToken) return;
-      await onSubmit(value, { mode: "window", targetToken, ...(switchWindows ? { switchWindows: true } : {}) });
+      await onSubmit(value, {
+        mode: "window",
+        targetToken,
+        ...(targetPicker.selectedPreviewToken === undefined ? {} : { previewToken: targetPicker.selectedPreviewToken }),
+        ...(switchWindows ? { switchWindows: true } : {}),
+      });
       return;
     }
     if (targetMode === "browser") {
@@ -85,28 +102,33 @@ export function GoalComposer({
   };
 
   return (
-    <form id="new-task" className="goal-composer" onSubmit={submit}>
+    <form id="new-task" className="goal-composer" aria-label="新任务表单" onSubmit={submit}>
       <label htmlFor="goal-input">想让电脑做什么？</label>
       <p id="goal-help" className="sr-only">描述目标、范围和期望结果。</p>
       <textarea
+        ref={goalInputRef}
         id="goal-input"
         name="goal"
         rows={4}
         value={goal}
-        onChange={(event) => setGoal(event.currentTarget.value)}
+        onChange={(event) => { const value = event.currentTarget.value; setGoal(value); onGoalChange(value); }}
         placeholder="写下任务内容…"
-        aria-describedby={error ? "goal-help goal-error" : "goal-help"}
+        aria-describedby="goal-help"
         disabled={formDisabled}
         required
       />
-      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} onTranscript={(text) => setGoal((current) => appendVoiceInputText(current, text))} createCaptureAdapter={voiceCaptureAdapterFactory} />
-      {error && <p id="goal-error" className="inline-error" role="alert">{error}</p>}
+      <VoiceInputControl disabled={disabled || busy} onActiveChange={setVoiceActive} returnFocusElement={() => goalInputRef.current} onTranscript={(text) => {
+        const next = appendVoiceInputText(goal, text);
+        setGoal(next);
+        onGoalChange(next);
+      }} createCaptureAdapter={voiceCaptureAdapterFactory} />
+      {error && <p ref={errorRef} id="goal-error" className="inline-error" role="alert" tabIndex={-1}>{error}</p>}
       {setupRequired && <a className="setup-required-link" href="/preferences">打开浏览器与登录状态设置</a>}
 
       <label className="preference-toggle" htmlFor="cross-window-run-switch">
         <span className="preference-toggle-copy">
-          <strong>跨应用完成任务</strong>
-          <span id="cross-window-run-switch-help">启用后，模型可以列出和切换已打开窗口；应用名和标题会发送给当前模型，可能包含文件名或个人信息。电脑也会按设置准备受管浏览器；浏览器页面内容可能用于本次任务。</span>
+          <strong>允许切换其他应用</strong>
+          <span id="cross-window-run-switch-help">开启后，电脑可查看并切换已打开的窗口。窗口名称、标题和相关网页内容可能随本次任务发送给所选服务。</span>
         </span>
         <input
           id="cross-window-run-switch"
@@ -134,7 +156,7 @@ export function GoalComposer({
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="browser" checked={targetMode === "browser"} onChange={() => changeMode("browser")} />
-              <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>使用受管浏览器和基于页面元素的可验证操作；登录状态使用电脑设置，起始网址可选。</span></span>
+              <span className="target-mode-copy"><strong>打开网站（推荐）</strong><span>电脑会打开网站，并按页面上的内容完成任务。是否使用已登录状态，取决于电脑上的浏览器设置；网址可留空。</span></span>
             </label>
             <label className="target-mode-option">
               <input type="radio" name="target-mode" value="desktop" checked={targetMode === "desktop"} onChange={() => changeMode("desktop")} />
@@ -144,7 +166,14 @@ export function GoalComposer({
         </fieldset>
       </details>
 
-      {targetMode === "window" && <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />}
+      {targetMode === "window" && <>
+        <WindowTargetPicker {...targetPicker} disabled={formDisabled || targetPicker.disabled} />
+        {selectedWindowConflictsWithGoal && (
+          <p className="field-hint" role="note">
+            任务开头提到了 {explicitHint}，但当前手选窗口是 {selectedWindow.appName || "未命名应用"}。请核对这个起始窗口是否符合任务，再开始。
+          </p>
+        )}
+      </>}
 
       {targetMode === "browser" && (
         <div className="browser-target-field">
@@ -181,7 +210,7 @@ export function GoalComposer({
             aria-invalid={browserUrlInvalid}
             disabled={formDisabled}
           />
-          <p id="browser-target-help" className="field-hint">留空会打开空白页。浏览器状态使用电脑「浏览器与登录状态」设置的默认值。</p>
+          <p id="browser-target-help" className="field-hint">留空会打开空白页。是否沿用登录状态，按电脑上的浏览器设置决定。</p>
           {browserUrlInvalid && <p id="browser-target-error" className="inline-error" role="alert">请输入完整的 http:// 或 https:// 地址。</p>}
         </div>
       )}
@@ -189,6 +218,7 @@ export function GoalComposer({
         <button
           className="button button-primary button-large"
           type="submit"
+          aria-describedby={error ? "goal-error" : undefined}
           disabled={formDisabled || !canStart || !goal.trim() || (targetMode === "window" && !targetPicker.selectedToken) || (targetMode === "browser" && !browserUrlValid)}
         >
           {busy ? "正在发送…" : "开始任务"}

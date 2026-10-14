@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { CuaDriverLike } from "./cua-sdk-contract.js";
-import { ManagedBrowserWindowResolutionError, resolveOwnedManagedBrowserWindow } from "./managed-browser-resolver.js";
+import {
+  browserBoundsToCuaScaleFromPageMetrics,
+  createManagedBrowserWindowBindingHint,
+  inspectManagedPageActivity,
+  managedBrowserWindowBoundsMatch,
+  selectManagedBrowserStartupActivity,
+  validateOwnedWindowResolution,
+} from "./managed-browser-host.js";
+import { ManagedBrowserWindowResolutionError, resolveOwnedManagedBrowserWindow, validateManagedBrowserWindowResolution } from "./managed-browser-resolver.js";
 
 function driverWithWindows(windows: unknown[]): { driver: CuaDriverLike; calls: Array<{ name: string; input: Record<string, unknown> }> } {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
@@ -50,7 +58,7 @@ describe("managed browser CUA window resolver", () => {
     ]).driver, "s", 4321, new AbortController().signal, { browserWindowId: 77, ownedProcessIds: [4321, 5432, 6543] })).rejects.toMatchObject({ reason: "multiple_candidates" });
   });
 
-  it("accepts one uniquely owned window when CDP and CUA use a common DPI scale", async () => {
+  it("converts CDP DIP bounds with an independent scale and accepts one uniquely owned window", async () => {
     const fixture = driverWithWindows([
       { pid: 5432, window_id: 2, bounds: { x: 24, y: 15, width: 1557, height: 1490 } },
       { pid: 9999, window_id: 3, bounds: { x: 864, y: 129, width: 516, height: 309 } },
@@ -58,8 +66,123 @@ describe("managed browser CUA window resolver", () => {
     await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
       browserWindowId: 77,
       browserBounds: { x: 10, y: 10, width: 1050, height: 1000 },
+      browserBoundsToCuaScale: 1.5,
       ownedProcessIds: [5432],
     })).resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
+  });
+
+  it("rejects candidate-derived scale and translated or malformed four-dimensional geometry", async () => {
+    const browserBounds = { x: 10, y: 10, width: 800, height: 600 };
+    expect(managedBrowserWindowBoundsMatch(
+      { x: 20, y: 20, width: 1600, height: 1200 }, browserBounds, 1,
+    )).toBe(false);
+    expect(managedBrowserWindowBoundsMatch(
+      { x: 40, y: 10, width: 800, height: 600 }, browserBounds, 1,
+    )).toBe(false);
+    expect(managedBrowserWindowBoundsMatch(
+      { x: 10, y: 10, width: 800, height: 600 }, browserBounds, Number.NaN,
+    )).toBe(false);
+
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 20, y: 20, width: 1600, height: 1200 } },
+      { pid: 5432, window_id: 2, bounds: { x: 40, y: 10, width: 800, height: 600 } },
+    ]);
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
+      browserWindowId: 77,
+      browserBounds,
+      browserBoundsToCuaScale: 1,
+      ownedProcessIds: [5432],
+    })).rejects.toMatchObject({ reason: "ownership_mismatch" });
+  });
+
+  it("derives scale only from stable independent page metrics", () => {
+    const metrics = (zoom: number, osScale: number) => ({
+      visualViewport: { clientWidth: 800 * zoom * osScale, clientHeight: 600 * zoom * osScale },
+      cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom },
+    });
+    const before = metrics(1.25, 1.5);
+    expect(browserBoundsToCuaScaleFromPageMetrics(before, before, "win32")).toBeCloseTo(1.5);
+    expect(browserBoundsToCuaScaleFromPageMetrics(before, undefined, "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(before, metrics(1.5, 1.5), "win32")).toBeUndefined();
+    expect(browserBoundsToCuaScaleFromPageMetrics(undefined, undefined, "darwin")).toBe(1);
+  });
+
+  it("carries fake CDP page metrics through selection, resolution, and both validators", async () => {
+    const page = { type: "page", id: "bound-page", webSocketDebuggerUrl: "ws://page" };
+    const metrics = {
+      visualViewport: { clientWidth: 1200, clientHeight: 900 },
+      cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1 },
+    };
+    let metricRead = 0;
+    const connect: Parameters<typeof inspectManagedPageActivity>[3] = async (url) => ({
+      async command(method) {
+        if (url === "ws://browser" && method === "Browser.getWindowForTarget") return { result: { windowId: 77 } };
+        if (url === "ws://browser" && method === "Browser.getWindowBounds") return { result: { bounds: { left: 10, top: 10, width: 800, height: 600 } } };
+        if (url === "ws://page" && method === "Page.getLayoutMetrics") {
+          metricRead += 1;
+          return { result: metrics };
+        }
+        if (url === "ws://page" && method === "Runtime.evaluate") return { result: { result: { value: { visibilityState: "visible", hasFocus: true, navigationKey: "123.5" } } } };
+        throw new Error(`unexpected fake CDP command ${method}`);
+      },
+      close() {},
+    });
+    const activity = await inspectManagedPageActivity(page, "ws://browser", new AbortController().signal, connect, "win32");
+    expect(metricRead).toBe(2);
+    const selected = selectManagedBrowserStartupActivity([activity], "bound-page", true);
+    expect(selected?.browserBoundsToCuaScale).toBe(1.5);
+    const hint = createManagedBrowserWindowBindingHint(selected!, [4321, 5432]);
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 10, y: 10, width: 800, height: 600 } },
+      { pid: 5432, window_id: 2, bounds: { x: 15, y: 15, width: 1200, height: 900 } },
+    ]);
+    const resolution = await resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, hint);
+    expect(resolution?.target).toEqual({ pid: 5432, windowId: 2 });
+    expect(validateOwnedWindowResolution(4321, resolution, hint)).toEqual(resolution?.target);
+    expect(validateManagedBrowserWindowResolution(4321, resolution, hint)).toEqual(resolution?.target);
+  });
+
+  it("filters an exact DIP coincidence and a correctly scaled window together", async () => {
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 10, y: 10, width: 800, height: 600 } },
+      { pid: 5432, window_id: 2, bounds: { x: 15, y: 15, width: 1200, height: 900 } },
+    ]);
+    const hint = {
+      browserWindowId: 77,
+      browserBounds: { x: 10, y: 10, width: 800, height: 600 },
+      browserBoundsToCuaScale: 1.5,
+      ownedProcessIds: [5432],
+    };
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, hint))
+      .resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
+  });
+
+  it.each(["missing", "changed"] as const)("does not resolve scaled candidates when CDP metrics are %s", async (metricState) => {
+    const page = { type: "page", id: "bound-page", webSocketDebuggerUrl: "ws://page" };
+    const stable = { visualViewport: { clientWidth: 1200, clientHeight: 900 }, cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1 } };
+    const changed = { visualViewport: { clientWidth: 1200, clientHeight: 900 }, cssVisualViewport: { clientWidth: 800, clientHeight: 600, zoom: 1.25 } };
+    let metricRead = 0;
+    const connect: Parameters<typeof inspectManagedPageActivity>[3] = async (url) => ({
+      async command(method) {
+        if (url === "ws://browser" && method === "Browser.getWindowForTarget") return { result: { windowId: 77 } };
+        if (url === "ws://browser" && method === "Browser.getWindowBounds") return { result: { bounds: { left: 10, top: 10, width: 800, height: 600 } } };
+        if (url === "ws://page" && method === "Page.getLayoutMetrics") {
+          const index = metricRead++;
+          if (metricState === "missing" && index > 0) return { result: undefined };
+          return { result: index === 0 ? stable : metricState === "changed" ? changed : stable };
+        }
+        if (url === "ws://page" && method === "Runtime.evaluate") return { result: { result: { value: { visibilityState: "visible", hasFocus: true } } } };
+        throw new Error(`unexpected fake CDP command ${method}`);
+      },
+      close() {},
+    });
+    const activity = await inspectManagedPageActivity(page, "ws://browser", new AbortController().signal, connect, "win32");
+    const selected = selectManagedBrowserStartupActivity([activity], "bound-page", true);
+    const hint = createManagedBrowserWindowBindingHint(selected!, [4321, 5432]);
+    expect(hint.browserBoundsToCuaScale).toBeUndefined();
+    const fixture = driverWithWindows([{ pid: 5432, window_id: 2, bounds: { x: 15, y: 15, width: 1200, height: 900 } }]);
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, hint))
+      .rejects.toMatchObject({ reason: "ownership_mismatch" });
   });
 
   it("classifies CUA query failure without exposing driver text", async () => {
@@ -94,5 +217,41 @@ describe("managed browser CUA window resolver", () => {
       reason: "ownership_mismatch",
     });
     expect(JSON.stringify(diagnostics)).not.toContain("title");
+  });
+  it("excludes a proportional popup instead of deriving DPI from its dimensions", async () => {
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 548, y: 82, width: 344, height: 206 } },
+      { pid: 5432, window_id: 2, bounds: { x: 17, y: 10, width: 1036, height: 653 } },
+    ]);
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, {
+      browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 },
+      browserBoundsToCuaScale: 1, ownedProcessIds: [5432],
+    })).resolves.toMatchObject({ target: { pid: 5432, windowId: 2 } });
+  });
+
+  it("refuses scaled or displaced lookalikes without matching scale and position evidence", async () => {
+    const hint = { browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 }, ownedProcessIds: [5432] };
+    for (const bounds of [
+      { x: 17, y: 10, width: 344, height: 206 },
+      { x: 500, y: 300, width: 1036, height: 653 },
+      { x: 15, y: 15, width: 1561, height: 983 },
+    ]) {
+      await expect(resolveOwnedManagedBrowserWindow(driverWithWindows([{ pid: 5432, window_id: 2, bounds }]).driver,
+        "s", 4321, new AbortController().signal, hint)).rejects.toMatchObject({ reason: "ownership_mismatch" });
+    }
+  });
+
+  it("keeps two compatible owned windows ambiguous and rejects malformed scale evidence", async () => {
+    const fixture = driverWithWindows([
+      { pid: 5432, window_id: 1, bounds: { x: 10, y: 10, width: 1050, height: 660 } },
+      { pid: 5432, window_id: 2, bounds: { x: 17, y: 10, width: 1036, height: 653 } },
+    ]);
+    const hint = { browserWindowId: 77, browserBounds: { x: 10, y: 10, width: 1050, height: 660 }, ownedProcessIds: [5432] };
+    await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal, hint))
+      .rejects.toMatchObject({ reason: "multiple_candidates" });
+    for (const browserBoundsToCuaScale of [0, 0.33, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(resolveOwnedManagedBrowserWindow(fixture.driver, "s", 4321, new AbortController().signal,
+        { ...hint, browserBoundsToCuaScale })).rejects.toMatchObject({ reason: "ownership_mismatch" });
+    }
   });
 });

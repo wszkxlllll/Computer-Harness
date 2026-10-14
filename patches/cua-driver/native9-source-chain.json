@@ -1,0 +1,74 @@
+{
+  "schema": "cua-driver-native9-source-chain.v1",
+  "upstream": "https://github.com/trycua/cua.git",
+  "baseCommit": "d114f35fec05ecd37bf529e5587be86852205b64",
+  "baseTree": "1be75321ea36185d2fd660107785c07cc1daa67c",
+  "patches": [
+    {
+      "order": 1,
+      "path": "patches/cua-driver/d114f35-macos-exact-window-capture.patch",
+      "sha256": "980323a0737626152a27ad0edda2eb0408f944e707f5a63f6094bd74d3e8393b"
+    },
+    {
+      "order": 2,
+      "path": "patches/cua-driver/d114f35-macos-focused-element-proof.patch",
+      "sha256": "66beef9c2d6906bbed07053e2cf0fbfeca5cb6640a2bcf9d0e839ebf3999bb7c"
+    },
+    {
+      "order": 3,
+      "path": "patches/cua-driver/d114f35-macos-attached-sheet-proof.patch",
+      "sha256": "2e624c66251e1c2785fe43a452556ac73b7b29b76ddc725af37ee2ee1b8d432e"
+    },
+    {
+      "order": 4,
+      "path": "patches/cua-driver/d114f35-macos-exact-focused-unicode-text.patch",
+      "sha256": "f784f6ae53dcf40e42615b45732617f1ac5f29e508349cde741f36b5892770f4"
+    },
+    {
+      "order": 5,
+      "path": "patches/cua-driver/d114f35-macos-foreground-pixel-hit-guard.patch",
+      "sha256": "a47655cc07f5536029da53d13263b83bfa46125afdbaae1307cc29a2c1994cb1"
+    },
+    {
+      "order": 6,
+      "path": "patches/cua-driver/d114f35-macos-ax-text-format.patch",
+      "sha256": "5db869d3c5b9180832cac08bce2c584a3426ceb8d5501a5e23fc2300085e73f5"
+    },
+    {
+      "order": 7,
+      "path": "patches/cua-driver/d114f35-macos-document-and-click-diagnostics-complete.patch",
+      "sha256": "650bb5c57f538972ddabbcef673ab65e38bd011996fd43b91424c0ad3f465d5e"
+    },
+    {
+      "order": 8,
+      "path": "docs/a-line-sync/diagnostics/F-20261007-018/native.patch",
+      "sha256": "6e3dd9cf25423abdd77e943cb7c77e577067f181ce07d0d6a3d86b207885f109"
+    },
+    {
+      "order": 9,
+      "path": "patches/cua-driver/d114f35-macos-sharing-control-after-f018.patch",
+      "sha256": "4a0d6112699ab059ddebc09bd2b5f778ab1f6e6c3e01ab03b0ed9f83f59a1c49"
+    }
+  ],
+  "apply": "In the upstream checkout, run git apply --check and git apply for each patch in this exact order. The ninth is additive after the complete eight-patch baseline; do not stack a native7 closure as well.",
+  "toolchain": "1.97.1",
+  "cargoLockSha256": "cb7cdf7d03eee68f2dd48b6dc75a6005e74ca96a5604a7a88a2994ddd5125a2f",
+  "validation": {
+    "platformMacosLibraryTests": {
+      "passed": 404,
+      "failed": 0,
+      "ignored": 2
+    },
+    "fmtCheck": "passed on final native9; baseline F018 format failure retained",
+    "platformAllTargetsCheck": "passed",
+    "driverCheck": "passed",
+    "releaseBuild": "passed",
+    "independentReplay": "437 workspace files; five delta paths byte equal"
+  },
+  "artifact": {
+    "unsignedSha256": "9b1b13b0603d440a65ef3f73273b9551d27f9443b38258879cdff7fce240e4e0",
+    "signedSha256": "3e8e3f00e30d907da1fb94a8c23a04cee5918a32f5945483de0677e303f3e140",
+    "cdhash": "758c78ec0e82f6e719fe541bcd02bb28cdd81b94"
+  },
+  "boundary": "Offline candidate only. Live native9 sharing-classifier/exact-focus/point-occlusion, ordinary recovery, formal task and phone acceptance remain pending. Old native8 binary source closure is not retroactively proven."
+}

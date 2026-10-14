@@ -1,18 +1,20 @@
 import type { RuntimeEvent } from "@computer-harness/protocol";
 import { findOldestEvictableHistoryGroup } from "./history.js";
 
-export function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxTokens: number): RuntimeEvent[] {
+export function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxTokens: number, protectedEvents: readonly RuntimeEvent[] = []): RuntimeEvent[] {
+  const protectedSet = new Set(protectedEvents);
   const authoritativeInputs = events.filter((event) => event.type === "user.input.received");
   if (estimateEventTokens(authoritativeInputs) > maxTokens) {
-    throw new Error("Authoritative user inputs exceed maxInputTokens");
+    throw Object.assign(new Error("Authoritative user inputs exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
   }
+  if (estimateEventTokens(events.filter((event) => event.type === "user.input.received" || protectedSet.has(event))) > maxTokens) throw Object.assign(new Error("Authoritative user inputs and latest GUI history exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
   let retained = [...events];
   while (estimateEventTokens(retained) > maxTokens) {
-    const group = findOldestEvictableHistoryGroup(retained);
-    if (group.length === 0) throw new Error("Context history cannot fit maxInputTokens");
+    const group = findOldestEvictableHistoryGroup(retained.filter((event) => !protectedSet.has(event)));
+    if (group.length === 0) throw Object.assign(new Error("Context history cannot fit maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
     const discarded = new Set(group);
     const next = retained.filter((event) => !discarded.has(event));
-    if (next.length === retained.length) throw new Error("Context history cannot fit maxInputTokens");
+    if (next.length === retained.length) throw Object.assign(new Error("Context history cannot fit maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
     retained = next;
   }
   return retained;

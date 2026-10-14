@@ -1,5 +1,6 @@
-import { lstat, mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -10,19 +11,85 @@ import {
   type ModelInput,
   type ProviderAdapter,
   type ActionPolicyDecision,
-  type RunOutcome,
-  type Viewport,
   type MonitorPolicyMode,
 } from "@computer-harness/runtime";
-import type { RuntimeEvent, AssetId, AssetRef, ComputerSessionId, ComputerWindowOption, ModelTurn, RunId, SurfaceId, ToolCall, ToolCallId } from "@computer-harness/protocol";
-import type { WindowTargetInfo } from "./application-session.js";
+import type { GroundingCatalog, ObservationId, RuntimeEvent, ActionIntent, ActionReceipt, AssetId, AssetRef, ComputerSessionId, ComputerWindowCandidate, ComputerWindowOption, ModelTurn, RunId, SurfaceId, SurfaceRef, ToolCall, ToolCallId, Viewport } from "@computer-harness/protocol";
+import { BoundWindowMissingError, MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
+import type { WindowTargetInfo, WindowTargetPreview } from "./application-session.js";
+import type { WindowSelectionStrategy } from "./window-selection-jev.js";
 import { createFileRemoteAssetReader, type ApplicationSessionConfig } from "./index.js";
 import { ApplicationSession } from "./application-session.js";
 import { InProcessEnvironmentOwner } from "./environment-owner.js";
 import { ApplicationRemoteRunApi, RemoteRunApiError, type ManagedBrowserProfileRunCoordinator } from "./remote-run-api.js";
+import { ProviderConfigurationError } from "./providers.js";
 
 const viewport: Viewport = { width: 8, height: 8, coordinateSpace: "physical" };
-const surfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
+const surfaceRef: SurfaceRef = { surfaceId: "remote-run-api-desktop" as SurfaceId, generation: 1, kind: "desktop" };
+const nativeWindowSurfaceRef: SurfaceRef = { surfaceId: "remote-run-api-native-window" as SurfaceId, generation: 1, kind: "native_window" };
+
+interface FixturePngRaster {
+  readonly width: number;
+  readonly height: number;
+  readonly data: Buffer;
+}
+
+interface FixturePngModule {
+  readonly PNG: {
+    readonly sync: {
+      read(data: Buffer): FixturePngRaster;
+      write(image: FixturePngRaster, options?: { readonly deflateLevel?: number }): Buffer;
+    };
+  };
+}
+
+const pngjs = createRequire(import.meta.url)("pngjs") as FixturePngModule;
+
+function containsWindowIdentityKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsWindowIdentityKey);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, child]) => /pid|windowid/iu.test(key) || containsWindowIdentityKey(child));
+}
+
+describe("window target identity serialization assertions", () => {
+  it("checks nested keys without treating opaque token values as identity fields", () => {
+    expect(containsWindowIdentityKey({ candidates: [{ token: "opaque-HpId-windowId-token" }] })).toBe(false);
+    expect(containsWindowIdentityKey({ nested: [{ target: { pid: 42 } }] })).toBe(true);
+    expect(containsWindowIdentityKey({ candidates: [{ windowId: 7 }] })).toBe(true);
+  });
+});
+function createNoisyPng(width: number, height: number): Buffer {
+  const data = Buffer.allocUnsafe(width * height * 4);
+  let state = 0x7191a5d3;
+  for (let index = 0; index < data.length; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    data[index] = state & 0xff;
+  }
+  return pngjs.PNG.sync.write({ width, height, data }, { deflateLevel: 1 });
+}
+function createPngAtByteLength(width: number, height: number, byteLength: number): Buffer {
+  const base = pngjs.PNG.sync.write({ width, height, data: Buffer.alloc(width * height * 4, 0x7f) });
+  const ancillaryDataLength = byteLength - base.byteLength - 12;
+  if (ancillaryDataLength < 8) throw new Error("PNG fixture target size is too small for one text chunk");
+  const chunk = Buffer.alloc(ancillaryDataLength + 12, 0x41);
+  chunk.writeUInt32BE(ancillaryDataLength, 0);
+  chunk.write("tEXt", 4, "ascii");
+  chunk.write("Comment\0", 8, "ascii");
+  const crcOffset = 8 + ancillaryDataLength;
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, crcOffset)), crcOffset);
+  const endChunkOffset = base.byteLength - 12;
+  return Buffer.concat([base.subarray(0, endChunkOffset), chunk, base.subarray(endChunkOffset)]);
+}
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffff_ffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) === 0 ? 0 : 0xedb8_8320);
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
 
 function config(outputDir: string): ApplicationSessionConfig {
   return {
@@ -51,10 +118,19 @@ function fixtureComputer(
   closeComputer: () => Promise<void> = async () => undefined,
   windowInventory: readonly ComputerWindowOption[] = [],
   switchWindowReceiptStatus: "completed" | "failed" | "refused" | "cancelled" | undefined = undefined,
+  computerSessionId = "remote-api-session",
+  onObserve: (computerSessionId: string) => void = () => undefined,
+  executeAction?: (action: ActionIntent) => Promise<ActionReceipt> | ActionReceipt,
+  handoffCandidates: readonly ComputerWindowCandidate[] = [],
+  listHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[],
+  initialSurfaceRef: SurfaceRef = surfaceRef,
+  missingHandoff?: (candidate: ComputerWindowCandidate) => void,
+  groundingOptions?: readonly string[],
 ): Computer {
   let sequence = 0;
+  let lastAction: ActionIntent | undefined;
   const session: ComputerSession = {
-    id: "remote-api-session" as ComputerSessionId,
+    id: computerSessionId as ComputerSessionId,
     backend: "fixture",
     viewport: screen,
     capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
@@ -62,16 +138,30 @@ function fixtureComputer(
   };
   return {
     async open() { return session; },
-    async observe() {
+    async observe(_session, observationId: ObservationId) {
       sequence += 1;
+      onObserve(String(session.id));
       return {
         capturedAt: "2026-09-26T00:00:0" + String(sequence) + ".000Z",
         viewport: screen,
-        surfaceRef,
+        surfaceRef: initialSurfaceRef,
         screenshot: { mediaType: "image/png" as const, data: new Uint8Array([3, 1, 4, sequence]) },
+        ...(groundingOptions === undefined ? {} : { grounding: {
+          version: "grounding-catalog-v2",
+          source: "dom",
+          observationId,
+          computerSessionId: session.id,
+          surfaceRef,
+          completeness: "partial",
+          degraded: false,
+          maxElements: 16,
+          elements: [{ elementRef: "dom-ref", role: "combobox", source: "dom", name: "Fixture variant", bbox: { x: 1, y: 1, width: 4, height: 3 }, state: { enabled: true }, options: groundingOptions.map((text) => ({ text, enabled: true })) }],
+        } satisfies GroundingCatalog }),
       };
     },
     async execute(_session, action) {
+      lastAction = action;
+      if (executeAction !== undefined) return executeAction(action);
       if (action.kind === "switch_window" && switchWindowReceiptStatus !== undefined) {
         if (switchWindowReceiptStatus === "completed") {
           return {
@@ -86,9 +176,17 @@ function fixtureComputer(
       }
       return { actionId: action.actionId, status: "completed" as const };
     },
-    async listWindows() { return windowInventory; },
+    async listWindows() { return { options: windowInventory, truncated: false, omittedCount: 0 }; },
+    async listWindowHandoffCandidates(_session, signal) {
+      return listHandoffCandidates === undefined ? handoffCandidates : listHandoffCandidates(signal);
+    },
+    async detectNewWindowHandoffCandidates() {
+      if (missingHandoff !== undefined && lastAction !== undefined) throw new BoundWindowMissingError(lastAction.actionId);
+      return [];
+    },
+    async handoffWindow(currentSession, candidate) { missingHandoff?.(candidate); return currentSession; },
     async close() { await closeComputer(); },
-  } as unknown as Computer;
+  };
 }
 
 function providerFor(options: {
@@ -127,6 +225,9 @@ function createFixture(
     screen?: Viewport;
     windowSnapshots?: readonly (readonly WindowTargetInfo[])[];
     allWindows?: readonly WindowTargetInfo[];
+    windowPreviewOverride?: WindowTargetPreview;
+    windowPreviewError?: unknown;
+    windowPreviewCapture?: (target: WindowTargetInfo, signal: AbortSignal) => Promise<WindowTargetPreview> | WindowTargetPreview;
     windowDiscoveryAvailable?: boolean;
     onActivateWindow?: (target: { pid: number; windowId: number }, showWindow: (window: WindowTargetInfo) => void) => void;
     managedBrowserProfile?: { readonly profileLabel: string; readonly profileRoot: string };
@@ -141,14 +242,26 @@ function createFixture(
     monitor?: MonitorPolicyMode;
     windowInventory?: readonly ComputerWindowOption[];
     switchWindowReceiptStatus?: "completed" | "failed" | "refused" | "cancelled";
+    executeAction?: (action: ActionIntent) => Promise<ActionReceipt> | ActionReceipt;
+    windowSelector?: WindowSelectionStrategy;
+    windowHandoff?: "off" | "confirm-v1";
+    windowHandoffCandidates?: readonly ComputerWindowCandidate[];
+    listWindowHandoffCandidates?: (signal: AbortSignal) => Promise<readonly ComputerWindowCandidate[]> | readonly ComputerWindowCandidate[];
+    missingHandoff?: (candidate: ComputerWindowCandidate) => void;
+    groundingOptions?: readonly string[];
+    initialWindows?: readonly WindowTargetInfo[];
+    listWindowsOverride?: (signal: AbortSignal) => Promise<readonly WindowTargetInfo[]>;
   },
   limits: { maxStartRequests?: number; maxCommandsPerRun?: number; now?: () => number } = {},
 ) {
-  let windows: readonly WindowTargetInfo[] = [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }];
+  let windows: readonly WindowTargetInfo[] = options.initialWindows ?? [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }];
   let windowReadIndex = 0;
   let guardDecisionIndex = 0;
   const createdComputerConfigs: Array<Extract<ApplicationSessionConfig["computer"], { kind: "cua" }>> = [];
+  const observedComputerSessionIds: string[] = [];
+  let computerSessionCounter = 0;
   const windowDiscoveryCalls: Array<{ type: "visible" | "all" | "activate"; pid?: number; windowId?: number }> = [];
+  const windowPreviewCalls: Array<{ pid: number; windowId: number }> = [];
   const baseConfig = config(outputDir);
   const baseComputer = baseConfig.computer;
   if (baseComputer.kind !== "cua") throw new Error("fixture requires CUA");
@@ -163,6 +276,7 @@ function createFixture(
   );
   const sessionConfig: ApplicationSessionConfig = {
     ...baseConfig,
+    ...(options.windowHandoff === undefined ? {} : { windowHandoff: options.windowHandoff }),
     ...(options.monitor === undefined ? {} : { monitor: options.monitor }),
     computer: options.managedBrowserProfile === undefined ? baseComputer : {
       ...baseComputer,
@@ -176,9 +290,10 @@ function createFixture(
     config: sessionConfig,
     owner: new InProcessEnvironmentOwner(),
     ...(options.windowDiscoveryAvailable === false ? {} : { windowDiscovery: {
-      listWindows: async () => {
+      listWindows: async (signal) => {
         windowDiscoveryCalls.push({ type: "visible" });
-        return options.windowSnapshots?.[windowReadIndex++] ?? windows;
+        const snapshot = options.windowSnapshots?.[windowReadIndex++];
+        return snapshot ?? (options.listWindowsOverride === undefined ? windows : options.listWindowsOverride(signal));
       },
       listAllWindows: async () => {
         windowDiscoveryCalls.push({ type: "all" });
@@ -188,12 +303,44 @@ function createFixture(
         windowDiscoveryCalls.push({ type: "activate", pid: target.pid, windowId: target.windowId });
         options.onActivateWindow?.(target, (window) => { windows = [...windows.filter((item) => item.pid !== window.pid || item.windowId !== window.windowId), window]; });
       },
+      captureWindowPreview: async (target, signal) => {
+        windowPreviewCalls.push({ pid: target.pid, windowId: target.windowId });
+        if (options.windowPreviewError !== undefined) throw options.windowPreviewError;
+        const selected = windows.find((window) => window.pid === target.pid && window.windowId === target.windowId);
+        if (selected === undefined) throw new Error("preview target is stale");
+        if (options.windowPreviewCapture !== undefined) return options.windowPreviewCapture(selected, signal);
+        if (options.windowPreviewOverride !== undefined) return options.windowPreviewOverride;
+        return {
+          target: selected,
+          capturedAt: "2026-10-04T00:00:00.000Z",
+          viewport: { width: options.screen?.width ?? viewport.width, height: options.screen?.height ?? viewport.height },
+          mediaType: "image/png" as const,
+          data: new Uint8Array([137, 80, 78, 71]),
+        };
+      },
     } }),
     dependencies: {
       createProvider: () => providerFor(options, () => session.activeRun?.controller.getEvents() ?? []),
       createComputer: async ({ config: computerConfig }) => {
         if (computerConfig.kind === "cua") createdComputerConfigs.push(computerConfig);
-        return fixtureComputer(options.screen, options.closeComputer, options.windowInventory, options.switchWindowReceiptStatus);
+        computerSessionCounter += 1;
+        const initialSurfaceRef = computerConfig.kind === "cua" && computerConfig.windowTarget !== undefined
+          ? nativeWindowSurfaceRef
+          : surfaceRef;
+        return fixtureComputer(
+          options.screen,
+          options.closeComputer,
+          options.windowInventory,
+          options.switchWindowReceiptStatus,
+          `remote-api-session-${computerSessionCounter}`,
+          (computerSessionId) => observedComputerSessionIds.push(computerSessionId),
+          options.executeAction,
+          options.windowHandoffCandidates,
+          options.listWindowHandoffCandidates,
+          initialSurfaceRef,
+          options.missingHandoff,
+          options.groundingOptions,
+        );
       },
       ...(options.guardDecisions === undefined ? {} : {
         createActionPolicy: () => ({
@@ -216,9 +363,10 @@ function createFixture(
     ...(options.managedBrowserProfileCoordinator === undefined ? {} : { managedBrowserProfileCoordinator: options.managedBrowserProfileCoordinator }),
     ...(inspectManagedBrowserProfile === undefined ? {} : { inspectManagedBrowserProfile }),
     ...(options.readManagedBrowserStartupUrls === undefined ? {} : { readManagedBrowserStartupUrls: options.readManagedBrowserStartupUrls }),
+    ...(options.windowSelector === undefined ? {} : { windowSelector: options.windowSelector }),
     ...limits,
   });
-  return { api, session, createdComputerConfigs, windowDiscoveryCalls, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
+  return { api, session, createdComputerConfigs, observedComputerSessionIds, windowDiscoveryCalls, windowPreviewCalls, setWindows: (value: readonly WindowTargetInfo[]) => { windows = value; } };
 }
 
 function fixtureGuardDecision(decision: "allow" | "require_approval", reason: string): ActionPolicyDecision {
@@ -241,7 +389,1226 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
   }
 }
 
+function temporarilySetProcessPlatform(platform: NodeJS.Platform): () => void {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  if (originalPlatform === undefined || originalPlatform.configurable !== true) {
+    throw new Error("test runtime does not allow restoring a temporary process.platform override");
+  }
+  Object.defineProperty(process, "platform", { ...originalPlatform, value: platform });
+  return () => {
+    Object.defineProperty(process, "platform", originalPlatform);
+    expect(process.platform).toBe(originalPlatform.value);
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function startHandoffWithCandidates(outputDir: string, candidates: readonly ComputerWindowCandidate[], suffix: string) {
+  const root = { pid: 780, windowId: 7801, appName: "Editor.exe", title: "Main window" };
+  const click: ToolCall = {
+    id: `handoff-deduplicate-${suffix}` as ToolCallId,
+    name: "click",
+    arguments: { x: 4, y: 4 },
+    declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+  };
+  const { api, session, setWindows } = createFixture(outputDir, {
+    summary: "Done.",
+    windowHandoff: "confirm-v1",
+    listWindowHandoffCandidates: () => candidates,
+    turnFactory: (turnNumber) => turnNumber === 1
+      ? { type: "tool_calls", calls: [click] }
+      : { type: "finish", summary: "Done." },
+    executeAction: (action) => ({
+      actionId: action.actionId,
+      status: "refused",
+      driverCode: "WINDOW_FOREGROUND_MISMATCH",
+      message: "The foreground target changed before input.",
+    }),
+  });
+  setWindows([root]);
+  const initial = await api.listWindowTargets("device-one");
+  const rootChoice = initial.candidates.find((choice) => choice.appName === root.appName);
+  if (rootChoice === undefined) throw new Error("root window was not listed");
+  const started = await api.startRun("device-one", `handoff-deduplicate-${suffix}`, "Continue in the dialog", {
+    mode: "window",
+    targetToken: rootChoice.token,
+  });
+  await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff",
+    "handoff candidate refresh did not publish its pending request");
+  const pending = api.getRun("device-one", started.runId)?.pendingRequest;
+  if (pending?.kind !== "window_handoff") throw new Error("window handoff request was not available");
+  return { api, session, started, pending };
+}
+
 describe("ApplicationRemoteRunApi", () => {
+  it("returns an existing idempotent result before rechecking provider configuration", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-provider-preflight-idempotency-"));
+    const { api, session } = createFixture(outputDir, { summary: "The existing Run completed." });
+    try {
+      const first = await api.startRun("device-preflight", "existing-result", "Read the fixture", { mode: "browser", url: "about:blank" });
+      const preflight = vi.spyOn(session, "assertRunProviderConfiguration").mockImplementation(() => { throw new ProviderConfigurationError(); });
+      await expect(api.startRun("device-preflight", "existing-result", "Read the fixture", { mode: "browser", url: "about:blank" }))
+        .resolves.toMatchObject({ runId: first.runId });
+      expect(preflight).not.toHaveBeenCalled();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects missing credentials before auto discovery and leaves a window token reusable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-window-token-"));
+    const outputDir = join(root, "runs");
+    const credentials: { glmApiKey?: string } = {};
+    const targetWindow = { pid: 72, windowId: 901, appName: "Fixture app", title: "Fixture window" };
+    const listWindows = vi.fn(async () => [targetWindow]);
+    const listAllWindows = vi.fn(async () => [targetWindow]);
+    const activateWindow = vi.fn(async () => undefined);
+    const session = new ApplicationSession({
+      config: config(outputDir), owner: new InProcessEnvironmentOwner(), dependencies: { credentials },
+      windowDiscovery: { listWindows, listAllWindows, activateWindow },
+    });
+    const api = new ApplicationRemoteRunApi({
+      session, capabilities: { pause: true, resume: true, abort: true, correct: true, approval: true, windowHandoff: true },
+    });
+    try {
+      await expect(api.startRun("device-window-token", "auto-no-key", "Read the fixture", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "PROVIDER_CREDENTIALS_MISSING" });
+      expect(listWindows).not.toHaveBeenCalled();
+      expect(listAllWindows).not.toHaveBeenCalled();
+      expect(activateWindow).not.toHaveBeenCalled();
+
+      const choices = await api.listWindowTargets("device-window-token");
+      const token = choices.candidates[0]!.token;
+      await expect(api.startRun("device-window-token", "window-token-no-key", "Read the fixture", { mode: "window", targetToken: token }))
+        .rejects.toMatchObject({ code: "PROVIDER_CREDENTIALS_MISSING" });
+      expect(listWindows).toHaveBeenCalledTimes(1);
+      expect(activateWindow).not.toHaveBeenCalled();
+      expect(session.lastRun).toBeUndefined();
+      await expect(readdir(outputDir)).rejects.toMatchObject({ code: "ENOENT" });
+
+      credentials.glmApiKey = "fixture-provider-key";
+      vi.spyOn(session, "startRun").mockRejectedValue(new Error("fixture stop after token validation"));
+      await expect(api.startRun("device-window-token", "window-token-no-key", "Read the fixture", { mode: "window", targetToken: token }))
+        .rejects.toThrow("fixture stop after token validation");
+      expect(session.startRun).toHaveBeenCalledOnce();
+      expect(activateWindow).not.toHaveBeenCalled();
+    } finally {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("projects real filtered visible and redacted option approvals identically through GET and SSE", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-option-preview-contract-"));
+    const visibleText = "Observed fixture variant";
+    const secretText = "token=PRIVATE_SYNTHETIC_SECRET";
+    const calls: ToolCall[] = [visibleText, secretText].map((optionText, index) => ({
+      id: `option-approval-${index}` as ToolCallId,
+      name: "select_option",
+      arguments: { elementRef: "dom-ref", optionText },
+    }));
+    const { api, session } = createFixture(outputDir, {
+      summary: "The fixture approvals were rejected.",
+      turnFactory: (turnNumber, _input, events) => {
+        const call = calls[turnNumber - 1];
+        return call === undefined ? { type: "finish", summary: "Done" } : { type: "tool_calls", calls: [call] };
+      },
+      guardDecisions: [fixtureGuardDecision("require_approval", "Review this option."), fixtureGuardDecision("require_approval", "Review this option.")],
+      groundingOptions: [visibleText, secretText],
+    });
+    const streamedPendingRequest = (runId: string, requestId: string): Record<string, unknown> => {
+      const events: unknown[] = [];
+      const subscription = api.subscribe("device-one", runId, 0, (event) => events.push(event));
+      subscription.close();
+      const pendingEvent = events.filter((event) => {
+        if (typeof event !== "object" || event === null || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" && "request" in data && typeof data.request === "object" && data.request !== null && "requestId" in data.request && data.request.requestId === requestId;
+      }).at(-1) as { data: { request: Record<string, unknown> } } | undefined;
+      if (pendingEvent === undefined) throw new Error("pending approval SSE event was not found");
+      return pendingEvent.data.request;
+    };
+    try {
+      const started = await api.startRun("device-one", "option-preview-contract", "Select a fixture variant", { mode: "browser", url: "about:blank" });
+      await waitFor(() => ["waiting_approval", "finished"].includes(api.getRun("device-one", started.runId)?.status ?? ""), "Run did not reach a terminal or approval state");
+      expect(api.getRun("device-one", started.runId)?.status).toBe("waiting_approval");
+      const visibleGet = api.getRun("device-one", started.runId)!;
+      const visibleRequest = visibleGet.pendingRequest;
+      if (visibleRequest?.kind !== "approval") throw new Error("expected visible option approval request");
+      const visibleSse = streamedPendingRequest(started.runId, visibleRequest.requestId);
+      expect(visibleSse.requestId).toBe(visibleRequest.requestId);
+      expect((visibleSse.preview as { actions: unknown[] }).actions[0]).toEqual(visibleRequest.preview?.actions[0]);
+      expect(visibleRequest.preview?.actions[0]).toMatchObject({ groundingRef: "dom-ref", optionText: visibleText, optionCharacterCount: [...visibleText].length, optionTextStatus: "visible" });
+      expect(JSON.stringify(visibleGet)).not.toContain(secretText);
+      expect(visibleRequest.preview?.actions[0]).not.toHaveProperty("arguments");
+      expect(JSON.stringify(visibleSse)).not.toContain(secretText);
+      await api.submitCommand("device-one", started.runId, { commandId: "reject-visible-option", expectedSequence: visibleGet.sequence, type: "reject", requestId: visibleRequest.requestId });
+      await waitFor(() => {
+        const request = api.getRun("device-one", started.runId)?.pendingRequest;
+        return request?.kind === "approval" && request.requestId !== visibleRequest.requestId;
+      }, "Run did not request redacted option approval");
+
+      const redactedGet = api.getRun("device-one", started.runId)!;
+      const redactedRequest = redactedGet.pendingRequest;
+      if (redactedRequest?.kind !== "approval") throw new Error("expected redacted option approval request");
+      const redactedSse = streamedPendingRequest(started.runId, redactedRequest.requestId);
+      expect(redactedSse.requestId).toBe(redactedRequest.requestId);
+      expect((redactedSse.preview as { actions: unknown[] }).actions[0]).toEqual(redactedRequest.preview?.actions[0]);
+      expect(redactedRequest.preview?.actions[0]).toMatchObject({ optionCharacterCount: [...secretText].length, optionTextStatus: "redacted" });
+      expect(redactedRequest.preview?.actions[0]).toHaveProperty("groundingRef", "dom-ref");
+      expect(redactedRequest.preview?.actions[0]).not.toHaveProperty("optionText");
+      expect(redactedRequest.preview?.actions[0]).not.toHaveProperty("arguments");
+      expect(JSON.stringify(redactedGet)).not.toContain(secretText);
+      expect(JSON.stringify(redactedSse)).not.toContain(secretText);
+      await api.submitCommand("device-one", started.runId, { commandId: "reject-redacted-option", expectedSequence: redactedGet.sequence, type: "reject", requestId: redactedRequest.requestId });
+      await session.waitForActiveRun();
+    } finally {
+      session.activeRun?.controller.cancel("option preview contract test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps native recovery profiles out of the remote target API", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-native-profile-removed-"));
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, { summary: "Ordinary Run finished." });
+    const preflight = vi.spyOn(session, "assertRunProviderConfiguration");
+    try {
+      const targets = await api.listWindowTargets("device-native");
+      expect(targets).not.toHaveProperty("nativeRecoveryProfile");
+      expect(targets).not.toHaveProperty("nativeWebDocumentProfile");
+      for (const mode of ["native-recovery", "native-web-document"] as const) {
+        const retiredTarget = { mode, profileId: "Opaque_Profile_1234567890" } as unknown as Parameters<typeof api.startRun>[3];
+        await expect(api.startRun("device-native", `retired-${mode}`, "Save the document", retiredTarget))
+          .rejects.toMatchObject({ code: "INVALID_TARGET" });
+      }
+      expect(createdComputerConfigs).toEqual([]);
+      expect(preflight).not.toHaveBeenCalled();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+
+  it("F045 rotates same-pair remote tokens, rejects old tokens and preserves exact source/token through structuredClone", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-remote-f045-"));
+    const root = { pid: 731, windowId: 7311, appName: "Editor", title: "Fixture" };
+    const candidate: ComputerWindowCandidate = { pid: 731, windowId: 7312, appName: "Editor", title: "Output", handoffToken: "issued-epoch-token" };
+    let issuedCandidate = candidate;
+    const selected: ComputerWindowCandidate[] = [];
+    const click: ToolCall = { id: "f045-call" as ToolCallId, name: "click", arguments: { x: 4, y: 4 } };
+    const { api, session, setWindows } = createFixture(directory, {
+      summary: "Done", windowHandoff: "confirm-v1", listWindowHandoffCandidates: () => [issuedCandidate],
+      missingHandoff: value => { selected.push(value); },
+      turnFactory: n => n === 1 ? { type: "tool_calls", calls: [click] } : { type: "finish", summary: "Done" },
+    });
+    setWindows([root]);
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const started = await api.startRun("device-one", "f045-remote", "Continue after exact host confirmation", { mode: "window", targetToken: initial.candidates[0]!.token });
+      await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff", "missing request not published");
+      const waiting = api.getRun("device-one", started.runId)!;
+      const pending = waiting.pendingRequest;
+      if (pending?.kind !== "window_handoff") throw new Error("wrong request kind");
+      expect(pending.reasonCode).toBe("bound_window_missing");
+      const controller = session.activeRun!.controller;
+      const handoff = vi.spyOn(controller, "handoffWindow");
+      await expect(api.submitCommand("device-one", started.runId, { commandId: "wrong-source", expectedSequence: waiting.sequence, type: "window.confirm", requestId: "old-action", candidateToken: pending.candidates[0]!.token })).rejects.toMatchObject({ code: "STALE_REQUEST" });
+      expect(selected).toEqual([]); expect(handoff).not.toHaveBeenCalled();
+      issuedCandidate = { ...candidate, handoffToken: "refreshed-same-pair-token" };
+      // Deliberately exercise the existing private refresh seam for the SAME
+      // pending sourceActionId. There is no public refresh command to invent;
+      // a new requestID would hide a missing token-sensitive fingerprint.
+      const internal = api as unknown as {
+        runs: Map<string, { windowCandidateRefresh: object }>;
+        refreshWindowCandidates(record: unknown, refresh: unknown): Promise<void>;
+      };
+      const record = internal.runs.get(started.runId)!;
+      await internal.refreshWindowCandidates(record, record.windowCandidateRefresh);
+      const refreshed = api.getRun("device-one", started.runId)!;
+      const refreshedPending = refreshed.pendingRequest;
+      if (refreshedPending?.kind !== "window_handoff") throw new Error("refreshed request missing");
+      expect(refreshedPending.requestId).toBe(pending.requestId);
+      const choice = refreshedPending.candidates[0]!;
+      expect(choice.token).not.toBe(pending.candidates[0]!.token);
+      await expect(api.submitCommand("device-one", started.runId, { commandId: "expired-remote-token", expectedSequence: refreshed.sequence, type: "window.confirm", requestId: pending.requestId, candidateToken: pending.candidates[0]!.token })).rejects.toMatchObject({ code: "STALE_REQUEST" });
+      await expect(api.submitCommand("device-one", started.runId, { commandId: "request-id-bypass", expectedSequence: refreshed.sequence, type: "window.confirm", candidateToken: choice.token } as Parameters<typeof api.submitCommand>[2])).rejects.toBeDefined();
+      expect(selected).toEqual([]); expect(handoff).not.toHaveBeenCalled();
+      const previewToken = choice.previewRequired ? (await api.previewWindowHandoffCandidate("device-one", started.runId, pending.requestId, choice.token)).previewToken : undefined;
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, { commandId: "current-source", expectedSequence: current.sequence, type: "window.confirm", requestId: pending.requestId, candidateToken: choice.token, ...(previewToken === undefined ? {} : { previewToken }) });
+      await session.waitForActiveRun();
+      expect(selected).toEqual([issuedCandidate]); expect(selected[0]).not.toBe(issuedCandidate);
+      expect(handoff).toHaveBeenCalledTimes(1); expect(handoff).toHaveBeenCalledWith(issuedCandidate, pending.requestId);
+    } finally {
+      session.activeRun?.controller.cancel("test cleanup"); await session.waitForActiveRun().catch(() => undefined); await session.close(); await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("requires an exact one-window preview proof before selecting repeated labels manually", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-required-"));
+    const first = { pid: 701, windowId: 7011, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const second = { pid: 702, windowId: 7021, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const { api, session, createdComputerConfigs, windowPreviewCalls, setWindows } = createFixture(outputDir, { summary: "The selected window task completed." });
+    setWindows([first, second]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates).toHaveLength(2);
+      expect(choices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+      expect(containsWindowIdentityKey(choices)).toBe(false);
+
+      await expect(api.startRun("device-one", "preview-required-no-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
+      expect(windowPreviewCalls).toEqual([]);
+
+      const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      expect(preview).toMatchObject({
+        previewToken: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u),
+        appName: "Notepad.exe",
+        title: "Untitled - Notepad",
+        mediaType: "image/png",
+        dataBase64: expect.any(String),
+      });
+      expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
+      expect(await readdir(outputDir)).toEqual([]);
+      await expect(api.startRun("device-one", "preview-required-wrong-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        previewToken: "X".repeat(32),
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+
+      const run = await api.startRun("device-one", "preview-required-valid-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        previewToken: preview.previewToken,
+      });
+      expect(run.target).toMatchObject({ appName: "Notepad.exe", title: "Untitled - Notepad", provenance: "starting_target" });
+      expect(JSON.stringify(run.target)).not.toContain(preview.previewToken);
+      await session.waitForActiveRun();
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: first.pid, windowId: first.windowId } });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a requested preview of a unique candidate without making preview a selection requirement", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-optional-"));
+    const target = { pid: 705, windowId: 7051, appName: "Notepad.exe", title: "Notes" };
+    const { api, session, createdComputerConfigs, windowPreviewCalls, setWindows } = createFixture(outputDir, { summary: "The selected window task completed." });
+    setWindows([target]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const candidate = choices.candidates[0]!;
+      expect(candidate.previewRequired).toBeUndefined();
+
+      const preview = await api.previewWindowTarget("device-one", candidate.token);
+      expect(preview).toMatchObject({
+        previewToken: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u),
+        appName: target.appName,
+        title: target.title,
+        mediaType: "image/png",
+      });
+      expect(windowPreviewCalls).toEqual([{ pid: target.pid, windowId: target.windowId }]);
+
+      const started = await api.startRun("device-one", "optional-preview-does-not-gate", "Inspect this window", {
+        mode: "window",
+        targetToken: candidate.token,
+      });
+      expect(started.target).toMatchObject({ appName: target.appName, title: target.title, provenance: "starting_target" });
+      await session.waitForActiveRun();
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: target.pid, windowId: target.windowId } });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an image at the exact shared preview byte limit and returns a candidate-bound proof", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-limit-"));
+    const first = { pid: 721, windowId: 7211, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-04T00:00:00.000Z",
+        viewport: { width: 320, height: 240 },
+        mediaType: "image/png",
+        data: createPngAtByteLength(320, 240, MAX_WINDOW_PREVIEW_BYTES),
+      },
+    });
+    setWindows([first, { ...first, pid: 722, windowId: 7221 }]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      expect(preview.previewToken).toMatch(/^[A-Za-z0-9_-]{32}$/u);
+      const image = Buffer.from(preview.dataBase64, "base64");
+      expect(image).toHaveLength(MAX_WINDOW_PREVIEW_BYTES);
+      expect(pngjs.PNG.sync.read(image)).toMatchObject({ width: preview.viewport.width, height: preview.viewport.height });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes an oversized same-title preview while keeping the proof bound to its exact candidate", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-thumbnail-"));
+    const first = { pid: 721, windowId: 7211, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const second = { pid: 722, windowId: 7221, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const source = createNoisyPng(2_048, 1_200);
+    expect(source.byteLength).toBeGreaterThan(MAX_WINDOW_PREVIEW_BYTES);
+    const { api, session, windowPreviewCalls, createdComputerConfigs, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-06T00:00:00.000Z",
+        viewport: { width: 2_048, height: 1_200 },
+        mediaType: "image/png",
+        data: source,
+      },
+    });
+    setWindows([first, second]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates).toHaveLength(2);
+      expect(choices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+      const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      const thumbnail = Buffer.from(preview.dataBase64, "base64");
+      const decoded = pngjs.PNG.sync.read(thumbnail);
+
+      expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
+      expect(thumbnail.byteLength).toBeLessThanOrEqual(MAX_WINDOW_PREVIEW_BYTES);
+      expect(preview.viewport).toEqual({ width: decoded.width, height: decoded.height });
+      expect(preview.viewport.width).toBeLessThan(2_048);
+      expect(preview.viewport.height).toBeLessThan(1_200);
+      await expect(api.startRun("device-one", "thumbnail-wrong-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        previewToken: "X".repeat(32),
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+
+      const run = await api.startRun("device-one", "thumbnail-exact-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+        previewToken: preview.previewToken,
+      });
+      expect(run.target).toMatchObject({ appName: first.appName, title: first.title, provenance: "starting_target" });
+      await session.waitForActiveRun();
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: first.pid, windowId: first.windowId } });
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a requested preview of a unique handoff candidate without requiring its preview token", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-preview-optional-"));
+    const root = { pid: 715, windowId: 7151, appName: "WPS Office", title: "Budget.docx" };
+    const candidate = { pid: 716, windowId: 7161, appName: "Notepad.exe", title: "Notes" };
+    const click: ToolCall = {
+      id: "handoff-optional-preview-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, windowPreviewCalls, setWindows } = createFixture(outputDir, {
+      summary: "The selected dialog task completed.",
+      windowHandoff: "confirm-v1",
+      windowHandoffCandidates: [candidate],
+      turnFactory: (turnNumber) => turnNumber === 1 ? { type: "tool_calls", calls: [click] } : { type: "finish", summary: "The selected dialog task completed." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root, candidate]);
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const rootChoice = initial.candidates.find((choice) => choice.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root candidate was not listed");
+      const started = await api.startRun("device-one", "handoff-optional-preview-run", "Save from the dialog", {
+        mode: "window",
+        targetToken: rootChoice.token,
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff", "Run did not request window handoff");
+      const waiting = api.getRun("device-one", started.runId)!;
+      const requestId = waiting.pendingRequest!.requestId;
+      const handoffCandidates = waiting.pendingRequest?.kind === "window_handoff" ? waiting.pendingRequest.candidates : [];
+      expect(handoffCandidates).toHaveLength(1);
+      expect(handoffCandidates[0]?.previewRequired).toBeUndefined();
+
+      const preview = await api.previewWindowHandoffCandidate("device-one", started.runId, requestId, handoffCandidates[0]!.token);
+      expect(preview).toMatchObject({ appName: candidate.appName, title: candidate.title, mediaType: "image/png" });
+      expect(windowPreviewCalls).toEqual([{ pid: candidate.pid, windowId: candidate.windowId }]);
+
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "handoff-optional-preview-no-proof",
+        expectedSequence: current.sequence,
+        type: "window.confirm",
+        requestId,
+        candidateToken: handoffCandidates[0]!.token,
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+    } finally {
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: "a bounded CUA timeout",
+      error: Object.assign(new Error("private title and native details"), { name: "WindowContractError", code: "WINDOW_CAPTURE_DEADLINE" }),
+      code: "WINDOW_PREVIEW_TIMEOUT",
+    },
+    {
+      label: "a known capture schema failure",
+      error: Object.assign(new Error("private title and native details"), { name: "WindowContractError", code: "WINDOW_CAPTURE_SCHEMA" }),
+      code: "WINDOW_PREVIEW_CAPTURE_FAILED",
+    },
+    {
+      label: "an unconfirmed temporary-session cleanup",
+      error: Object.assign(new Error("private title and native details"), { name: "CuaWindowDiscoveryCleanupError", cleanupErrors: ["private cleanup detail"] }),
+      code: "WINDOW_PREVIEW_CLEANUP_PENDING",
+    },
+    {
+      label: "an error whose message only resembles a known CUA code",
+      error: new Error("WINDOW_CAPTURE_DEADLINE private title and native details"),
+      code: "WINDOW_PREVIEW_UNAVAILABLE",
+    },
+    {
+      label: "an exact target that disappeared before capture",
+      error: Object.assign(new Error("private title and native details"), { name: "WindowContractError", code: "WINDOW_TARGET_NOT_FOUND" }),
+      code: "WINDOW_TARGET_STALE",
+    },
+  ])("projects $label as a safe preview response without leaking adapter details", async ({ error, code }) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-failure-"));
+    const first = { pid: 731, windowId: 7311, appName: "Notepad.exe", title: "Notes" };
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewError: error,
+    });
+    setWindows([first, { ...first, pid: 732, windowId: 7321 }]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      let failure: unknown;
+      try {
+        await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      } catch (caught) {
+        failure = caught;
+      }
+      expect(failure).toBeInstanceOf(RemoteRunApiError);
+      expect(failure).toMatchObject({ code });
+      expect((failure as Error).message).not.toContain("private title");
+      expect((failure as Error).message).not.toContain("private cleanup detail");
+      await expect(api.startRun("device-one", "preview-failure-no-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds handoff previews and confirmation proofs to the current Run request and exact candidate", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-preview-"));
+    const root = { pid: 710, windowId: 7101, appName: "Notepad.exe", title: "Notes - Notepad" };
+    const first: ComputerWindowCandidate = {
+      pid: 711,
+      windowId: 7111,
+      appName: "Notepad.exe",
+      title: "Untitled - Notepad",
+      relationship: { kind: "owned_child", owner: { pid: root.pid, windowId: root.windowId }, rootRole: "dialog" },
+    };
+    const second = { pid: 712, windowId: 7121, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const click: ToolCall = {
+      id: "handoff-preview-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, createdComputerConfigs, windowPreviewCalls, setWindows } = createFixture(outputDir, {
+      summary: "The selected dialog task completed.",
+      windowHandoff: "confirm-v1",
+      windowHandoffCandidates: [first, second],
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-06T00:00:00.000Z",
+        viewport: { width: 2_048, height: 1_200 },
+        mediaType: "image/png",
+        data: createNoisyPng(2_048, 1_200),
+      },
+      turnFactory: (turnNumber) => turnNumber === 1 ? { type: "tool_calls", calls: [click] } : { type: "finish", summary: "The selected dialog task completed." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root, first, second]);
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const rootChoice = initial.candidates.find((candidate) => candidate.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root candidate was not listed");
+      const started = await api.startRun("device-one", "handoff-preview-run", "Save from the dialog", { mode: "window", targetToken: rootChoice.token });
+      await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff", "Run did not request window handoff");
+      const waiting = api.getRun("device-one", started.runId)!;
+      const candidates = waiting.pendingRequest?.kind === "window_handoff" ? waiting.pendingRequest.candidates : [];
+      expect(candidates).toHaveLength(2);
+      expect(candidates?.every((candidate) => candidate.previewRequired === true)).toBe(true);
+      const candidate = candidates![0]!;
+      const requestId = waiting.pendingRequest!.requestId;
+
+      await expect(api.submitCommand("device-one", started.runId, {
+        commandId: "handoff-preview-no-proof",
+        expectedSequence: waiting.sequence,
+        type: "window.confirm",
+        requestId,
+        candidateToken: candidate.token,
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+
+      await expect(api.previewWindowHandoffCandidate("device-one", started.runId, "stale-window-request", candidate.token))
+        .rejects.toMatchObject({ code: "STALE_REQUEST" });
+      const sequenceBeforePreview = waiting.sequence;
+      const preview = await api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidate.token);
+      expect(preview).toMatchObject({
+        previewToken: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u),
+        appName: "Notepad.exe",
+        title: "Untitled - Notepad",
+        relationship: { kind: "owned_child", rootRole: "dialog" },
+        mediaType: "image/png",
+      });
+      const previewBytes = Buffer.from(preview.dataBase64, "base64");
+      const decodedPreview = pngjs.PNG.sync.read(previewBytes);
+      expect(previewBytes.byteLength).toBeLessThanOrEqual(MAX_WINDOW_PREVIEW_BYTES);
+      expect(preview.viewport).toEqual({ width: decodedPreview.width, height: decodedPreview.height });
+      expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: root.pid, windowId: root.windowId } });
+      expect(JSON.stringify(api.getRun("device-one", started.runId)?.pendingRequest)).not.toContain(preview.previewToken);
+      expect(api.getRun("device-one", started.runId)?.sequence).toBe(sequenceBeforePreview);
+      expect(JSON.stringify(api.getRun("device-one", started.runId))).not.toContain(preview.dataBase64);
+
+      const current = api.getRun("device-one", started.runId)!;
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "handoff-preview-valid-proof",
+        expectedSequence: current.sequence,
+        type: "window.confirm",
+        requestId,
+        candidateToken: candidate.token,
+        previewToken: preview.previewToken,
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+      expect(windowPreviewCalls).toHaveLength(1);
+    } finally {
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "caller cancellation", stage: "before-list", listOffset: 1, abort: (controller: AbortController) => controller.abort(new DOMException("preview cancelled", "AbortError")) },
+    { label: "the eight-second deadline", stage: "before-list", listOffset: 1, abort: (controller: AbortController) => controller.abort(new DOMException("preview deadline", "TimeoutError")) },
+    { label: "caller cancellation", stage: "after-list", listOffset: 2, abort: (controller: AbortController) => controller.abort(new DOMException("preview cancelled", "AbortError")) },
+    { label: "the eight-second deadline", stage: "after-list", listOffset: 2, abort: (controller: AbortController) => controller.abort(new DOMException("preview deadline", "TimeoutError")) },
+  ])("does not mint a handoff preview proof after $label at the $stage gate while the list operation is settling", async ({ label, stage, listOffset, abort }) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-preview-abort-gate-"));
+    const root = { pid: 715, windowId: 7151, appName: "WPS Office", title: "Budget.docx" };
+    const candidate = { pid: 716, windowId: 7161, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const duplicateCandidate = { ...candidate, pid: 717, windowId: 7171 };
+    const gate = deferred<readonly ComputerWindowCandidate[]>();
+    const timeoutController = new AbortController();
+    let restoreTimeoutSpy: (() => void) | undefined;
+    let listCalls = 0;
+    let gatedListCall: number | undefined;
+    const click: ToolCall = {
+      id: "handoff-preview-abort-gate-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, windowPreviewCalls, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowHandoff: "confirm-v1",
+      listWindowHandoffCandidates: () => {
+        listCalls += 1;
+        return listCalls === gatedListCall ? gate.promise : [candidate, duplicateCandidate];
+      },
+      turnFactory: (turnNumber) => turnNumber === 1
+        ? { type: "tool_calls", calls: [click] }
+        : { type: "finish", summary: "Done." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root, candidate, duplicateCandidate]);
+    const callerController = new AbortController();
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const rootChoice = initial.candidates.find((choice) => choice.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root window was not listed");
+      const started = await api.startRun("device-one", `handoff-preview-abort-${label.replaceAll(" ", "-")}`, "Continue in the dialog", {
+        mode: "window", targetToken: rootChoice.token,
+      });
+      await waitFor(() => api.getRun("device-one", started.runId)?.pendingRequest?.kind === "window_handoff",
+        "Run did not request window handoff");
+      const waiting = api.getRun("device-one", started.runId)!;
+      const pending = waiting.pendingRequest;
+      if (pending?.kind !== "window_handoff") throw new Error("expected a handoff request");
+      const candidateToken = pending.candidates[0]?.token;
+      if (candidateToken === undefined) throw new Error("handoff candidate token was not published");
+      const requestId = pending.requestId;
+      gatedListCall = listCalls + listOffset;
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+        expect(milliseconds).toBe(8_000);
+        return timeoutController.signal;
+      });
+      restoreTimeoutSpy = () => timeoutSpy.mockRestore();
+
+      const previewPromise = api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidateToken,
+        label === "caller cancellation" ? callerController.signal : undefined);
+      let previewSettled = false;
+      void previewPromise.then(() => { previewSettled = true; }, () => { previewSettled = true; });
+      await waitFor(() => listCalls >= gatedListCall!, `${stage} handoff candidate check did not start`);
+      if (label === "caller cancellation") abort(callerController);
+      else abort(timeoutController);
+      await Promise.resolve();
+      expect(previewSettled).toBe(false);
+      await expect(api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidateToken))
+        .rejects.toMatchObject({ code: "WINDOW_PREVIEW_BUSY" });
+
+      gate.resolve([candidate, duplicateCandidate]);
+      await expect(previewPromise).rejects.toMatchObject({ name: label === "caller cancellation" ? "AbortError" : "TimeoutError" });
+      restoreTimeoutSpy();
+      restoreTimeoutSpy = undefined;
+      expect(windowPreviewCalls).toEqual(stage === "before-list" ? [] : [{ pid: candidate.pid, windowId: candidate.windowId }]);
+      const afterAbort = api.getRun("device-one", started.runId)?.pendingRequest;
+      expect(afterAbort?.kind).toBe("window_handoff");
+      if (afterAbort?.kind !== "window_handoff") throw new Error("the original handoff request was not preserved after abort");
+      expect(afterAbort.requestId).toBe(requestId);
+      expect(afterAbort.candidates.some((item) => item.token === candidateToken && item.title === candidate.title)).toBe(true);
+
+      const retry = await api.previewWindowHandoffCandidate("device-one", started.runId, requestId, candidateToken);
+      expect(retry.previewToken).toMatch(/^[A-Za-z0-9_-]{32}$/u);
+      const afterRetry = api.getRun("device-one", started.runId)?.pendingRequest;
+      expect(afterRetry?.kind).toBe("window_handoff");
+      if (afterRetry?.kind !== "window_handoff") throw new Error("the original handoff request was not preserved after retry");
+      expect(afterRetry.requestId).toBe(requestId);
+      expect(afterRetry.candidates.some((item) => item.token === candidateToken && item.title === candidate.title)).toBe(true);
+      expect(windowPreviewCalls).toHaveLength(stage === "before-list" ? 1 : 2);
+    } finally {
+      restoreTimeoutSpy?.();
+      gate.resolve([candidate, duplicateCandidate]);
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an ordinary candidate preview busy until an abort-insensitive capture settles, then permits the exact candidate retry", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-preview-capture-abort-gate-"));
+    const first = { pid: 717, windowId: 7171, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const capture = deferred<WindowTargetPreview>();
+    let captureCalls = 0;
+    const { api, session, windowPreviewCalls, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowPreviewCapture: (target) => {
+        captureCalls += 1;
+        if (captureCalls === 1) return capture.promise;
+        return {
+          target,
+          capturedAt: "2026-10-04T00:00:00.000Z",
+          viewport: { width: 8, height: 8 },
+          mediaType: "image/png",
+          data: new Uint8Array([137, 80, 78, 71]),
+        };
+      },
+    });
+    const other = { ...first, pid: first.pid + 1, windowId: first.windowId + 1 };
+    setWindows([first, other]);
+    const controller = new AbortController();
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      const firstChoice = choices.candidates[0]!;
+      const previewPromise = api.previewWindowTarget("device-one", firstChoice.token, controller.signal);
+      let previewSettled = false;
+      void previewPromise.then(() => { previewSettled = true; }, () => { previewSettled = true; });
+      await waitFor(() => captureCalls === 1, "ordinary preview capture did not start");
+      controller.abort(new DOMException("preview cancelled", "AbortError"));
+      await Promise.resolve();
+      expect(previewSettled).toBe(false);
+      await expect(api.previewWindowTarget("device-one", firstChoice.token)).rejects.toMatchObject({ code: "WINDOW_PREVIEW_BUSY" });
+      capture.resolve({
+        target: first,
+        capturedAt: "2026-10-04T00:00:00.000Z",
+        viewport: { width: 8, height: 8 },
+        mediaType: "image/png",
+        data: new Uint8Array([137, 80, 78, 71]),
+      });
+      await expect(previewPromise).rejects.toBeDefined();
+      expect(windowPreviewCalls).toEqual([{ pid: first.pid, windowId: first.windowId }]);
+      const retry = await api.previewWindowTarget("device-one", firstChoice.token);
+      expect(retry.appName).toBe(first.appName);
+      expect(retry.title).toBe(first.title);
+      expect(retry.previewToken).toMatch(/^[A-Za-z0-9_-]{32}$/u);
+      expect(windowPreviewCalls).toHaveLength(2);
+    } finally {
+      capture.resolve({
+        target: first,
+        capturedAt: "2026-10-04T00:00:00.000Z",
+        viewport: { width: 8, height: 8 },
+        mediaType: "image/png",
+        data: new Uint8Array([137, 80, 78, 71]),
+      });
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes handoff candidates only after the initial candidate refresh resolves", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-refresh-delay-"));
+    const root = { pid: 731, windowId: 7311, appName: "WPS Office", title: "Budget.docx" };
+    const candidate = { pid: 732, windowId: 7321, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const candidateRefresh = deferred<readonly ComputerWindowCandidate[]>();
+    let listStarted = 0;
+    const click: ToolCall = {
+      id: "handoff-refresh-delay-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowHandoff: "confirm-v1",
+      listWindowHandoffCandidates: () => {
+        listStarted += 1;
+        return candidateRefresh.promise;
+      },
+      turnFactory: (turnNumber) => turnNumber === 1
+        ? { type: "tool_calls", calls: [click] }
+        : { type: "finish", summary: "Done." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root]);
+    const pendingEvents: unknown[] = [];
+    let subscription: ReturnType<typeof api.subscribe> | undefined;
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const rootChoice = initial.candidates.find((choice) => choice.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root window was not listed");
+      const started = await api.startRun("device-one", "handoff-refresh-delay", "Continue in the dialog", {
+        mode: "window", targetToken: rootChoice.token,
+      });
+      subscription = api.subscribe("device-one", started.runId, 0, (event) => pendingEvents.push(event));
+      await waitFor(() => listStarted === 1 && api.getRun("device-one", started.runId)?.status === "waiting_window",
+        "handoff candidate refresh did not start");
+
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+      const earlyPendingRequests = pendingEvents.filter((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" && "request" in data;
+      });
+      expect(earlyPendingRequests).toEqual([]);
+
+      candidateRefresh.resolve([candidate]);
+      await waitFor(() => {
+        const pending = api.getRun("device-one", started.runId)?.pendingRequest;
+        return pending?.kind === "window_handoff" && pending.candidates.length === 1;
+      }, "the refreshed candidate was not published");
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toMatchObject({
+        kind: "window_handoff",
+        candidates: [{ appName: candidate.appName, title: candidate.title }],
+      });
+    } finally {
+      subscription?.close();
+      candidateRefresh.resolve([]);
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("emits one token for repeated same-identity handoff records with identical evidence", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-dedupe-identical-"));
+    const duplicate: ComputerWindowCandidate = {
+      pid: 781,
+      windowId: 7811,
+      appName: "Notepad.exe",
+      title: "Notes",
+      relationship: { kind: "scoped_peer" },
+    };
+    const fixture = await startHandoffWithCandidates(outputDir, [duplicate, { ...duplicate }], "identical");
+    try {
+      expect(fixture.pending.candidates).toHaveLength(1);
+      expect(fixture.pending.candidates[0]).toMatchObject({
+        appName: duplicate.appName,
+        title: duplicate.title,
+        relationship: { kind: "scoped_peer" },
+      });
+    } finally {
+      if (fixture.session.activeRun?.controller.getSnapshot().status !== "finished") {
+        fixture.session.activeRun?.controller.cancel("identical handoff candidate test cleanup");
+      }
+      await fixture.session.waitForActiveRun().catch(() => undefined);
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps different same-label handoff identities separate and preview-required", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-dedupe-distinct-"));
+    const first: ComputerWindowCandidate = { pid: 782, windowId: 7821, appName: "Editor.exe", title: "Untitled" };
+    const second: ComputerWindowCandidate = { pid: 783, windowId: 7831, appName: "Editor.exe", title: "Untitled" };
+    const fixture = await startHandoffWithCandidates(outputDir, [first, second], "distinct");
+    try {
+      expect(fixture.pending.candidates).toHaveLength(2);
+      expect(new Set(fixture.pending.candidates.map((candidate) => candidate.token)).size).toBe(2);
+      expect(fixture.pending.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+    } finally {
+      if (fixture.session.activeRun?.controller.getSnapshot().status !== "finished") {
+        fixture.session.activeRun?.controller.cancel("distinct handoff candidate test cleanup");
+      }
+      await fixture.session.waitForActiveRun().catch(() => undefined);
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves distinct handoff evidence whose labels contain delimiter collisions", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-dedupe-delimiter-"));
+    const identity = { pid: 785, windowId: 7851 };
+    const first: ComputerWindowCandidate = { ...identity, appName: "Editor:a", title: "b" };
+    const second: ComputerWindowCandidate = { ...identity, appName: "Editor", title: "a:b" };
+    const fixture = await startHandoffWithCandidates(outputDir, [first, second], "delimiter-collision");
+    try {
+      expect(fixture.pending.candidates).toHaveLength(2);
+      expect(new Set(fixture.pending.candidates.map((candidate) => candidate.token)).size).toBe(2);
+      expect(fixture.pending.candidates.map((candidate) => [candidate.appName, candidate.title]))
+        .toEqual([[first.appName, first.title], [second.appName, second.title]]);
+    } finally {
+      if (fixture.session.activeRun?.controller.getSnapshot().status !== "finished") {
+        fixture.session.activeRun?.controller.cancel("delimiter candidate test cleanup");
+      }
+      await fixture.session.waitForActiveRun().catch(() => undefined);
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves conflicting relationship evidence for one identity as separate preview-required rows", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-dedupe-conflict-"));
+    const sameIdentity = { pid: 784, windowId: 7841, appName: "Editor.exe", title: "Untitled" };
+    const ownedChild: ComputerWindowCandidate = {
+      ...sameIdentity,
+      relationship: { kind: "owned_child", owner: { pid: 780, windowId: 7801 }, rootRole: "dialog" },
+    };
+    const scopedPeer: ComputerWindowCandidate = { ...sameIdentity, relationship: { kind: "scoped_peer" } };
+    const fixture = await startHandoffWithCandidates(outputDir, [ownedChild, scopedPeer], "conflicting-relationship");
+    try {
+      expect(fixture.pending.candidates).toHaveLength(2);
+      expect(new Set(fixture.pending.candidates.map((candidate) => candidate.token)).size).toBe(2);
+      expect(fixture.pending.candidates.map((candidate) => candidate.relationship?.kind).sort())
+        .toEqual(["owned_child", "scoped_peer"]);
+      expect(fixture.pending.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+    } finally {
+      if (fixture.session.activeRun?.controller.getSnapshot().status !== "finished") {
+        fixture.session.activeRun?.controller.cancel("conflicting relationship candidate test cleanup");
+      }
+      await fixture.session.waitForActiveRun().catch(() => undefined);
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes a recoverable empty handoff after candidate refresh fails", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-refresh-failure-"));
+    const root = { pid: 741, windowId: 7411, appName: "WPS Office", title: "Budget.docx" };
+    const click: ToolCall = {
+      id: "handoff-refresh-failure-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowHandoff: "confirm-v1",
+      listWindowHandoffCandidates: async () => { throw new Error("fixture inventory unavailable"); },
+      turnFactory: (turnNumber) => turnNumber === 1
+        ? { type: "tool_calls", calls: [click] }
+        : { type: "finish", summary: "Done." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root]);
+    let subscription: ReturnType<typeof api.subscribe> | undefined;
+    try {
+      const initial = await api.listWindowTargets("device-one");
+      const rootChoice = initial.candidates.find((choice) => choice.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root window was not listed");
+      const started = await api.startRun("device-one", "handoff-refresh-failure", "Continue safely", {
+        mode: "window", targetToken: rootChoice.token,
+      });
+      const events: unknown[] = [];
+      subscription = api.subscribe("device-one", started.runId, 0, (event) => events.push(event));
+      await waitFor(() => {
+        const pending = api.getRun("device-one", started.runId)?.pendingRequest;
+        return pending?.kind === "window_handoff";
+      }, "a failed candidate refresh left the handoff without recovery controls");
+      const waiting = api.getRun("device-one", started.runId)!;
+      expect(waiting.pendingRequest).toMatchObject({ kind: "window_handoff", reasonCode: "foreground_mismatch", candidates: [] });
+      expect(waiting.capabilities).toMatchObject({ windowHandoff: true, abort: true });
+      expect(events.some((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" &&
+          "request" in data && typeof data.request === "object" && data.request !== null &&
+          "kind" in data.request && data.request.kind === "window_handoff" &&
+          "candidates" in data.request && Array.isArray(data.request.candidates) && data.request.candidates.length === 0;
+      })).toBe(true);
+
+      await api.submitCommand("device-one", started.runId, {
+        commandId: "handoff-refresh-failure-abort",
+        expectedSequence: waiting.sequence,
+        type: "abort",
+      });
+      await session.waitForActiveRun();
+      expect(api.getRun("device-one", started.runId)?.status).toBe("finished");
+      expect(api.getRun("device-one", started.runId)?.pendingRequest).toBeUndefined();
+    } finally {
+      subscription?.close();
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels and ignores a late candidate refresh when its Run is aborted", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-handoff-refresh-cancel-"));
+    const root = { pid: 751, windowId: 7511, appName: "WPS Office", title: "Budget.docx" };
+    const staleCandidate = { pid: 752, windowId: 7521, appName: "Notepad.exe", title: "Stale candidate" };
+    const currentCandidate = { pid: 753, windowId: 7531, appName: "Notepad.exe", title: "Current candidate" };
+    const staleRefresh = deferred<readonly ComputerWindowCandidate[]>();
+    let listCalls = 0;
+    let staleSignal: AbortSignal | undefined;
+    const click: ToolCall = {
+      id: "handoff-refresh-cancel-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "dialog", summary: "Open the dialog" },
+    };
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "Done.",
+      windowHandoff: "confirm-v1",
+      listWindowHandoffCandidates: (signal) => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          staleSignal = signal;
+          return staleRefresh.promise;
+        }
+        return [currentCandidate];
+      },
+      turnFactory: (turnNumber) => turnNumber === 1
+        ? { type: "tool_calls", calls: [click] }
+        : { type: "finish", summary: "Done." },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "The foreground target changed before input.",
+      }),
+    });
+    setWindows([root]);
+    let firstSubscription: ReturnType<typeof api.subscribe> | undefined;
+    let secondSubscription: ReturnType<typeof api.subscribe> | undefined;
+    try {
+      const firstTargets = await api.listWindowTargets("device-one");
+      const rootChoice = firstTargets.candidates.find((choice) => choice.appName === root.appName);
+      if (rootChoice === undefined) throw new Error("root window was not listed");
+      const firstRun = await api.startRun("device-one", "handoff-refresh-cancel-first", "Continue safely", {
+        mode: "window", targetToken: rootChoice.token,
+      });
+      const firstEvents: unknown[] = [];
+      firstSubscription = api.subscribe("device-one", firstRun.runId, 0, (event) => firstEvents.push(event));
+      await waitFor(() => listCalls === 1 && api.getRun("device-one", firstRun.runId)?.status === "waiting_window",
+        "the first candidate refresh did not start");
+
+      const firstState = api.getRun("device-one", firstRun.runId)!;
+      await api.submitCommand("device-one", firstRun.runId, {
+        commandId: "handoff-refresh-cancel-abort",
+        expectedSequence: firstState.sequence,
+        type: "abort",
+      });
+      await session.waitForActiveRun();
+      expect(staleSignal?.aborted).toBe(true);
+
+      const secondTargets = await api.listWindowTargets("device-one");
+      const secondRootChoice = secondTargets.candidates.find((choice) => choice.appName === root.appName);
+      if (secondRootChoice === undefined) throw new Error("root window was not listed for the replacement Run");
+      const secondRun = await api.startRun("device-one", "handoff-refresh-cancel-second", "Continue safely", {
+        mode: "window", targetToken: secondRootChoice.token,
+      });
+      const secondEvents: unknown[] = [];
+      secondSubscription = api.subscribe("device-one", secondRun.runId, 0, (event) => secondEvents.push(event));
+      await waitFor(() => {
+        const pending = api.getRun("device-one", secondRun.runId)?.pendingRequest;
+        return pending?.kind === "window_handoff" && pending.candidates.length === 1;
+      }, "the replacement Run candidate refresh did not publish");
+      expect(api.getRun("device-one", secondRun.runId)?.pendingRequest).toMatchObject({
+        kind: "window_handoff",
+        candidates: [{ title: currentCandidate.title }],
+      });
+
+      staleRefresh.resolve([staleCandidate]);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 0));
+      expect(api.getRun("device-one", firstRun.runId)?.pendingRequest).toBeUndefined();
+      expect(api.getRun("device-one", secondRun.runId)?.pendingRequest).toMatchObject({
+        kind: "window_handoff",
+        candidates: [{ title: currentCandidate.title }],
+      });
+      expect(firstEvents.some((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" &&
+          "request" in data && JSON.stringify(data.request).includes(staleCandidate.title);
+      })).toBe(false);
+      expect(secondEvents.some((event) => {
+        if (typeof event !== "object" || event === null || !("type" in event) || event.type !== "run.event" || !("data" in event)) return false;
+        const data = event.data;
+        return typeof data === "object" && data !== null && "type" in data && data.type === "run.pending_request" &&
+          "request" in data && JSON.stringify(data.request).includes(staleCandidate.title);
+      })).toBe(false);
+    } finally {
+      firstSubscription?.close();
+      secondSubscription?.close();
+      staleRefresh.resolve([staleCandidate]);
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "a different window identity", code: "WINDOW_TARGET_STALE", makePreview: (first: WindowTargetInfo): WindowTargetPreview => ({
+      target: { ...first, pid: first.pid + 1 },
+      capturedAt: "2026-10-04T00:00:00.000Z",
+      viewport: { width: 8, height: 8 },
+      mediaType: "image/png",
+      data: new Uint8Array([137, 80, 78, 71]),
+    }) },
+    { label: "a source image above the internal cap", code: "WINDOW_PREVIEW_IMAGE_TOO_LARGE", makePreview: (first: WindowTargetInfo): WindowTargetPreview => ({
+      target: first,
+      capturedAt: "2026-10-04T00:00:00.000Z",
+      viewport: { width: 8, height: 8 },
+      mediaType: "image/png",
+      data: new Uint8Array(16 * 1024 * 1024 + 1),
+    }) },
+  ])("refuses a candidate preview with $label without granting a reusable proof", async ({ makePreview, code }) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-invalid-window-preview-"));
+    const first = { pid: 721, windowId: 7211, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const { api, session, createdComputerConfigs, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewOverride: makePreview(first),
+    });
+    setWindows([first, { ...first, pid: 722, windowId: 7221 }]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      await expect(api.previewWindowTarget("device-one", choices.candidates[0]!.token))
+        .rejects.toMatchObject({ code });
+      await expect(api.startRun("device-one", "invalid-window-preview-proof", "Inspect the intended Notepad window", {
+        mode: "window",
+        targetToken: choices.candidates[0]!.token,
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes a valid oversized PNG before issuing the exact candidate preview proof", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-window-preview-thumbnail-"));
+    const first = { pid: 721, windowId: 7211, appName: "Notepad.exe", title: "Untitled - Notepad" };
+    const source = createNoisyPng(2_048, 1_200);
+    expect(source.byteLength).toBeGreaterThan(MAX_WINDOW_PREVIEW_BYTES);
+    const { api, session, setWindows } = createFixture(outputDir, {
+      summary: "The selected window task completed.",
+      windowPreviewOverride: {
+        target: first,
+        capturedAt: "2026-10-06T00:00:00.000Z",
+        viewport: { width: 2_048, height: 1_200 },
+        mediaType: "image/png",
+        data: source,
+      },
+    });
+    setWindows([first, { ...first, pid: 722, windowId: 7221 }]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates.every((candidate) => candidate.previewRequired === true)).toBe(true);
+      const preview = await api.previewWindowTarget("device-one", choices.candidates[0]!.token);
+      const thumbnail = Buffer.from(preview.dataBase64, "base64");
+      const decoded = pngjs.PNG.sync.read(thumbnail);
+      expect(thumbnail.byteLength).toBeLessThanOrEqual(MAX_WINDOW_PREVIEW_BYTES);
+      expect(preview.viewport).toEqual({ width: decoded.width, height: decoded.height });
+      await expect(api.startRun("device-one", "thumbnail-wrong-proof", "Inspect the intended Notepad window", {
+        mode: "window", targetToken: choices.candidates[0]!.token, previewToken: "X".repeat(32),
+      })).rejects.toMatchObject({ code: "WINDOW_PREVIEW_REQUIRED" });
+      await expect(api.startRun("device-one", "thumbnail-exact-proof", "Inspect the intended Notepad window", {
+        mode: "window", targetToken: choices.candidates[0]!.token, previewToken: preview.previewToken,
+      })).resolves.toBeDefined();
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the public stream unchanged when RunNotice projection is disabled", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-notices-off-"));
     const { api, session } = createFixture(outputDir, { askFirst: true, summary: "Done." });
@@ -257,8 +1624,8 @@ describe("ApplicationRemoteRunApi", () => {
       expect(events.some((event) => event.data?.type === "run.notice")).toBe(false);
       expect(events.some((event) => event.data?.type === "run.pending_request")).toBe(true);
       const surfaceTransition = events.find((event) => event.data?.type === "run.surface_transition");
-      expect(surfaceTransition?.data).toMatchObject({ reason: "initial_observation", fromKind: null, toKind: "desktop", generation: 1 });
-      expect(JSON.stringify(surfaceTransition)).not.toContain(surfaceRef.surfaceId);
+      expect(surfaceTransition?.data).toMatchObject({ reason: "initial_observation", fromKind: null, toKind: "native_window", generation: 1 });
+      expect(JSON.stringify(surfaceTransition)).not.toContain(nativeWindowSurfaceRef.surfaceId);
       const current = api.getRun("device-one", started.runId)!;
       await api.submitCommand("device-one", started.runId, {
         commandId: "answer-notices-off",
@@ -452,7 +1819,7 @@ describe("ApplicationRemoteRunApi", () => {
           decisionObservationId: expect.any(String),
           capturedAt: expect.any(String),
           viewport: { width: 900, height: 900, coordinateSpace: "physical" },
-          surfaceRef: { surfaceId: surfaceRef.surfaceId, generation: surfaceRef.generation, kind: surfaceRef.kind },
+          surfaceRef: { surfaceId: nativeWindowSurfaceRef.surfaceId, generation: nativeWindowSurfaceRef.generation, kind: nativeWindowSurfaceRef.kind },
         },
       });
       const evidence = pending.preview?.evidence;
@@ -746,7 +2113,7 @@ describe("ApplicationRemoteRunApi", () => {
     try {
       const choices = await api.listWindowTargets("device-one");
       expect(choices.candidates).toHaveLength(1);
-      expect(JSON.stringify(choices)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(choices)).toBe(false);
       const [first, repeated] = await Promise.all([
         api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token),
         api.startRun("device-one", "start-once", "Find the saved itinerary", choices.candidates[0]!.token),
@@ -762,7 +2129,7 @@ describe("ApplicationRemoteRunApi", () => {
       expect(completed.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
       expect(modelInputs[0]?.tools.map((tool) => tool.name)).not.toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
       expect(JSON.stringify(modelInputs[0])).not.toMatch(/list_windows|switch_window/iu);
-      expect(JSON.stringify(completed)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(completed)).toBe(false);
       expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: 42, windowId: 1001 }, windowDeliveryMode: "foreground" });
       await expect(api.startRun("device-one", "start-reuse-target", "Try the same target again", choices.candidates[0]!.token))
         .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
@@ -887,7 +2254,7 @@ describe("ApplicationRemoteRunApi", () => {
         grounding: "hybrid-catalog-v1",
       });
       expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
-      expect(session.activeRun?.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "confirm-v1" });
+      expect(session.activeRun?.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "off" });
       expect(JSON.stringify(run)).not.toContain(profileRoot);
       expect(active).toBe(true);
       await session.submitUserInput("Continue");
@@ -915,6 +2282,71 @@ describe("ApplicationRemoteRunApi", () => {
       expect(session.activeRun).toBeUndefined();
       expect(createdComputerConfigs).toEqual([]);
     } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a desktop foreground refusal in the Remote primary-desktop scope and freshly observes it", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-desktop-foreground-refusal-"));
+    const click: ToolCall = {
+      id: "desktop-foreground-refusal" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 5 },
+      declaredEffect: { effects: ["navigate"], target: "visible desktop control", summary: "Activate the observed control" },
+    };
+    let handoffCandidateCalls = 0;
+    let observedWindowHandoff: ApplicationSessionConfig["windowHandoff"];
+    let fixtureSession: ApplicationSession | undefined;
+    let readRunEvents: (() => readonly RuntimeEvent[]) | undefined;
+    const fixture = createFixture(outputDir, {
+      summary: "Continued after a fresh desktop observation.",
+      turnFactory: (turnNumber) => {
+        if (turnNumber === 1) {
+          const handle = fixtureSession?.activeRun;
+          observedWindowHandoff = handle?.config.windowHandoff;
+          if (handle !== undefined) readRunEvents = () => handle.controller.getEvents();
+          return { type: "tool_calls", calls: [click] };
+        }
+        return { type: "finish", summary: "Continued after a fresh desktop observation." };
+      },
+      executeAction: (action) => ({
+        actionId: action.actionId,
+        status: "refused",
+        driverCode: "WINDOW_FOREGROUND_MISMATCH",
+        message: "no input was sent",
+      }),
+      listWindowHandoffCandidates: () => {
+        handoffCandidateCalls += 1;
+        return [{ pid: 42, windowId: 88, appName: "Editor", title: "Untitled" }];
+      },
+    });
+    fixtureSession = fixture.session;
+    const { api, session, createdComputerConfigs } = fixture;
+    try {
+      const started = await api.startRun("device-one", "desktop-foreground-refusal", "Continue from the full desktop after a refused action", {
+        mode: "desktop",
+        switchWindows: true,
+      });
+      await waitFor(() => {
+        const status = api.getRun("device-one", started.runId)?.status;
+        return status === "finished" || status === "waiting_window";
+      }, "desktop foreground-refusal Run did not reach a terminal or handoff state");
+      expect(api.getRun("device-one", started.runId)?.status).toBe("finished");
+      await session.waitForActiveRun();
+      expect(observedWindowHandoff).toBe("off");
+      expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
+      expect(createdComputerConfigs[0]).toMatchObject({ windowSwitch: "opened-windows-v1" });
+      expect(handoffCandidateCalls).toBe(0);
+      const events = readRunEvents?.() ?? [];
+      const mismatchReceipts = events.filter((event) => event.type === "action.execution.failed");
+      expect(mismatchReceipts.map((event) => event.receipt.driverCode), JSON.stringify(events.map((event) => event.type))).toEqual(["WINDOW_FOREGROUND_MISMATCH"]);
+      expect(events.some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      expect(events.filter((event) => event.type === "observation.created").map((event) => event.observation.surfaceRef.kind)).toEqual(["desktop", "desktop"]);
+      expect(events.filter((event) => event.type === "action.execution.started")).toHaveLength(1);
+    } finally {
+      if (session.activeRun?.controller.getSnapshot().status !== "finished") session.activeRun?.controller.cancel("desktop foreground-refusal test cleanup");
+      await session.waitForActiveRun().catch(() => undefined);
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
@@ -1009,7 +2441,7 @@ describe("ApplicationRemoteRunApi", () => {
       ]);
       expect(repeated.runId).toBe(first.runId);
       expect(first.target).toEqual({ appName: "Fixture app", title: "Fixture window", provenance: "starting_target" });
-      expect(JSON.stringify(first)).not.toMatch(/pid|windowId/iu);
+      expect(containsWindowIdentityKey(first)).toBe(false);
       await session.waitForActiveRun();
       expect(createdComputerConfigs[0]).toMatchObject({
         windowTarget: { pid: 42, windowId: 1001 },
@@ -1047,6 +2479,47 @@ describe("ApplicationRemoteRunApi", () => {
         windowTarget: { pid: wechat.pid, windowId: wechat.windowId },
         windowDeliveryMode: "foreground",
       });
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the explicitly named app from the complete inventory when another app title matches the task text", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-explicit-minimized-app-"));
+    const wps = { pid: 240, windowId: 2401, appName: "WPS Office", title: "CW02.docx" };
+    const notepad = { pid: 250, windowId: 2501, appName: "Notepad", title: "周可轩" };
+    const windowSelector = { select: vi.fn() } as unknown as WindowSelectionStrategy;
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "The requested WPS window was restored.",
+      allWindows: [wps, notepad],
+      windowSnapshots: [[notepad], [wps, notepad]],
+      windowSelector,
+      onActivateWindow(target, showWindow) {
+        expect(target).toEqual({ pid: wps.pid, windowId: wps.windowId });
+        showWindow(wps);
+      },
+    });
+    try {
+      const run = await api.startRun(
+        "device-one",
+        "auto-explicit-minimized-wps",
+        "在wps写入周可轩我爱你，字体大小四号，并保存",
+        { mode: "auto" },
+      );
+      expect(run.target).toMatchObject({ appName: "WPS Office", title: "CW02.docx", provenance: "starting_target" });
+      expect(windowDiscoveryCalls).toEqual([
+        { type: "all" },
+        { type: "visible" },
+        { type: "activate", pid: wps.pid, windowId: wps.windowId },
+        { type: "visible" },
+      ]);
+      expect(createdComputerConfigs[0]).toMatchObject({
+        windowTarget: { pid: wps.pid, windowId: wps.windowId },
+        windowDeliveryMode: "foreground",
+      });
+      expect(windowSelector.select).not.toHaveBeenCalled();
       await session.waitForActiveRun();
     } finally {
       await session.close();
@@ -1100,21 +2573,20 @@ describe("ApplicationRemoteRunApi", () => {
     }
   });
 
-  it("rejects an automatic match whose exact window identity changes before Run start", async () => {
+  it("refreshes changed title metadata when the exact app window identity remains stable", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-auto-moved-"));
     const { api, session, createdComputerConfigs } = createFixture(outputDir, {
-      summary: "Should not run.",
+      summary: "The selected app window is still current.",
       windowSnapshots: [
         [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Fixture window" }],
         [{ pid: 42, windowId: 1001, appName: "Fixture app", title: "A replacement window" }],
       ],
     });
     try {
-      await expect(api.startRun("device-one", "auto-moved", "Open Fixture app and check the report", { mode: "auto" }))
-        .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
-      expect(api.listRuns("device-one")).toEqual([]);
-      expect(session.activeRun).toBeUndefined();
-      expect(createdComputerConfigs).toEqual([]);
+      const run = await api.startRun("device-one", "auto-moved", "Open Fixture app and check the report", { mode: "auto" });
+      expect(run.target).toMatchObject({ appName: "Fixture app", title: "A replacement window", provenance: "starting_target" });
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: 42, windowId: 1001 } });
+      await session.waitForActiveRun();
     } finally {
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -1148,6 +2620,225 @@ describe("ApplicationRemoteRunApi", () => {
       expect(api.listRuns("device-one")).toEqual([]);
       expect(session.activeRun).toBeUndefined();
     } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not start on a different app merely because its title matches text from the task", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-explicit-app-conflict-"));
+    const notepad = { pid: 88, windowId: 880, appName: "Notepad", title: "周可轩" };
+    const { api, session, createdComputerConfigs, setWindows } = createFixture(outputDir, {
+      summary: "Should not run until a window is explicitly chosen.",
+      allWindows: [notepad],
+    });
+    setWindows([notepad]);
+    try {
+      await expect(api.startRun(
+        "device-one",
+        "auto-app-title-conflict",
+        "在wps写入周可轩我爱你，字体大小四号，并保存",
+        { mode: "auto" },
+      )).rejects.toMatchObject({ code: "WINDOW_SELECTION_REQUIRED" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+      expect(createdComputerConfigs).toEqual([]);
+
+      const manualCandidates = await api.listWindowTargets("device-one");
+      expect(manualCandidates.candidates).toMatchObject([{ appName: "Notepad", title: "周可轩" }]);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the shared semantic selector for a natural-language app name and then verifies the exact candidate", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-semantic-initial-target-"));
+    const wps = { pid: 900, windowId: 9000, appName: "WPS Office", title: "Résumé.docx" };
+    const notepad = { pid: 901, windowId: 9001, appName: "Notepad.exe", title: "Notes" };
+    const windowSelector: WindowSelectionStrategy = {
+      async select(goal, candidates) {
+        expect(goal).toBe("在记事本里写入今天的会议记录并保存");
+        expect(candidates).toEqual([wps, notepad]);
+        return { kind: "matched", target: candidates[1]! };
+      },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The selected window was verified.",
+      allWindows: [wps, notepad],
+      windowSnapshots: [[notepad], [notepad]],
+      windowSelector,
+    });
+    try {
+      const run = await api.startRun("device-one", "auto-natural-notepad", "在记事本里写入今天的会议记录并保存", { mode: "auto" });
+      expect(run.target).toMatchObject({ appName: "Notepad.exe", title: "Notes", provenance: "starting_target" });
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: notepad.pid, windowId: notepad.windowId } });
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("offers a proven owned-child dialog only through its independent parent for initial semantic selection", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-owned-child-initial-pool-"));
+    const parent = { pid: 27384, windowId: 0x98e1b34, appName: "Notepad.exe", title: "*CH-NOTEPAD-20261003202446274-5330b6 - Notepad" };
+    const child = {
+      pid: 27384,
+      windowId: 0x991316,
+      appName: "Notepad.exe",
+      title: "主机弹出窗口",
+      relationship: { kind: "owned_child" as const, owner: { pid: parent.pid, windowId: parent.windowId } },
+    };
+    const otherApp = { pid: 42, windowId: 420, appName: "WPS Office", title: "A report" };
+    const windowSelector: WindowSelectionStrategy = {
+      async select(goal, candidates) {
+        expect(goal).toBe("在记事本里写入今天的会议记录并保存");
+        expect(candidates).toEqual([parent, otherApp]);
+        return { kind: "matched", target: candidates[0]! };
+      },
+    };
+    const visible = [child, parent, otherApp];
+    const { api, session, createdComputerConfigs, windowDiscoveryCalls } = createFixture(outputDir, {
+      summary: "The root app window was selected.",
+      allWindows: visible,
+      windowSnapshots: [visible, visible, visible],
+      windowSelector,
+    });
+    try {
+      const run = await api.startRun("device-one", "auto-notepad-owned-child", "在记事本里写入今天的会议记录并保存", { mode: "auto" });
+      expect(run.target).toMatchObject({ appName: parent.appName, title: parent.title, provenance: "starting_target" });
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: parent.pid, windowId: parent.windowId } });
+      expect(windowDiscoveryCalls.filter((call) => call.type === "all")).toHaveLength(1);
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("filters semantic candidates to an explicit app hint before disambiguating same-app windows", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-semantic-app-filter-"));
+    const wpsOne = { pid: 910, windowId: 9100, appName: "WPS Office", title: "Budget.xlsx" };
+    const wpsTwo = { pid: 911, windowId: 9101, appName: "WPS Office", title: "Meeting.docx" };
+    const notepad = { pid: 912, windowId: 9102, appName: "Notepad", title: "处理文件" };
+    const windowSelector: WindowSelectionStrategy = {
+      async select(goal, candidates) {
+        expect(goal).toBe("在WPS中处理文件");
+        expect(candidates).toEqual([wpsOne, wpsTwo]);
+        return { kind: "matched", target: candidates[1]! };
+      },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "The WPS window was selected.",
+      allWindows: [wpsOne, wpsTwo, notepad],
+      windowSnapshots: [[wpsOne, wpsTwo], [wpsOne, wpsTwo]],
+      windowSelector,
+    });
+    try {
+      const run = await api.startRun("device-one", "auto-wps-app-filter", "在WPS中处理文件", { mode: "auto" });
+      expect(run.target).toMatchObject({ appName: "WPS Office", title: "Meeting.docx", provenance: "starting_target" });
+      expect(createdComputerConfigs[0]).toMatchObject({ windowTarget: { pid: wpsTwo.pid, windowId: wpsTwo.windowId } });
+      await session.waitForActiveRun();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a semantic suggestion for duplicate app/title candidates instead of blind selection", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-semantic-duplicate-labels-"));
+    const duplicateA = { pid: 920, windowId: 9200, appName: "WPS Office", title: "Report.docx" };
+    const duplicateB = { pid: 921, windowId: 9201, appName: "WPS Office", title: "Report.docx" };
+    const windowSelector: WindowSelectionStrategy = {
+      async select(_goal, candidates) {
+        expect(candidates).toEqual([]);
+        // Even a buggy/custom selector cannot return a candidate that was not
+        // present in its safe, distinguishable candidate set.
+        return { kind: "matched", target: duplicateA };
+      },
+    };
+    const { api, session, createdComputerConfigs } = createFixture(outputDir, {
+      summary: "Should not start on an indistinguishable target.",
+      allWindows: [duplicateA, duplicateB],
+      windowSelector,
+    });
+    try {
+      await expect(api.startRun("device-one", "auto-duplicate-labels", "在WPS里检查报告", { mode: "auto" }))
+        .rejects.toMatchObject({ code: "WINDOW_SELECTION_REQUIRED" });
+      expect(api.listRuns("device-one")).toEqual([]);
+      expect(createdComputerConfigs).toEqual([]);
+      expect(session.activeRun).toBeUndefined();
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shows duplicate manual window captions only as preview-required while keeping unique labels direct", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-duplicate-window-captions-"));
+    const { api, session, setWindows } = createFixture(outputDir, { summary: "unused" });
+    setWindows([
+      { pid: 11, windowId: 110, appName: "Notepad", title: "Notes" },
+      { pid: 12, windowId: 120, appName: "Notepad", title: "Notes" },
+      { pid: 13, windowId: 130, appName: "WPS Office", title: "Report.docx" },
+    ]);
+    try {
+      const choices = await api.listWindowTargets("device-one");
+      expect(choices.candidates).toMatchObject([
+        { appName: "Notepad", title: "Notes", previewRequired: true },
+        { appName: "Notepad", title: "Notes", previewRequired: true },
+        { appName: "WPS Office", title: "Report.docx" },
+      ]);
+      expect(choices.omittedAmbiguousCount).toBeUndefined();
+      expect(containsWindowIdentityKey(choices)).toBe(false);
+    } finally {
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts the next Run with a fresh Computer session and observation after an unknown action with confirmed cleanup", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-unknown-cleanup-next-run-"));
+    const click: ToolCall = {
+      id: "unknown-cleanup-click" as ToolCallId,
+      name: "click",
+      arguments: { x: 4, y: 4 },
+      declaredEffect: { effects: ["navigate"], target: "report", summary: "Open the report" },
+    };
+    let failFirstAction = true;
+    const executedActionIds: string[] = [];
+    const { api, session, createdComputerConfigs, observedComputerSessionIds } = createFixture(outputDir, {
+      summary: "The new Run started from a fresh observation.",
+      turnFactory: (turnNumber) => turnNumber === 1 && failFirstAction
+        ? { type: "tool_calls", calls: [click] }
+        : { type: "finish", summary: "Fresh Run complete." },
+      executeAction: async (action) => {
+        executedActionIds.push(String(action.actionId));
+        if (failFirstAction) {
+          failFirstAction = false;
+          throw new Error("fixture driver returned an unknown action outcome");
+        }
+        return { actionId: action.actionId, status: "completed" };
+      },
+    });
+    try {
+      const first = await api.startRun("device-one", "unknown-then-fresh-first", "Open Fixture app and inspect the report", { mode: "auto" });
+      await expect(session.waitForActiveRun()).resolves.toBe("outcome_unknown");
+      expect(api.getRun("device-one", first.runId)).toMatchObject({ status: "finished", outcome: "outcome_unknown" });
+      expect(session.lastRun).toMatchObject({ outcome: "outcome_unknown", ownerState: "released" });
+
+      const second = await api.startRun("device-one", "unknown-then-fresh-second", "Open Fixture app and inspect the report", { mode: "auto" });
+      await expect(session.waitForActiveRun()).resolves.toBe("succeeded");
+      expect(api.getRun("device-one", second.runId)).toMatchObject({ status: "finished", outcome: "succeeded" });
+      expect(createdComputerConfigs).toHaveLength(2);
+      expect(observedComputerSessionIds).toHaveLength(2);
+      expect(new Set(observedComputerSessionIds).size).toBe(2);
+      expect(executedActionIds).toHaveLength(1);
+      expect(session.history.map((record) => record.outcome)).toEqual(["outcome_unknown", "succeeded"]);
+    } finally {
+      session.activeRun?.controller.cancel("unknown cleanup next-run fixture cleanup");
+      await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
     }
@@ -1409,10 +3100,19 @@ describe("ApplicationRemoteRunApi", () => {
       summary: "The first Run finished before cleanup completed.",
       closeComputer: () => cleanupGate,
     });
+    let cleanupStatusPublished = false;
+    let subscription: ReturnType<typeof api.subscribe> | undefined;
     try {
       const first = await api.startRun("device-one", "finished-before-cleanup", "Open a blank managed page", { mode: "browser" });
       await waitFor(() => api.getRun("device-one", first.runId)?.status === "finished", "public finished snapshot was not published");
       expect(session.activeRun).toBeDefined();
+      const finished = api.getRun("device-one", first.runId);
+      expect(finished?.ownerState).toBe("pending_cleanup");
+      expect(api.listRuns("device-one").find((run) => run.runId === first.runId)?.ownerState).toBe("pending_cleanup");
+      if (finished === undefined) throw new Error("finished Run snapshot was unavailable");
+      subscription = api.subscribe("device-one", first.runId, finished.sequence, (event) => {
+        if (event.type === "run.event" && event.data.type === "run.status") cleanupStatusPublished = true;
+      });
 
       const secondPromise = api.startRun("device-one", "after-finished-cleanup", "Open another blank managed page", { mode: "browser" });
       await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
@@ -1423,10 +3123,45 @@ describe("ApplicationRemoteRunApi", () => {
       const second = await secondPromise;
       expect(second.runId).not.toBe(first.runId);
       expect(createdComputerConfigs).toHaveLength(2);
+      await waitFor(() => api.getRun("device-one", first.runId)?.ownerState === "released", "released owner state was not projected after cleanup");
+      expect(cleanupStatusPublished).toBe(true);
+      expect(api.listRuns("device-one").find((run) => run.runId === first.runId)?.ownerState).toBe("released");
       await session.waitForActiveRun();
     } finally {
+      subscription?.close();
       releaseCleanup();
       session.activeRun?.controller.cancel("finished cleanup ordering test cleanup");
+      await session.waitForActiveRun();
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attribute a later Run's active lease to an earlier finished Run", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-remote-api-run-owner-identity-"));
+    let generatedTurns = 0;
+    const { api, session } = createFixture(outputDir, {
+      summary: "The first Run finished.",
+      turnFactory: () => {
+        generatedTurns += 1;
+        return generatedTurns === 1
+          ? { type: "finish", summary: "The first Run finished." }
+          : { type: "user_input_required", question: "Should the next Run continue?" };
+      },
+    });
+    try {
+      const first = await api.startRun("device-one", "owner-identity-first", "Finish the first task", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", first.runId)?.ownerState === "released", "first Run cleanup was not confirmed");
+
+      const second = await api.startRun("device-one", "owner-identity-second", "Wait for user input", { mode: "browser" });
+      await waitFor(() => api.getRun("device-one", second.runId)?.status === "waiting_user", "second Run did not wait for input");
+
+      expect(session.activeRun?.runId).toBe(second.runId);
+      expect(api.getRun("device-one", first.runId)?.ownerState).toBe("released");
+      expect(api.getRun("device-one", second.runId)?.ownerState).toBeUndefined();
+      expect(api.listRuns("device-one").find((run) => run.runId === first.runId)?.ownerState).toBe("released");
+    } finally {
+      session.activeRun?.controller.cancel("owner identity test cleanup");
       await session.waitForActiveRun();
       await session.close();
       await rm(outputDir, { recursive: true, force: true });
@@ -1755,7 +3490,7 @@ describe("ApplicationRemoteRunApi", () => {
         .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
 
       const changedTargetToken = refreshed.candidates[0]!.token;
-      setWindows([{ pid: 42, windowId: 1001, appName: "Fixture app", title: "Replaced window" }]);
+      setWindows([{ pid: 42, windowId: 1001, appName: "Replacement app", title: "Replaced window" }]);
       await expect(api.startRun("device-one", "changed-target", "Do not start on a reused window", changedTargetToken))
         .rejects.toMatchObject({ code: "WINDOW_TARGET_STALE" });
       expect(session.history).toHaveLength(0);
@@ -1863,7 +3598,7 @@ describe("ApplicationRemoteRunApi", () => {
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (process.platform === "win32" && ["EPERM", "EACCES", "ENOTSUP", "UNKNOWN"].includes(code ?? "")) {
-          skip("Windows junction creation is unavailable for this account or filesystem.");
+          skip();
           return;
         }
         throw error;

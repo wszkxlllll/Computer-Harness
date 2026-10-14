@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type {
   JsonValue,
   ModelUsage,
   ModelTurn,
   ObservationAssessment,
+  SourceLinkedFinishReport,
   ToolCall,
   ToolCallId,
   Viewport,
@@ -454,39 +456,48 @@ export class FetchQwenHttpClient implements QwenHttpClient {
   }
 
   public async post(url: string, body: Record<string, unknown>, headers: Readonly<Record<string, string>>, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted();
     const requestController = new AbortController();
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      requestController.abort(new Error(`Qwen request deadline exceeded after ${this.requestTimeoutMs}ms`));
-    }, this.requestTimeoutMs);
-    const abortRequest = () => requestController.abort(signal.reason);
+    const deadlineAt = performance.now() + this.requestTimeoutMs;
+    let firstAbortSource: "local_request_timeout" | "run_cancelled" | undefined;
+    let firstAbortReason: unknown;
+    let rejectAbort: (reason: unknown) => void = () => {};
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+    // Cancellation can happen synchronously before a transport race is installed.
+    void aborted.catch(() => {});
+    const recordFirstAbort = (source: "local_request_timeout" | "run_cancelled", reason: unknown): void => {
+      if (firstAbortSource !== undefined) return;
+      firstAbortSource = source;
+      firstAbortReason = reason;
+      rejectAbort(reason);
+      requestController.abort(reason);
+    };
+    const expireRequest = (): void => {
+      recordFirstAbort("local_request_timeout", new Error(`Qwen request deadline exceeded after ${this.requestTimeoutMs}ms`));
+    };
+    const timeout = setTimeout(expireRequest, this.requestTimeoutMs);
+    const abortRequest = () => recordFirstAbort("run_cancelled", signal.reason);
     if (signal.aborted) abortRequest();
     else signal.addEventListener("abort", abortRequest, { once: true });
-    let response: Response;
+    const checkActive = (): void => {
+      if (firstAbortSource === undefined && performance.now() >= deadlineAt) expireRequest();
+      if (firstAbortSource !== undefined) throw firstAbortReason;
+    };
+    const awaitActive = async <T>(operation: () => Promise<T>): Promise<T> => {
+      checkActive();
+      const result = await Promise.race([operation(), aborted]);
+      // Late settlement is not usable even if a blocked timer has not fired yet.
+      checkActive();
+      return result;
+    };
+    let readingBody = false;
     try {
-      response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: requestController.signal });
-    } catch (error) {
-      try {
-        if (signal.aborted) throw signal.reason ?? error;
-        if (timedOut) throw new QwenProviderError(`Qwen request timed out after ${this.requestTimeoutMs}ms`, "QWEN_REQUEST_TIMEOUT", true, "same_input");
-        throw new QwenProviderError(
-          `Qwen network request failed: ${error instanceof Error ? error.message : String(error)}`,
-          "QWEN_NETWORK_ERROR",
-          true,
-          "same_input",
-        );
-      } finally {
-        clearTimeout(timeout);
-        signal.removeEventListener("abort", abortRequest);
-      }
-    }
-    try {
-      const payload = await response.json().catch((error: unknown) => {
-        if (signal.aborted) throw signal.reason ?? error;
-        if (timedOut) throw new QwenProviderError(`Qwen response body timed out after ${this.requestTimeoutMs}ms`, "QWEN_REQUEST_TIMEOUT", true, "same_input");
-        throw new QwenProviderError(`Qwen response body could not be read: ${error instanceof Error ? error.message : String(error)}`, "QWEN_NETWORK_ERROR", true, "same_input");
-      }) as unknown;
+      checkActive();
+      const serializedBody = JSON.stringify(body);
+      checkActive();
+      const response = await awaitActive(() => fetch(url, { method: "POST", headers, body: serializedBody, signal: requestController.signal }));
+      readingBody = true;
+      const payload = await awaitActive(() => response.json()) as unknown;
       if (!response.ok) {
         const providerMessage = readQwenErrorMessage(payload);
         const retryable = response.status === 429 || response.status >= 500;
@@ -497,7 +508,20 @@ export class FetchQwenHttpClient implements QwenHttpClient {
           retryable ? "same_input" : "feedback",
         );
       }
+      checkActive();
       return payload;
+    } catch (error) {
+      if (firstAbortSource === undefined && performance.now() >= deadlineAt) expireRequest();
+      if (firstAbortSource === "run_cancelled") throw firstAbortReason;
+      if (firstAbortSource === "local_request_timeout") {
+        // The remote request may still be running; local timeout must not trigger replay.
+        throw new QwenProviderError(`Qwen ${readingBody ? "response body" : "request"} timed out after ${this.requestTimeoutMs}ms`, "QWEN_REQUEST_TIMEOUT", false, "feedback");
+      }
+      if (error instanceof QwenProviderError) throw error;
+      throw new QwenProviderError(
+        `Qwen ${readingBody ? "response body could not be read" : "network request failed"}: ${error instanceof Error ? error.message : String(error)}`,
+        "QWEN_NETWORK_ERROR", true, "same_input",
+      );
     } finally {
       clearTimeout(timeout);
       signal.removeEventListener("abort", abortRequest);
@@ -596,7 +620,7 @@ function readUsage(value: unknown): ModelUsage | undefined {
 
 type MappedQwen38Call =
   | { type: "call"; call: ToolCall }
-  | { type: "finish"; summary: string; reportedStatus: "success" | "failure" }
+  | { type: "finish"; summary: string; reportedStatus: "success" | "failure"; resultEvidence?: SourceLinkedFinishReport }
   | { type: "user_input_required"; question: string };
 
 function qwen38FunctionTools(input: ModelInput, coordinateMode: QwenCoordinateMode, viewport: Viewport | undefined): Record<string, unknown>[] {
@@ -615,10 +639,19 @@ function qwenToolCatalog(tools: readonly ModelToolSpec[], coordinateMode: QwenCo
   const lines = ["Available tools (semantic guidance; Runtime validates exact arguments):"];
   for (const tool of tools) {
     const argumentsText = compactToolArguments(tool, coordinateMode);
-    const description = tool.description.replace(/\s+/gu, " ").trim().slice(0, 180);
+    const normalizedDescription = tool.description.replace(/\s+/gu, " ").trim();
+    // These tools carry essential native-window or platform-specific input
+    // constraints. Keep their Registry descriptions complete in strict JSON.
+    const description = tool.name === "list_windows" || tool.name === "switch_window" || tool.name === "type" || tool.name === "click_element"
+      ? normalizedDescription
+      : normalizedDescription.slice(0, 180);
     lines.push(`- ${tool.name}(${argumentsText}): ${description}`);
   }
   return lines.join("\n");
+}
+
+function compactDescription(description: string): string {
+  return description.replace(/\s+/gu, " ").trim();
 }
 
 function compactToolArguments(tool: ModelToolSpec, coordinateMode: QwenCoordinateMode): string {
@@ -638,10 +671,13 @@ function compactToolArguments(tool: ModelToolSpec, coordinateMode: QwenCoordinat
     const coordinate = tool.coordinate?.fields.some((field) => field === name)
       ? coordinateMode === "normalized_1000" ? "[0,1000]" : "[pixel]"
       : "";
+    const description = typeof property.description === "string"
+      ? ` description=${JSON.stringify(compactDescription(property.description))}`
+      : "";
     if (name === HARNESS_EFFECT_KEY) {
-      fields.push(`${name}${optional}:object{effects:array<${declaredActionEffects.join("|")}>,target:string,summary:string}`);
+      fields.push(`${name}${optional}:object{effects:array<${declaredActionEffects.join("|")}>,target:string,summary:string}${description}`);
     } else {
-      fields.push(`${name}${optional}:${type}${enumText}${coordinate}`);
+      fields.push(`${name}${optional}:${type}${enumText}${coordinate}${description}`);
     }
   }
   return fields.join(", ");
@@ -839,7 +875,12 @@ function mapQwen38ToolCall(
     if (typeof args.text !== "string" || !isActionableFinishSummary(args.text)) {
       throw new QwenProviderError(`${value.name} requires user-facing result text, not only a status label`, "QWEN_INVALID_TOOL_CALL");
     }
-    return { type: "finish", summary: args.text.trim(), reportedStatus: args.status };
+    return {
+      type: "finish",
+      summary: args.text.trim(),
+      reportedStatus: args.status,
+      ...(args.resultEvidence === undefined ? {} : { resultEvidence: args.resultEvidence as unknown as SourceLinkedFinishReport }),
+    };
   }
   if (tool.control === "user_input_required") {
     if (typeof args.text !== "string" || args.text.trim().length === 0) throw new QwenProviderError(`${value.name} requires text`, "QWEN_INVALID_TOOL_CALL");
