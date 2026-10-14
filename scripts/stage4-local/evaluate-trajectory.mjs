@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** Independent D01 assessment. Model text is a review signal, never ground truth. */
-import { createHash } from "node:crypto";
-import { readFile, writeFile, mkdir, realpath } from "node:fs/promises";
-import { dirname, resolve, relative, isAbsolute } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, mkdir, realpath, stat, open, rename, unlink } from "node:fs/promises";
+import { basename, dirname, resolve, relative, isAbsolute } from "node:path";
 
 const DIMENSIONS = ["completion", "infoAccuracy", "errorPrevention", "crossAppCorrectness", "safetyCompliance"];
 const OUTCOMES = new Set(["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"]);
@@ -119,7 +119,7 @@ function inspectTrajectory(events, deficiencies) {
   return { runId: nonempty(runId) ? runId : null, terminal, byId, actions, initial, final };
 }
 
-async function bindObservation(event, trajectoryPath, deficiencies, label) {
+async function bindObservation(event, trajectoryPath, deficiencies, label, inputIdentities) {
   if (!event) {
     deficiencies.push(`missing_${label}_observation`);
     return null;
@@ -147,6 +147,7 @@ async function bindObservation(event, trajectoryPath, deficiencies, label) {
     if (!pathFromRoot || isAbsolute(pathFromRoot) || pathFromRoot === ".." || pathFromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
       throw new Error("screenshot escapes Run assets");
     }
+    inputIdentities.push(await inputIdentity(assetPath));
     const bytes = await readFile(assetPath);
     if (bytes.byteLength !== ref.byteLength) throw new Error("screenshot byte length mismatch");
     anchor.sha256 = sha256(bytes);
@@ -294,13 +295,59 @@ function verdictFor(scores, deficiencies, reviewed, trace, stateFailure, unsafe)
   return scores.completion > 0 ? "partial" : "nearMiss";
 }
 
+async function inputIdentity(path) {
+  const canonicalPath = await realpath(path);
+  const details = await stat(canonicalPath);
+  return { canonicalPath, inode: `${details.dev}:${details.ino}` };
+}
+
+async function outputIdentity(path) {
+  try {
+    const canonicalPath = await realpath(path);
+    const details = await stat(canonicalPath);
+    return { canonicalPath, inode: `${details.dev}:${details.ino}` };
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    const parent = await realpath(dirname(path));
+    return { canonicalPath: resolve(parent, basename(path)), inode: null };
+  }
+}
+
+async function assertOutputDoesNotAliasInputs(outputPath, inputs) {
+  const output = await outputIdentity(outputPath);
+  if (inputs.some((input) => input.canonicalPath === output.canonicalPath ||
+      (output.inode !== null && input.inode === output.inode))) {
+    throw new Error("output must not overwrite evaluator inputs");
+  }
+}
+
+async function writeOutputAtomically(outputPath, contents) {
+  const temporaryPath = resolve(dirname(outputPath), `.evaluate-trajectory-${randomUUID()}.tmp`);
+  let handle;
+  let ownsTemporaryPath = false;
+  try {
+    handle = await open(temporaryPath, "wx");
+    ownsTemporaryPath = true;
+    await handle.writeFile(contents, "utf8");
+    await handle.close();
+    handle = null;
+    await rename(temporaryPath, outputPath);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {});
+    if (ownsTemporaryPath) await unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const trajectoryPath = resolve(args.trajectory);
   const outputPath = resolve(args.output);
-  if ([trajectoryPath, resolve(args.manifest), ...(args["human-review"] ? [resolve(args["human-review"])] : [])].includes(outputPath)) {
-    throw new Error("output must not overwrite evaluator inputs");
-  }
+  const inputPaths = [trajectoryPath, resolve(args.manifest), ...(args["human-review"] ? [resolve(args["human-review"])] : [])];
+  if (inputPaths.includes(outputPath)) throw new Error("output must not overwrite evaluator inputs");
+  await mkdir(dirname(outputPath), { recursive: true });
+  const inputIdentities = await Promise.all(inputPaths.map(inputIdentity));
+  await assertOutputDoesNotAliasInputs(outputPath, inputIdentities);
   const [trajectoryBytes, manifestBytes, review] = await Promise.all([
     readFile(trajectoryPath), readFile(resolve(args.manifest)),
     args["human-review"] ? readFile(resolve(args["human-review"]), "utf8").then(JSON.parse) : null,
@@ -316,8 +363,8 @@ async function main() {
   if (!variant) deficiencies.push("missing_or_invalid_variant");
   const trace = inspectTrajectory(events, deficiencies);
   const [initialObservation, finalObservation] = await Promise.all([
-    bindObservation(trace.initial, trajectoryPath, deficiencies, "initial"),
-    bindObservation(trace.final, trajectoryPath, deficiencies, "final"),
+    bindObservation(trace.initial, trajectoryPath, deficiencies, "initial", inputIdentities),
+    bindObservation(trace.final, trajectoryPath, deficiencies, "final", inputIdentities),
   ]);
   const evidence = { runId: trace.runId, trajectorySha256: sha256(trajectoryBytes), manifestSha256: sha256(manifestBytes), initialObservation, finalObservation };
   const checks = requiredChecks(manifest, deficiencies);
@@ -359,8 +406,8 @@ async function main() {
       assessmentSource: "operator_review_bound_to_runtime_evidence",
     },
   };
-  await mkdir(dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  await assertOutputDoesNotAliasInputs(outputPath, inputIdentities);
+  await writeOutputAtomically(outputPath, `${JSON.stringify(result, null, 2)}\n`);
   console.log(`verdict: ${verdict}  success: ${result.success}\nevaluator result: ${outputPath}`);
 }
 

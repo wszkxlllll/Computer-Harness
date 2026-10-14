@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -54,6 +54,7 @@ async function fixture(t) {
   const f = {
     directory, trajectory: join(directory, "trajectory.jsonl"), manifestPath: join(directory, "manifest.json"),
     reviewPath: join(directory, "review.json"), output: join(directory, "result.json"),
+    assetPaths: [join(directory, "assets", "initial.png"), join(directory, "assets", "final.png")],
     manifest: JSON.parse(await readFile(manifestSource, "utf8")), events: events(),
     family: "query_payment_entry_and_bill", variant: "v1",
   };
@@ -179,6 +180,129 @@ test("complete independently bound review authorizes success", async (t) => {
   assert.equal(result.humanReview.reviewer, review.reviewer);
   assert.equal(result.humanReview.reviewedAt, review.reviewedAt);
   assert.deepEqual(result.scores, Object.fromEntries(dimensions.map((name) => [name, 1])));
+});
+
+for (const inputName of ["trajectory", "manifestPath", "reviewPath"]) {
+  test(`output direct path to ${inputName} is rejected without changing input bytes`, async (t) => {
+    const f = await fixture(t);
+    await writeFile(f.reviewPath, JSON.stringify({ deliberately: "preserve these bytes" }));
+    const inputPaths = [f.trajectory, f.manifestPath, f.reviewPath];
+    const before = await Promise.all(inputPaths.map((path) => readFile(path)));
+    const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+      "--family", f.family, "--variant", f.variant, "--output", f[inputName],
+      "--human-review", f.reviewPath];
+    await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+      (error) => error.code === 1 && /output must not overwrite evaluator inputs/.test(error.stderr));
+    assert.deepEqual(await Promise.all(inputPaths.map((path) => readFile(path))), before);
+  });
+
+  for (const aliasKind of ["symlink", "hardlink", "parent directory symlink"]) {
+    test(`output ${aliasKind} alias of ${inputName} is rejected without changing input bytes`, async (t) => {
+      const f = await fixture(t);
+      await writeFile(f.reviewPath, JSON.stringify({ deliberately: "preserve these bytes" }));
+      const input = f[inputName];
+      const inputPaths = [f.trajectory, f.manifestPath, f.reviewPath];
+      const before = await Promise.all(inputPaths.map((path) => readFile(path)));
+      let output;
+      if (aliasKind === "parent directory symlink") {
+        const parentAlias = join(f.directory, "parent-alias");
+        await symlink(dirname(input), parentAlias, "dir");
+        output = join(parentAlias, basename(input));
+      } else {
+        output = join(f.directory, `alias-${inputName}-${aliasKind.replaceAll(" ", "-")}`);
+        if (aliasKind === "symlink") await symlink(input, output);
+        else await link(input, output);
+      }
+      const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+        "--family", f.family, "--variant", f.variant, "--output", output,
+        "--human-review", f.reviewPath];
+      await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+        (error) => error.code === 1 && /output must not overwrite evaluator inputs/.test(error.stderr));
+      assert.deepEqual(await Promise.all(inputPaths.map((path) => readFile(path))), before);
+      assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+    });
+  }
+}
+
+for (const assetName of ["initial", "final"]) {
+  for (const aliasKind of ["direct", "symlink", "hardlink", "parent directory symlink"]) {
+    test(`output ${aliasKind} alias of ${assetName} screenshot is rejected without changing input bytes`, async (t) => {
+      const f = await fixture(t);
+      await writeFile(f.reviewPath, JSON.stringify({ deliberately: "preserve these bytes" }));
+      const inputPaths = [f.trajectory, f.manifestPath, f.reviewPath, ...f.assetPaths];
+      const before = await Promise.all(inputPaths.map((path) => readFile(path)));
+      const asset = f.assetPaths[assetName === "initial" ? 0 : 1];
+      let output;
+      if (aliasKind === "direct") output = asset;
+      else if (aliasKind === "parent directory symlink") {
+        const parentAlias = join(f.directory, `${assetName}-assets-alias`);
+        await symlink(dirname(asset), parentAlias, "dir");
+        output = join(parentAlias, basename(asset));
+      } else {
+        output = join(f.directory, `${assetName}-asset-${aliasKind}`);
+        if (aliasKind === "symlink") await symlink(asset, output);
+        else await link(asset, output);
+      }
+      const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+        "--family", f.family, "--variant", f.variant, "--output", output,
+        "--human-review", f.reviewPath];
+      await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+        (error) => error.code === 1 && /output must not overwrite evaluator inputs/.test(error.stderr));
+      assert.deepEqual(await Promise.all(inputPaths.map((path) => readFile(path))), before);
+      assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+    });
+  }
+}
+
+test("atomic writer replaces a normal existing output", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.output, "old result");
+  const result = await f.invoke();
+  assert.equal(result.verdict, "inconclusive");
+  assert.equal(JSON.parse(await readFile(f.output, "utf8")).schemaVersion, 2);
+  assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+});
+
+test("atomic rename failure removes its temporary file and preserves inputs", async (t) => {
+  const f = await fixture(t);
+  const before = await Promise.all([f.trajectory, f.manifestPath].map((path) => readFile(path)));
+  const outputDirectory = join(f.directory, "result-directory");
+  await mkdir(outputDirectory);
+  const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+    "--family", f.family, "--variant", f.variant, "--output", outputDirectory];
+  await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+    (error) => error.code === 1 && /evaluator error:/.test(error.stderr));
+  assert.deepEqual(await Promise.all([f.trajectory, f.manifestPath].map((path) => readFile(path))), before);
+  assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+});
+
+test("atomic write failure removes its temporary file and preserves inputs", async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.reviewPath, JSON.stringify({ deliberately: "preserve these bytes" }));
+  const inputPaths = [f.trajectory, f.manifestPath, f.reviewPath];
+  const before = await Promise.all(inputPaths.map((path) => readFile(path)));
+  const hook = join(f.directory, "fail-temp-write.mjs");
+  await writeFile(hook, `import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nconst originalOpen = fs.promises.open;\nfs.promises.open = async (...args) => {\n  const handle = await originalOpen(...args);\n  handle.writeFile = async () => { throw new Error("injected temporary write failure"); };\n  return handle;\n};\nsyncBuiltinESMExports();\n`);
+  const args = ["--import", hook, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+    "--family", f.family, "--variant", f.variant, "--human-review", f.reviewPath, "--output", f.output];
+  await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+    (error) => error.code === 1 && /injected temporary write failure/.test(error.stderr));
+  assert.deepEqual(await Promise.all(inputPaths.map((path) => readFile(path))), before);
+  assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
+});
+
+test("temporary open failure preserves inputs and leaves no temporary file", async (t) => {
+  const f = await fixture(t);
+  const inputPaths = [f.trajectory, f.manifestPath];
+  const before = await Promise.all(inputPaths.map((path) => readFile(path)));
+  const hook = join(f.directory, "fail-temp-open.mjs");
+  await writeFile(hook, `import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nfs.promises.open = async () => { throw new Error("injected temporary open failure"); };\nsyncBuiltinESMExports();\n`);
+  const args = ["--import", hook, evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
+    "--family", f.family, "--variant", f.variant, "--output", f.output];
+  await assert.rejects(execute(process.execPath, args, { cwd: f.directory, timeout: 20_000, windowsHide: true }),
+    (error) => error.code === 1 && /injected temporary open failure/.test(error.stderr));
+  assert.deepEqual(await Promise.all(inputPaths.map((path) => readFile(path))), before);
+  assert.deepEqual((await readdir(f.directory)).filter((name) => name.startsWith(".evaluate-trajectory-")), []);
 });
 
 for (const [name, options] of [
