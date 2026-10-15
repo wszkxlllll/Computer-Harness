@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-15",
+  "task": "M01-v1",
+  "source": "Existing Windows candidate with PR30 source/navigation/Monitor repairs; not independently fingerprinted",
+  "businessAcceptance": "Both rounds passed the requested public-page checklist based on final replies, committed observations, visual review, and independent official-page retrieval; not a formal evaluator score",
+  "productChanges": "No product source or default changes; run-local production shared adapter low profile and expanded budgets",
+  "cost": "unknown",
+  "byteChecks": "not_performed",
+  "rounds": [
+    {
+      "round": 1,
+      "runId": "d01-low-expanded-1792041589863-6d377ff8-3f08-4208-84cc-bd9ace33c296",
+      "startedAt": "2026-10-15T05:19:49.896Z",
+      "endedAt": "2026-10-15T05:25:01.700Z",
+      "durationSeconds": 311.804,
+      "runtimeOutcome": "succeeded",
+      "modelReportedStatus": "success",
+      "businessAcceptance": "passed_requested_checklist",
+      "metrics": {
+        "steps": 41,
+        "modelRequests": 49,
+        "guardEvaluations": 41,
+        "riskModelRequests": 0,
+        "approvalsRequested": 1,
+        "guardDecisions": {
+          "allow": 40,
+          "require_approval": 1
+        },
+        "eventCount": 546,
+        "invalidToolCalls": 2,
+        "rejectedToolCalls": 2,
+        "budgetRejectedToolCalls": 0,
+        "budgetRuntimeErrors": 0,
+        "argumentRejectedToolCalls": 2,
+        "toolExecutionFailed": 2,
+        "windowHandoffsRequested": 0,
+        "windowHandoffsCompleted": 0,
+        "windowSwitch": {
+          "proposed": 0,
+          "actionsStarted": 0,
+          "completed": 0,
+          "refused": 0,
+          "failed": 0,
+          "cancelled": 0
+        },
+        "providerFailed": 0,
+        "runtimeErrors": 0,
+        "providerErrors": [],
+        "monitorTransitions": {
+          "changed": 29,
+          "unknown": 12
+        }
+      },
+      "actionReceipts": {
+        "completed": 39,
+        "refused": 2
+      },
+      "waitActions": 4,
+      "refusalCodes": {
+        "DOM_CLICK_BBOX_MISMATCH": 1,
+        "BROWSER_CHROME_FOCUS_UNCONFIRMED": 1
+      },
+      "automaticApprovals": 1,
+      "providerEvidence": {
+        "realHttpRequests": 49,
+        "http200Responses": 49,
+        "thinkingEnabledLowRequests": 49,
+        "outputLimit16384Requests": 49,
+        "finishReasons": {
+          "tool_calls": 49
+        }
+      },
+      "runtimeAcceptedUsage": {
+        "inputTokens": 1161988,
+        "outputTokens": 34723,
+        "totalTokens": 1196711
+      },
+      "cleanupConfirmed": true,
+      "multiGuiBatchCount": 0,
+      "finalChecklist": "协和医院官网公开页面（未登录、未提交任何表单，未触发验证码/实名/支付边界）查询结果如下，逐项附来源 URL：\n\n一、从患者版打开“内分泌科”\n路径：患者版首页 http://www.pumch.cn/patient.html → 顶部“科室导航” https://www.pumch.cn/department.html（面包屑：首页 > 科室导航）→ 非手术科室 · 内分泌科 https://www.pumch.cn/department_neifmk.html\n（当前观察：该页标题区显示“内分泌科”，内容为科室简介、快捷入口及特色门诊，观测时间 2026-10-15T05:24:27.204Z，pageUrl=https://www.pumch.cn/department_neifmk.html）\n\n二、科室位置及该位置页的发布时间\n来源页：内分泌科“科室位置”https://www.pumch.cn/detail/12497.html （由 department_neifmk.html 上的“科室位置”入口进入；该入口 href 观测为 https://www.pumch.cn/detail/12497.html）\n- 普通门诊位置：页面原文为“内分泌科门诊：门诊楼5层”（页面未使用“普通门诊”字样，按普通门诊记录，原文即“内分泌科门诊”）\n- 特需门诊位置：内分泌科特需门诊：门诊楼5层\n- 国际门诊位置：内分泌科国际门诊：国际部门诊3层\n- 该位置页时间标注：“时间：2017.12.09”，来源标注“本站原创”（即该页发布时间为 2017.12.09）\n- 页面另列病房信息（非本次要求）：内分泌科一病房 老楼11楼2层；二病房 老楼11楼3层；老年医学科病房含内分泌科床位 老楼6楼2层\n\n三、官网所列东单、西单两院区地址\n来源页：https://www.pumch.cn/nosocomial.html （“医院位置及服务时间”，本次观测 2026-10-15T05:22:53Z）\n- 东单院区门诊：北京市东城区帅府园1号东单北大街\n- 东单院区国际医疗部：北京市东城区帅府园1号东单北大街（内科楼南侧）\n- 西单院区门诊：北京市西城区大木仓胡同41号\n- 西单院区国际医疗部：西城区辟才胡同7号\n\n四、从患者版到公开“门诊出诊表（新）”的路径与 URL\n路径：患者版首页 http://www.pumch.cn/patient.html →（页面上的“门诊出诊表”入口）→ https://www.pumch.cn/news_visitinfo.html （面包屑：首页 > 就医指南 > 门诊出诊表（新））\n\n五、明确“未明确”的对应关系\n- 科室位置页（detail/12497.html）未标明各门诊所属院区（东单/西单），故“门诊位置 ↔ 东单/西单院区”的对应关系：未明确。\n- 院区地址页（nosocomial.html）未涉及内分泌科及其分院门诊，故“院区地址 ↔ 内分泌科分院门诊”的对应关系：未明确；院区地址不得作为该科室分院门诊的证据。\n- 上述两页均未记载普通/特需/国际门诊的出诊时间表，本次要求的“位置 + 发布时间”以外信息：未找到（出诊安排以“门诊出诊表（新）”页为准）。\n\n说明：本清单仅基于上述官网公开页面已显示内容，未作推断，未评价诊疗；页面内无登录/验证码/实名要求，故无路径因边界中止。",
+      "actualConfiguration": "member-c-deepseek-low-expanded-2026-10-15/round-1-config.json"
+    },
+    {
+      "round": 2,
+      "runId": "d01-low-expanded-1792041902693-f44f80e3-8cbb-4fea-bdee-9b6b213cf79d",
+      "startedAt": "2026-10-15T05:25:02.722Z",
+      "endedAt": "2026-10-15T05:30:57.389Z",
+      "durationSeconds": 354.667,
+      "runtimeOutcome": "succeeded",
+      "modelReportedStatus": "success",
+      "businessAcceptance": "passed_requested_checklist",
+      "metrics": {
+        "steps": 38,
+        "modelRequests": 42,
+        "guardEvaluations": 38,
+        "riskModelRequests": 0,
+        "approvalsRequested": 0,
+        "guardDecisions": {
+          "allow": 38
+        },
+        "eventCount": 494,
+        "invalidToolCalls": 1,
+        "rejectedToolCalls": 1,
+        "budgetRejectedToolCalls": 0,
+        "budgetRuntimeErrors": 0,
+        "argumentRejectedToolCalls": 1,
+        "toolExecutionFailed": 0,
+        "windowHandoffsRequested": 0,
+        "windowHandoffsCompleted": 0,
+        "windowSwitch": {
+          "proposed": 0,
+          "actionsStarted": 0,
+          "completed": 0,
+          "refused": 0,
+          "failed": 0,
+          "cancelled": 0
+        },
+        "providerFailed": 1,
+        "runtimeErrors": 0,
+        "providerErrors": [
+          {
+            "category": "provider",
+            "code": "DEEPSEEK_INVALID_TOOL_CALL",
+            "retryable": true,
+            "message": "DeepSeek control calls cannot be mixed with other tool calls; no tool was executed; retrying model request 1/1"
+          }
+        ],
+        "monitorTransitions": {
+          "changed": 24,
+          "unknown": 14
+        }
+      },
+      "actionReceipts": {
+        "completed": 38
+      },
+      "waitActions": 9,
+      "refusalCodes": {},
+      "automaticApprovals": 0,
+      "providerEvidence": {
+        "realHttpRequests": 42,
+        "http200Responses": 42,
+        "thinkingEnabledLowRequests": 42,
+        "outputLimit16384Requests": 42,
+        "finishReasons": {
+          "tool_calls": 42
+        }
+      },
+      "runtimeAcceptedUsage": {
+        "inputTokens": 1071442,
+        "outputTokens": 40979,
+        "totalTokens": 1112421
+      },
+      "cleanupConfirmed": true,
+      "multiGuiBatchCount": 0,
+      "finalChecklist": "以下为逐项结果（均为官网公开页面观察所得；未登录、未提交表单、未预约/支付）。\n\n【1】内分泌科科室位置 + 该页发布时间\n来源：https://www.pumch.cn/detail/12497.html\n- 普通门诊：门诊楼5层\n- 特需门诊：门诊楼5层\n- 国际门诊：国际部门诊3层\n- 同页另列（附带）：一病房：老楼11楼2层；二病房：老楼11楼3层\n- 发布时间：2017.12.09\n- 院区对应：该位置页只写楼宇/楼层，未标明对应东单院区还是西单院区 → 未明确。\n\n【2】官网所列院区地址\n来源：https://www.pumch.cn/nosocomial.html（“就医指南 > 医院位置及服务时间”，页面左侧为“东单院区位置、服务时间和交通”“西单院区位置、服务时间和交通”两项，右侧为对应内容，观察时间 2026-10-15T05:30:34Z）\n- 东单院区地址：北京市东城区帅府园1号（同页东单院区门诊地址亦为“北京市东城区帅府园1号 东单北大街”）\n- 西单院区地址：北京市西城区辟才胡同7号（页面原文：“西单院区地址：北京市西城区辟才胡同7号”）\n- 说明：以上仅为院区地址，并非该科室（内分泌科）在分院的设诊证据；页面未给出内分泌科门诊与东单/西单院区的对应关系 → 未明确。\n\n【3】从患者版到公开“门诊出诊表（新）”的路径与URL\n路径：患者版 https://www.pumch.cn/patient.html → 页面导航/“就医指南”分组 → “门诊出诊表（新）”\nURL：https://www.pumch.cn/news_visitinfo.html\n（该页面包屑显示：首页 > 就医指南 > 门诊出诊表（新），页面标题“就医指南”）\n同处另有两个不同链接，请注意区分：\n- “门诊出诊表” → https://www.pumch.cn/visitinfo.html\n- “医院位置及服务时间” → https://www.pumch.cn/nosocomial.html\n\n【未找到/未明确】\n- 内分泌科各门诊（普通/特需/国际）所在院区：页面未标注 → 未明确。\n- 上述各页除 2017.12.09 外，未见其他“门诊出诊表（新）”页发布时间标注 → 未找到（未被要求项，仅备注）。\n\n【边界执行情况】全程仅访问 pumch.cn 公开页面，未登录/注册、未输入任何身份信息或验证码、未联系客服、未点击预约/办理/提交/支付、未上传或外发。",
+      "actualConfiguration": "member-c-deepseek-low-expanded-2026-10-15/round-2-config.json"
+    }
+  ],
+  "limits": [
+    "Two development samples, not a stability or held-out evaluation",
+    "No controlled A/B: cannot attribute success solely to low thinking or expanded limits",
+    "No multi-GUI Batch proposals/executions; no batching speed claim",
+    "Production report thinkingMode is hardcoded disabled for this injected provider; use actual HTTP request evidence",
+    "No macOS real-device verification",
+    "Some asynchronous observations show an earlier screenshot than pageUrl; acceptance uses later settled screenshots, not navigation receipt or pageUrl alone",
+    "Existing small Memory projection quota and historical closing-tool behavior were investigated read-only, not repaired or proven fixed by these two successful Runs"
+  ]
+}

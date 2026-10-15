@@ -5,6 +5,7 @@ import { execFile as execFileCallback, spawn, type ChildProcess } from "node:chi
 import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
 import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
@@ -713,6 +714,23 @@ const MANAGED_DOM_CLICK_POINT_SCRIPT = String.raw`
   };
 `;
 
+// Registered listeners come from CDP, not page-library internals or CSS cursors.
+const MANAGED_DOM_CLICK_LISTENER_SCRIPT = String.raw`
+  const clickHandlers = new WeakMap();
+  const hasClickHandler = (element) => {
+    if (clickHandlers.has(element)) return clickHandlers.get(element);
+    let present = typeof element.onclick === "function";
+    if (!present && typeof getEventListeners === "function") {
+      try {
+        const listeners = getEventListeners(element).click;
+        present = Array.isArray(listeners) && listeners.length > 0;
+      } catch { /* Missing inspector evidence never invents a control. */ }
+    }
+    clickHandlers.set(element, present);
+    return present;
+  };
+`;
+
 /**
  * Expression evaluated in the managed page's main world. It intentionally
  * keeps label/reference lookups bounded and never emits node IDs, input values
@@ -722,6 +740,9 @@ const MANAGED_DOM_CLICK_POINT_SCRIPT = String.raw`
  */
 export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   ${MANAGED_DOM_CLICK_POINT_SCRIPT}
+  ${MANAGED_DOM_CLICK_LISTENER_SCRIPT}
+  // Keep the browser-side filter identical to the public transport boundary.
+  const isWebUrl = ${isGroundingWebUrl.toString()};
   const cssWidth = Number(window.innerWidth);
   const cssHeight = Number(window.innerHeight);
   const deviceScaleFactor = Number(window.devicePixelRatio);
@@ -804,7 +825,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     }
     return textFromElements(explicit, 8, 160, element);
   };
-  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
+  const roleOf = (element) => boundedText(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || hasClickHandler(element) ? "generic" : undefined), 64);
   const nameOf = (element, role) => {
     const candidates = [
       element.getAttribute("aria-label"),
@@ -818,8 +839,19 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
       if (name !== undefined) return name;
     }
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
-    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
+    const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || hasClickHandler(element);
     return allowsTextName ? boundedText(element.textContent, 160) : undefined;
+  };
+  const clickContext = (element) => {
+    if (!hasClickHandler(element)) return undefined;
+    let parent = element.parentElement;
+    for (let depth = 0; depth < 8 && parent; depth += 1, parent = parent.parentElement) {
+      const role = parent.getAttribute("role");
+      if (parent.localName === "a" || parent.localName === "button" || interactiveRoles.has(role)) {
+        return boundedText(parent.getAttribute("aria-label") || parent.getAttribute("title") || parent.textContent, 160);
+      }
+    }
+    return undefined;
   };
   const optionDescription = (option) => {
     if (option === undefined || option === null) return undefined;
@@ -872,7 +904,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const isCanvasLike = (element, role) => element.localName === "canvas" || role === "canvas" || role === "webgl" || role === "bitmap";
   const isInteractive = (element, role) => {
     if (element.disabled === true) return true;
-    if (element.tabIndex >= 0 || element.isContentEditable === true || typeof element.onclick === "function") return true;
+    if (element.tabIndex >= 0 || element.isContentEditable === true || hasClickHandler(element)) return true;
     if (role !== undefined && interactiveRoles.has(role.toLowerCase())) return true;
     return ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName);
   };
@@ -888,16 +920,19 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     if (frame === undefined || !isInteractive(element, role) || isCanvasLike(element, role) || clickPointRefusal(element, frame) !== undefined) return;
     const name = nameOf(element, role);
     const roleName = typeof role === "string" ? role.toLowerCase() : "";
-    const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : undefined;
+    const description = roleName === "combobox" || element.localName === "select" ? selectedOptionDescription(element, role) : roleName === "generic" ? clickContext(element) : undefined;
     const enabled = element.disabled !== true && element.getAttribute("aria-disabled") !== "true";
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
     const optionProjection = visibleNativeSelectOptions(element);
+    const href = element.localName === "a" && element.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+      roleName === "link" && element.getAttribute("href") !== null ? element.href : undefined;
     candidates.push({
       tagName: element.localName,
       ariaRole: role,
       name,
       description,
+      ...(isWebUrl(href) ? { href } : {}),
       frame,
       visible: true,
       interactive: true,
@@ -917,12 +952,10 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     const elements = root instanceof Element ? [root, ...root.querySelectorAll("*")] : [...root.querySelectorAll("*")];
     for (const element of elements) {
       if (element.localName === "iframe" && hasVisibleUntraversedFrame(element)) visibleUntraversedFrame = true;
-      const role = roleOf(element);
       emit(element);
       if (element.shadowRoot) walk(element.shadowRoot);
       // iframe documents are intentionally not traversed: a new frame identity
       // requires a separate observation/transport binding.
-      void role;
     }
   };
   // Reserve the bounded catalog's first slots for page navigation. A large
@@ -931,8 +964,10 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const priorityLinks = document.querySelectorAll('a, [role="link"]');
   for (const element of priorityLinks) emit(element);
   walk(document);
+  const pageUrl = window.location?.href;
   return {
     candidates,
+    ...(isWebUrl(pageUrl) ? { pageUrl } : {}),
     // Main-document completeness does not cover visible iframe contents,
     // which use a separate identity and are intentionally not traversed.
     complete: !truncated && !visibleUntraversedFrame,
@@ -1302,7 +1337,7 @@ export class ManagedBrowserHost {
     const expression = MANAGED_DOM_EVALUATION_SCRIPT;
     const socket = await LoopbackWebSocket.connect(webSocketDebuggerUrl, signal);
     try {
-      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }, signal);
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false, includeCommandLineAPI: true }, signal);
       const value = response?.result?.result?.value;
       if (!isRecord(value) || !Array.isArray(value.candidates)) throw new DomGroundingUnavailableError("managed DOM evaluation returned no bounded candidates");
       if (value.coordinateSpace !== "css" || !isRecord(value.viewportMetrics)) {
@@ -1317,7 +1352,12 @@ export class ManagedBrowserHost {
         throw new DomGroundingUnavailableError("managed DOM evaluation returned invalid CSS viewport metadata");
       }
       return {
-        candidates: value.candidates as DomGroundingRawCandidate[],
+        candidates: (value.candidates as DomGroundingRawCandidate[]).map((candidate) => {
+          if (candidate.href === undefined || isGroundingWebUrl(candidate.href)) return candidate;
+          const { href: _unsafeHref, ...withoutHref } = candidate;
+          return withoutHref;
+        }),
+        ...(isGroundingWebUrl(value.pageUrl) ? { pageUrl: value.pageUrl } : {}),
         complete: value.complete === true,
         coordinateSpace: "css",
         viewportMetrics,
@@ -1427,7 +1467,7 @@ export class ManagedBrowserHost {
       });
       // Only a dispatched click represents a user gesture. Read-only probes
       // must not grant activation to page code or consume popup permission.
-      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false, userGesture: !verifyFocusOnly && !validateOnly }, signal);
+      const response = await socket.command("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false, includeCommandLineAPI: true, userGesture: !verifyFocusOnly && !validateOnly }, signal);
       const value = response?.result?.result?.value;
       if (!isRecord(value) || (value.status !== "completed" && value.status !== "refused" && value.status !== "failed")) {
         return { status: "failed", driverCode: "DOM_CLICK_EVALUATION_INVALID", message: "managed-browser DOM click evaluation returned an invalid result" };
@@ -1684,11 +1724,12 @@ export function buildManagedDomClickExpression(input: {
   const encoded = JSON.stringify(input);
   return String.raw`(function(target) {
     ${MANAGED_DOM_CLICK_POINT_SCRIPT}
+    ${MANAGED_DOM_CLICK_LISTENER_SCRIPT}
     const MAX_ELEMENTS = 512;
     const normalize = (value, max = 256) => typeof value === "string" ? value.normalize("NFKC").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "";
     const inputRoles = { checkbox: "checkbox", radio: "radio", range: "slider", button: "button", submit: "button", reset: "button", image: "button", number: "spinbutton" };
     const tagRoles = { a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button" };
-    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || typeof element.onclick === "function" ? "generic" : undefined), 64);
+    const roleOf = (element) => normalize(element.getAttribute("role") || (element.localName === "input" ? (inputRoles[(element.getAttribute("type") || "text").toLowerCase()] || "textbox") : tagRoles[element.localName]) || (element.tabIndex >= 0 || hasClickHandler(element) ? "generic" : undefined), 64);
     const boundedText = (value, max) => {
       if (typeof value !== "string") return undefined;
       const text = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
@@ -1772,7 +1813,7 @@ export function buildManagedDomClickExpression(input: {
         if (name !== undefined) return name;
       }
       const roleName = typeof role === "string" ? role.toLowerCase() : "";
-      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || typeof element.onclick === "function";
+      const allowsTextName = element.localName === "button" || element.localName === "a" || roleName === "button" || roleName === "link" || hasClickHandler(element);
       return allowsTextName ? boundedText(element.textContent, 160) : undefined;
     };
     const frameOf = (element) => {
@@ -1804,7 +1845,7 @@ export function buildManagedDomClickExpression(input: {
         seen.add(element);
         const role = roleOf(element);
         const frame = frameOf(element);
-        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || typeof element.onclick === "function" || role !== "";
+        const interactive = ["a", "button", "input", "select", "textarea", "summary"].includes(element.localName) || element.tabIndex >= 0 || hasClickHandler(element) || role !== "";
         if (frame !== undefined && interactive && !["canvas", "img"].includes(element.localName)) {
           const name = nameOf(element, role);
           candidates.push({ element, role, name, frame, fingerprint: fingerprintOf(element, role, name) });

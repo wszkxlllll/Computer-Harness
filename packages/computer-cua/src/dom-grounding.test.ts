@@ -42,6 +42,53 @@ describe("managed DOM grounding transport gate", () => {
     expect(materialized.privateElements.size).toBe(7);
   });
 
+  it("treats native anchor tag case consistently without admitting ARIA-only link destinations", () => {
+    const shared = { name: "Schedule", frame: { x: 20, y: 100, width: 100, height: 24 }, visible: true, interactive: true };
+    const materialized = materializeDomGrounding(request, {
+      candidates: [
+        { ...shared, tagName: "A", href: "https://example.com/morning?route=A%2FB#times" },
+        { ...shared, tagName: "a", href: "https://example.com/evening?route=A%2Fb#times" },
+        { ...shared, tagName: "div", ariaRole: "link", href: "https://example.com/not-an-anchor" },
+      ],
+    });
+    expect(materialized.catalog.elements.map((element) => element.role)).toEqual(["link", "link", "link"]);
+    expect(materialized.catalog.elements.map((element) => element.href)).toEqual([
+      "https://example.com/morning?route=A%2FB#times",
+      "https://example.com/evening?route=A%2Fb#times",
+      undefined,
+    ]);
+  });
+
+  it.each([
+    "/relative/schedule",
+    "https:example.com/schedule",
+    "https://user:password@example.com/schedule",
+    "https://example.com/schedule?token=private",
+    "https://example.com/schedule?session_id=private",
+    "https://example.com/schedule#access_token=private",
+    "javascript:alert(1)",
+    "https://example.com/schedule\n",
+    `https://example.com/${"a".repeat(2048)}`,
+  ])("rejects unsafe transport URLs without inventing destinations from labels: %s", (unsafeUrl) => {
+    const safeUrl = "https://example.com/schedule?date=1%2F2#departures";
+    const candidate = { tagName: "a", name: safeUrl, frame: { x: 20, y: 100, width: 100, height: 24 }, visible: true, interactive: true };
+    const materialized = materializeDomGrounding(request, {
+      complete: true,
+      pageUrl: unsafeUrl,
+      candidates: [
+        { ...candidate, href: unsafeUrl },
+        { ...candidate, tagName: "div", ariaRole: "link", href: safeUrl },
+        { ...candidate, tagName: "input", inputType: "url", href: safeUrl },
+        { ...candidate, href: safeUrl, visible: false },
+        { ...candidate, href: safeUrl },
+      ],
+    });
+    expect(materialized.catalog).not.toHaveProperty("pageUrl");
+    expect(materialized.catalog.elements).toHaveLength(4);
+    expect(materialized.catalog.elements.map((element) => element.href)).toEqual([undefined, undefined, undefined, safeUrl]);
+    expect(materialized.catalog.elements[0]?.name).toBe(safeUrl);
+  });
+
   it("keeps refs observation-bound and preserves screenshot fallback when transport is absent", async () => {
     const transport = createMockDomGroundingTransport({ candidates: [] });
     const first = await transport.collect(request, new AbortController().signal);

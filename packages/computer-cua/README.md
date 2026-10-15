@@ -57,6 +57,20 @@ scale 与 origin 投影。当前 `dom-catalog-v1` 没有可信 content-rect prod
 边界，不会根据浏览器窗口 bounds、DPI 或工具栏高度猜坐标。DOM/Hybrid 的
 transport 仍然是 loopback、managed-browser、observation-bound 的只读 sidecar。
 
+受管页面的来源地址作为 observation-bound 证据传递：`GroundingCatalog.pageUrl`
+取自当前已绑定页面的实际 `location.href`，不是配置的启动地址；
+可见、已准入的原生 HTML 链接通过 `GroundingElement.href` 携带解析后的目标地址。
+相同链接文字不会替代或合并不同目标 URL，也不从截图 OCR、UIA 名称或输入框值猜地址。
+地址保留允许的 query、fragment 和原有转义；超过 2048 字符、非 HTTP(S)、
+带 userinfo、常见认证 token/session 参数或控制字符的 URL 整体省略，不截短或改写成另一条地址。
+缺少受管 DOM 证据的原生/UIA fallback 不补造这些字段，既有几何、可见性和窗口绑定门槛不变。
+
+Runtime 持久化与 hot-element 选择保留这些字段。Context 将当前 `pageUrl` 与当前图片绑定，
+不因可选候选目录预算不足而一并丢弃；历史页面 URL 只随已选中的历史观察保留并计入预算。
+模型写 Memory 或交付普通回答时应原样引用捕获的 URL；启用 source-linked finish 时，
+Runtime 从所引用的已提交 observation/element 生成原始地址，不采用模型另写的网址。
+这不把链接本身变成权限或网页内容的真实性证明，也不保证自由文本回答一定正确。
+
 DOM candidate 的 name 使用有界 accessible-name 近似：依次读取 `aria-label`、
 `aria-labelledby`、关联 `label`、`title`/`placeholder`，仅 button/link 使用有界可见文本。
 select/combobox 的当前选项只作为有界 description；option 列表、DOM id 和 input/password

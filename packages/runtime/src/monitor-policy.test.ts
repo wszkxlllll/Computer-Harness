@@ -115,6 +115,56 @@ describe("MonitorPolicy", () => {
     }
   });
 
+  it("does not spend an earlier stall's guidance budget on a changed page", () => {
+    const clock = { modelDecisionCount: 2, guiActionCount: 2 };
+    const first = reduceMonitorPolicy(createMonitorPolicyState({ mode: "guidance", maxGuidanceCount: 1 }),
+      input(1, clock, unchangedTransition()));
+    expect(first.proposal.kind).toBe("guidance");
+    const changed = reduceMonitorPolicy(first.state, input(2, clock, {
+      candidate: false, reasons: [], eventIds: [],
+      evidence: [{ kind: "visual_transition_changed", eventIds: [] }],
+    }));
+    const next = reduceMonitorPolicy(changed.state, input(3, { modelDecisionCount: 3, guiActionCount: 3 }, {
+      candidate: true, assessmentOutcome: "unexpected_change",
+      reasons: [{ code: "unexpected_change", eventIds: [] }],
+      evidence: [{ kind: "visual_transition_changed", eventIds: [] }], eventIds: [],
+    }));
+    expect(next.proposal.kind).toBe("guidance");
+    expect(next.state.guidanceCount).toBe(1);
+    const repeated = reduceMonitorPolicy(next.state, input(4, { modelDecisionCount: 4, guiActionCount: 4 }, {
+      candidate: true, assessmentOutcome: "unexpected_change",
+      reasons: [{ code: "unexpected_change", eventIds: [] }],
+      evidence: [{ kind: "visual_transition_changed", eventIds: [] }], eventIds: [],
+    }));
+    expect(repeated.proposal.kind).toBe("help_requested");
+  });
+
+  it("makes a sustained refusal available immediately while preserving bounds and execution barriers", () => {
+    const refusal: MonitorPolicyInput["monitor"] = {
+      ...candidate(),
+      reasons: [{ code: "repeated_refusal", eventIds: ["refused-event" as EventId] }],
+    };
+    const clock = { modelDecisionCount: 2, guiActionCount: 2 };
+    const first = reduceMonitorPolicy(createMonitorPolicyState({ mode: "guidance", maxGuidanceCount: 1 }), input(1, clock, refusal));
+    expect(first.proposal.kind).toBe("guidance");
+    if (first.proposal.kind === "guidance") {
+      expect(first.proposal.text.length).toBeGreaterThan(0);
+      expect(first.proposal.text.length).toBeLessThanOrEqual(240);
+    }
+    const exhausted = reduceMonitorPolicy(first.state, input(2, { modelDecisionCount: 3, guiActionCount: 3 }, refusal));
+    expect(exhausted.proposal.kind).toBe("help_requested");
+    for (const executionBarrier of ["unknown_outcome", "pending_side_effect"] as const) {
+      const suppressed = reduceMonitorPolicy(createMonitorPolicyState({ mode: "guidance" }), input(1, clock, refusal, { executionBarrier }));
+      expect(suppressed.proposal).toEqual({ kind: "none", reason: "suppressed_by_execution_barrier" });
+      expect(suppressed.state.guidanceCount).toBe(0);
+    }
+    for (const mode of ["off", "shadow"] as const) {
+      const suppressed = reduceMonitorPolicy(createMonitorPolicyState({ mode }), input(1, clock, refusal));
+      expect(suppressed.proposal.kind).toBe("none");
+      expect(suppressed.state.guidanceCount).toBe(0);
+    }
+  });
+
   it("requests help only after guidance budget, never because an old candidate aged out", () => {
     let state = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 2, maxGuidanceCount: 1, cooldownWorkUnits: 1 });
     state = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate())).state;

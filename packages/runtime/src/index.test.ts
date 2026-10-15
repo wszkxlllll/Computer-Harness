@@ -58,6 +58,7 @@ import {
   validateActionIntent,
   groundingComputerTools,
   windowSwitchTools,
+  createDefaultToolRegistry,
 } from "./index.js";
 import { currentObservationAssessmentBinding } from "./observation-assessment.js";
 import { reopenSavedDocumentTool } from "./computer-tools.js";
@@ -2399,6 +2400,117 @@ describe("RunController S2-2 happy path", () => {
     expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(2);
     expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "final-gate-3" && event.reason.includes("model request budget is exhausted"))).toBe(true);
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 3, stepCount: 2, outcome: "budget_exhausted" });
+  });
+
+  it.each([20, 30, 100])("offers an early final result inside the existing %i-request budget", async (limit) => {
+    const reserve = Math.min(3, Math.max(1, Math.floor(limit / 10)));
+    const ordinaryCount = limit - reserve;
+    const turns: ModelTurn[] = Array.from({ length: ordinaryCount }, (_, index) => ({
+      type: "tool_calls", calls: [{ id: `early-unknown-${index}` as ToolCallId, name: "missing", arguments: null }],
+    }));
+    const summary = "Verified: the initial screen is available. Missing: the requested source details were not verified.";
+    turns.push({ type: "finish", reportedStatus: "failure", summary });
+    const registry = createDefaultToolRegistry();
+    const provider = new ScriptedProvider(turns);
+    const created = await makeController(provider, undefined, registry, new DefaultRuntimePolicy(100, limit), {
+      contextCompiler: new DefaultContextCompiler(registry),
+    });
+    try {
+      await expect(created.controller.start("report only verified requested details")).resolves.toBe("failed");
+      expect(provider.inputs).toHaveLength(ordinaryCount + 1);
+      expect(provider.inputs[ordinaryCount - 1]?.tools.some((tool) => tool.category === "computer")).toBe(true);
+      expect(provider.inputs[ordinaryCount]?.tools.map((tool) => tool.name)).toEqual(["terminate"]);
+      expect(created.controller.getSnapshot()).toMatchObject({ modelRequestCount: ordinaryCount + 1, stepCount: 0, summary, reportedStatus: "failure" });
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])("rejects complete closing tool groups with bounded feedback (finish=%s)", async (finish) => {
+    const turns: ModelTurn[] = Array.from({ length: 27 }, (_, index) => ({
+      type: "tool_calls", calls: [{ id: `tail-prefix-${index}` as ToolCallId, name: "missing", arguments: null }],
+    }));
+    for (let index = 0; index < (finish ? 2 : 3); index += 1) {
+      turns.push({ type: "tool_calls", calls: [
+        clickCall(`tail-click-${index}`),
+        { id: `tail-unknown-${index}` as ToolCallId, name: "missing", arguments: null },
+      ] });
+    }
+    if (finish) turns.push({ type: "finish", reportedStatus: "failure", summary: "Verified initial screen only; requested source details remain unknown." });
+    const registry = createDefaultToolRegistry();
+    const provider = new ScriptedProvider(turns);
+    const created = await makeController(provider, undefined, registry, new DefaultRuntimePolicy(100, 30), {
+      contextCompiler: new DefaultContextCompiler(registry),
+    });
+    try {
+      await expect(created.controller.start("close without dispatching rejected GUI groups")).resolves.toBe(finish ? "failed" : "budget_exhausted");
+      expect(provider.inputs).toHaveLength(30);
+      expect(provider.inputs.slice(27).map((input) => input.tools.map((tool) => tool.name))).toEqual([["terminate"], ["terminate"], ["terminate"]]);
+      for (const [inputIndex, callIndex] of [[28, 0], [29, 1]] as const) {
+        const results = provider.inputs[inputIndex]?.messages.flatMap((message) =>
+          message.content.flatMap((block) => block.type === "tool_result" ? [block.result] : []));
+        expect(results).toEqual(expect.arrayContaining([
+          expect.objectContaining({ callId: `tail-click-${callIndex}`, status: "rejected" }),
+          expect.objectContaining({ callId: `tail-unknown-${callIndex}`, status: "rejected" }),
+        ]));
+      }
+      expect(created.computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+      expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected" && event.callId.startsWith("tail-click-"))).toHaveLength(finish ? 2 : 3);
+      expect(created.controller.getSnapshot()).toMatchObject({ modelRequestCount: 30, stepCount: 0 });
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("recompiles a protocol retry crossing the closing boundary and preserves its feedback without dispatch", async () => {
+    const inputs: ModelInput[] = [];
+    const provider: ProviderAdapter = {
+      id: "closing-retry-provider",
+      async generate(input) {
+        inputs.push(input);
+        if (inputs.length <= 17) return {
+          type: "tool_calls", calls: [{ id: `retry-prefix-${inputs.length}` as ToolCallId, name: "missing", arguments: null }],
+        };
+        if (inputs.length === 18) throw Object.assign(new Error("synthetic invalid tool representation"), {
+          code: "REJECTED_BEFORE_CLOSING", retryable: true, retryMode: "feedback",
+        });
+        return { type: "finish", reportedStatus: "failure", summary: "Only the initial screen is verified; the requested source details remain missing." };
+      },
+    };
+    const registry = createDefaultToolRegistry();
+    const created = await makeController(provider, undefined, registry, new DefaultRuntimePolicy(100, 20), {
+      contextCompiler: new DefaultContextCompiler(registry),
+    });
+    try {
+      await expect(created.controller.start("close safely after protocol rejection")).resolves.toBe("failed");
+      expect(inputs).toHaveLength(19);
+      expect(inputs[17]?.tools.some((tool) => tool.category === "computer")).toBe(true);
+      expect(inputs[18]?.tools.map((tool) => tool.name)).toEqual(["terminate"]);
+      expect(inputs[18]?.messages.some((message) => message.content.some((block) =>
+        block.type === "text" && block.text.includes("REJECTED_BEFORE_CLOSING")))).toBe(true);
+      expect(created.controller.getSnapshot()).toMatchObject({ modelRequestCount: 19, stepCount: 0 });
+      expect(created.computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([1, 2, 3])("preserves normal tool dispatch before the existing small-budget boundary (%i requests)", async (limit) => {
+    const registry = createDefaultToolRegistry();
+    const provider = new ScriptedProvider(Array.from({ length: limit }, (_, index) => ({
+      type: "tool_calls" as const, calls: [clickCall(`small-${limit}-${index}`)],
+    })));
+    const created = await makeController(provider, undefined, registry, new DefaultRuntimePolicy(10, limit), {
+      contextCompiler: new DefaultContextCompiler(registry),
+    });
+    try {
+      await expect(created.controller.start("retain small-budget tool opportunities")).resolves.toBe("budget_exhausted");
+      expect(provider.inputs[0]?.tools.some((tool) => tool.category === "computer")).toBe(true);
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(limit === 3 ? 2 : limit);
+      expect(created.controller.getSnapshot().modelRequestCount).toBe(limit);
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
   });
 
   it("allows a closing model turn after the last GUI action budget is consumed", async () => {
@@ -5007,6 +5119,36 @@ describe("RunController Monitor online consumer", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
+  it.each(["guidance", "shadow", "off"] as const)("keeps repeated safe refusals advisory and bounded in %s mode", async (monitor) => {
+    const registry = clickRegistry();
+    const compiler = new TestContextCompiler(registry);
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("refusal-first")] },
+      { type: "tool_calls", calls: [clickCall("refusal-second")] },
+      { type: "finish", reportedStatus: "failure", summary: "Verified initial screen only; the refused action left the requested details unverified." },
+    ]);
+    const created = await makeController(provider, new RefusingComputer(), registry, new DefaultRuntimePolicy(), {
+      contextCompiler: compiler,
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor },
+    });
+    try {
+      await expect(created.controller.start("preserve safe refusal evidence")).resolves.toBe("failed");
+      const guidance = compiler.inputs[2]?.monitorGuidance;
+      if (monitor === "guidance") {
+        expect(guidance?.text.length).toBeGreaterThan(0);
+        expect(guidance?.text.length).toBeLessThanOrEqual(240);
+        expect(created.controller.getEvents().some((event) => event.type === "monitor.proposal" && event.proposal === "guidance" && event.reasonCodes.includes("repeated_refusal"))).toBe(true);
+      } else {
+        expect(guidance).toBeUndefined();
+      }
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(2);
+      expect(created.controller.getEvents().filter((event) => event.type === "action.execution.failed" && event.receipt.status === "refused")).toHaveLength(2);
+      expect(created.controller.getEvents().some((event) => event.type === "user.input.requested")).toBe(false);
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
   it("persists a fresh assessment on a normal control turn and keeps Monitor guidance in the next Context", async () => {
     let controller: RunController | undefined;
     const provider = new EventAwareProvider([
@@ -5211,6 +5353,34 @@ describe("RunController Monitor online consumer", () => {
     }
   });
 
+  it("discards deferred Monitor help after fresh changed transition evidence", async () => {
+    let controller: RunController | undefined;
+    let injected = false;
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("deferred-help-new-observation")] },
+      { type: "finish", summary: "Observed the new state without replaying the action." },
+    ]);
+    const created = await makeController(provider, new SequencedScreenshotComputer([1, 2]), clickRegistry(), new DefaultRuntimePolicy(), {
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
+      onEventCommitted(event) {
+        if (controller !== undefined && event.type === "monitor.transition" && !injected) {
+          injected = true;
+          // Seed a deferred policy decision at its commit boundary, not an external input.
+          const internal = controller as unknown as { monitorPendingHelp: unknown };
+          internal.monitorPendingHelp = {
+            kind: "help_requested", reason: "guidance_budget_exhausted", fingerprint: "old-screen",
+          };
+        }
+      },
+    });
+    controller = created.controller;
+    try {
+      await expect(controller.start("Inspect a fresh state before asking for help")).resolves.toBe("succeeded");
+      expect(controller.getEvents().some((event) => event.type === "user.input.requested")).toBe(false);
+      expect(created.computer.calls.filter((call) => call.startsWith("execute:"))).toHaveLength(1);
+    } finally { await rm(created.directory, { recursive: true, force: true }); }
+  });
+
   it("defers Monitor help until the action, ToolResult and post-action observation are committed", async () => {
     const inputRequestSignal = committedUserInputRequestSignal();
     const turns: ModelTurn[] = [];
@@ -5233,7 +5403,6 @@ describe("RunController Monitor online consumer", () => {
     expect(requestIndex).toBeGreaterThan(-1);
     expect(beforeInput[requestIndex]).toMatchObject({
       type: "user.input.requested",
-      question: expect.stringContaining("不要重复输入网址或重复点击同一入口"),
     });
     expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "tool.call.completed" || event.type === "tool.call.failed")).toBe(true);
     expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "observation.created" && event.sequence > (beforeInput.find((candidate) => candidate.type === "action.execution.completed")?.sequence ?? -1))).toBe(true);

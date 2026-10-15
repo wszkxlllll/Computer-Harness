@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
-import { FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
+import { DeepseekFlashAdapter, FetchDeepseekHttpClient, FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
 import { Qwen38FlashAdapter } from "@computer-harness/provider-qwen";
 import type { ProviderAdapter } from "@computer-harness/runtime";
-import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
-import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type ProviderFactory, type ProviderFactoryOptions } from "./config.js";
+import { RecordingDeepseekHttpClient, RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
+import { DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type ProviderFactory, type ProviderFactoryOptions } from "./config.js";
 
 export class ProviderConfigurationError extends Error {
   public readonly code = "PROVIDER_CREDENTIALS_MISSING";
@@ -17,11 +17,12 @@ export class ProviderConfigurationError extends Error {
 /** Pure preflight shared by Run allocation and the Provider boundary. */
 export function assertBuiltInProviderCredentials(options: Pick<ProviderFactoryOptions, "model" | "credentials">): void {
   if (typeof options.model !== "string") return;
+  if (options.model !== "glm-5.3-flash" && options.model !== "qwen3.8-flash" && options.model !== "deepseek-flash") return;
   const key = options.model === "glm-5.3-flash"
     ? options.credentials.glmApiKey
     : options.model === "qwen3.8-flash"
       ? options.credentials.qwenApiKey
-      : undefined;
+      : options.credentials.deepseekApiKey;
   if (key === undefined || key.trim().length === 0) throw new ProviderConfigurationError();
 }
 
@@ -45,7 +46,9 @@ export const createProvider: ProviderFactory = (options: ProviderFactoryOptions)
     throw new Error(`external Provider '${options.model.id}' requires an injected createProvider factory`);
   }
   if (options.model === "qwen3.8-flash") return createQwenProvider(options);
-  return createGlmProvider(options);
+  if (options.model === "deepseek-flash") return createDeepseekProvider(options);
+  if (options.model === "glm-5.3-flash") return createGlmProvider(options);
+  throw new Error(`unsupported Provider model '${options.model}'`);
 };
 
 function createQwenProvider(options: ProviderFactoryOptions): ProviderAdapter {
@@ -84,5 +87,24 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
       new FetchGlmHttpClient({ requestTimeoutMs: options.config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS }),
     ),
     ...(options.config.glmEndpoint === undefined ? {} : { endpoint: options.config.glmEndpoint }),
+  });
+}
+
+function createDeepseekProvider(options: ProviderFactoryOptions): ProviderAdapter {
+  validateDeepseekRequestTimeoutMs(options.config.deepseekRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(options.config.deepseekMaxOutputTokens);
+  const apiKey = options.credentials.deepseekApiKey;
+  if (apiKey === undefined || apiKey.trim().length === 0) {
+    throw new Error("DEEPSEEK_API_KEY is required for deepseek-flash");
+  }
+  return new DeepseekFlashAdapter({
+    apiKey,
+    assetReader: options.assetReader,
+    httpClient: options.httpClients?.deepseek ?? new RecordingDeepseekHttpClient(
+      resolve(options.outputDir, "provider-exchanges.jsonl"),
+      new FetchDeepseekHttpClient({ requestTimeoutMs: options.config.deepseekRequestTimeoutMs ?? DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS }),
+    ),
+    ...(options.config.deepseekEndpoint === undefined ? {} : { endpoint: options.config.deepseekEndpoint }),
+    ...(options.config.deepseekMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.deepseekMaxOutputTokens }),
   });
 }

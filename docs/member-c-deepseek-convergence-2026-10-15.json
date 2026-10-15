@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-15",
+  "scope": "Two Windows M01 DeepSeek Flash runs and their local source/convergence repairs; publication of existing evidence only",
+  "businessAcceptance": "Neither run delivered the required final model checklist",
+  "configuration": {
+    "model": "deepseek-flash", "thinking": "disabled", "planning": true,
+    "memory": "facts", "memoryRetrieval": "lexical", "batching": "same-control-input-v1",
+    "monitor": "guidance", "grounding": "hybrid-catalog-v1", "delivery": "foreground",
+    "riskGuard": "layered", "riskModel": "off", "windowSwitch": "off", "windowHandoff": "off",
+    "maxModelRequests": 100, "maxSteps": 100, "hardTimeoutMs": 1200000,
+    "requestTimeoutMs": 90000, "maxOutputTokens": 4096,
+    "contextMaxInputTokens": 24000, "contextMaxWireInputTokens": 30000,
+    "sourceLinkedFinish": "off: source-only replacement does not retain the full factual checklist",
+    "approvalScope": "Existing M01 public-query approval only; deny, user-input and unknown-side-effect boundaries retained",
+    "productFeatureDefaultsChanged": false
+  },
+  "runs": [
+    {
+      "runId": "d01-convergence-1792033550852-74f5633b-6c87-472a-bd9b-ccfaf5198621",
+      "software": "Existing Windows candidate with URL/navigation/closing fixes, before final Monitor lifecycle correction",
+      "runtimeOutcome": "cancelled", "modelRequests": 9, "completedActions": 7,
+      "providerErrors": 0, "invalidReferenceRejections": 1, "approvals": 0,
+      "acceptedUsage": {"inputTokens":159838,"outputTokens":2091,"totalTokens":161929},
+      "modelDeliveredFinal": false, "cost": "unknown", "multiGuiBatchProposals": 0,
+      "stopReason": "A wrong coordinate click reached the department honor page. Monitor queued premature help and retained it after a fresh observation; host cancelled at user-input boundary.",
+      "guidanceInContext": true, "cleanupConfirmed": true, "daemonStopExitCode": 0
+    },
+    {
+      "runId": "d01-post-monitor-1792034704809-e02c055f-33cf-4f1a-a988-ab5a98ab6e95",
+      "software": "Same existing Windows candidate after final Monitor lifecycle correction",
+      "runtimeOutcome": "failed", "modelRequests": 99, "http200Responses": 99,
+      "productionRequestsWithThinkingDisabled": 99, "durationSeconds":465.649,
+      "completedActions":79,"completedWaits":9,"refusedActions":7,
+      "refusalCodes":{"DOM_CLICK_BBOX_MISMATCH":3,"BROWSER_CHROME_FOCUS_UNCONFIRMED":2,"DOM_INPUT_FOCUS_MISMATCH":2},
+      "approvedScopeRequests":6,
+      "acceptedUsage":{"inputTokens":1988718,"outputTokens":29599,"totalTokens":2018317},
+      "usageExcludesRejectedProviderResponses":true,
+      "modelDeliveredFinal":false,"cost":"unknown","multiGuiBatchProposals":0,
+      "monitor":{"guidanceProposals":14,"helpProposals":1,"userInputRequests":0},
+      "closingRequests":[{"request":98,"offeredToolCount":1},{"request":99,"offeredToolCount":1}],
+      "stopReason":"Both closing requests selected an unavailable tool; the one bounded feedback retry did not correct it. DEEPSEEK_UNAVAILABLE_TOOL retry limit reached, not request-budget exhaustion or HTTP timeout.",
+      "observedRequiredPages":["https://www.pumch.cn/news_visitinfo.html","https://www.pumch.cn/detail/12497.html","https://www.pumch.cn/nosocomial.html"],
+      "finalObservedPage":"https://www.pumch.cn/nosocomial.html",
+      "memoryIsNotFinalDeliveryOrIndependentTruth":true,
+      "cleanupConfirmed":true,"daemonStopExitCode":0
+    }
+  ],
+  "recordedVerification": {
+    "sourceUrlRepair":{"windowsBuildPassed":true,"focusedPassed":35,"notSelected":520,"realManagedEdgeSmokePassed":true,"modelCalls":0},
+    "initialConvergenceRepair":{"windowsRootAndSpikeBuildPassed":true,"focusedPassed":66,"notSelected":589,"files":4},
+    "safeNavigationSmoke":{"addressBarTypeRemainsRefused":true,"noUnverifiedTextSent":true,"observedDomLinkActuallyNavigated":true,"modelCalls":0},
+    "closingSmoke":{"kind":"scripted Provider with real Windows Computer, not a business-model run","decisionBudget":20,"terminateOnlyRequests":[19,20],"rejectedClosingCalls":2,"clicksDispatched":0,"outcome":"succeeded"},
+    "finalMonitorCorrection":{"firstAttemptFailedTests":3,"finalWindowsBuildPassed":true,"finalFocusedPassed":42,"notSelected":164,"files":2,"existingRealTraceSemanticReplayPassed":true},
+    "countsOverlapAndMustNotBeAdded":true,"fullSuite":false,"macosRealDeviceAcceptance":false
+  },
+  "publication": {"credentialsPrivateConfigurationRawTracesProviderExchangesAndOperatorDesktopExcluded":true,"newTestsOrModelRunsDuringPublication":false,"byteLevelChecks":false,"merge":false},
+  "remainingBlockers":["Model still revisits recorded sources and may regress bookkeeping state", "Model can violate a terminate-only tool set after bounded feedback", "No complete M01 checklist or full business acceptance"]
+}

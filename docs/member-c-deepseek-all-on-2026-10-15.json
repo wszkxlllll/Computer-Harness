@@ -1,0 +1,759 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-15",
+  "sourceCommit": "d973e12032a472d3e7a70cbacdc2f9fd1ef3c83c",
+  "checkoutAtPreparation": "112de7f26e8eb2631214a617fc8fd720364a8794",
+  "title": "Planning、Memory、Batching三项开启的DeepSeek Windows三轮实跑",
+  "scope": "用户明确三轮后提交PR30；原M01 Goal、新Run、新ephemeral浏览器及Run内独立Plan/Memory stores；无答案注入",
+  "actualConfigurationEvidence": {
+    "callerProjection": "每轮运行前从传入生产app.createRun的runtimeConfig对象生成launch-public.json，只移除本机output/runId/socket/screenshot路径；公开三份原参数投影",
+    "productionReport": "productionSummary来自生产RunHandle.report，不把调用方声明单独当作实际使用证明",
+    "httpToolSupply": "firstHttpRequestOfferedTools来自生产Recorder的真实首请求；Planning/Memory工具已提供",
+    "committedConsumerEvents": "planningEvidence、memoryEvidence与groupEvidence来自真实已持久化事件；Memory内容是模型写入，不等于外部真值或有效性证明。不发布原轨迹、隐藏推理或完整Provider exchanges",
+    "privacy": "凭据只在ProviderCredentials边界注入，不序列化；机器路径/PID/HWND/桌面终端图/私有runner不公开",
+    "reproductionLimit": "公开文件是脱敏参数投影而非可直接运行的本机启动器；个人socket/output等宿主字段须由操作者在自己的环境提供，不伪称组长已独立复跑"
+  },
+  "overallResult": {
+    "runtimeSucceededRounds": 3,
+    "businessFullyPassedRounds": 0,
+    "planningActuallyCommittedRounds": 3,
+    "modelMemoryActuallyCommittedRounds": 3,
+    "batchConfiguredRounds": 3,
+    "batchProposalRounds": 0,
+    "batchActuallyCompletedRounds": 0,
+    "planMemoryBatchStable": "not_demonstrated",
+    "reason": "三轮都有真实Planning与Memory提交，但没有多GUI动作Batch提议；交付出诊表URL三轮均拼写错误并返回404，不能用Runtime success代替完整业务成功"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "date": "2026-10-15",
+      "startedAt": "2026-10-14T16:06:09.17Z",
+      "finishedAt": "2026-10-14T16:08:35.852Z",
+      "durationMs": 146682,
+      "productionSummary": {
+        "model": "deepseek-flash",
+        "planning": true,
+        "memory": "facts",
+        "memoryRetrieval": "lexical",
+        "batching": "same-control-input-v1",
+        "grounding": "hybrid-catalog-v1",
+        "windowSwitch": "off",
+        "windowHandoff": "off",
+        "riskGuard": "layered",
+        "riskModel": "off",
+        "maxSteps": 100,
+        "maxModelRequests": 100,
+        "deepseekRequestTimeoutMs": 90000,
+        "deepseekMaxOutputTokens": 4096,
+        "runtimeOutcome": "succeeded",
+        "modelReportedStatus": "success",
+        "modelUsage": {
+          "inputTokens": 673269,
+          "outputTokens": 11152,
+          "totalTokens": 684421
+        },
+        "metrics": {
+          "steps": 27,
+          "modelRequests": 36,
+          "guardEvaluations": 27,
+          "riskModelRequests": 0,
+          "approvalsRequested": 0,
+          "guardDecisions": {
+            "allow": 27
+          },
+          "eventCount": 331,
+          "invalidToolCalls": 1,
+          "rejectedToolCalls": 1,
+          "budgetRejectedToolCalls": 0,
+          "budgetRuntimeErrors": 0,
+          "argumentRejectedToolCalls": 1,
+          "toolExecutionFailed": 0,
+          "windowHandoffsRequested": 0,
+          "windowHandoffsCompleted": 0,
+          "windowSwitch": {
+            "proposed": 0,
+            "actionsStarted": 0,
+            "completed": 0,
+            "refused": 0,
+            "failed": 0,
+            "cancelled": 0
+          },
+          "providerFailed": 2,
+          "runtimeErrors": 0,
+          "providerErrors": [
+            {
+              "category": "provider",
+              "code": "DEEPSEEK_INVALID_TOOL_CALL",
+              "retryable": true,
+              "message": "DeepSeek action effect is invalid; no tool was executed; retrying model request 1/1"
+            },
+            {
+              "category": "provider",
+              "code": "DEEPSEEK_INVALID_TOOL_CALL",
+              "retryable": true,
+              "message": "DeepSeek control calls cannot be mixed with other tool calls; no tool was executed; retrying model request 1/1"
+            }
+          ],
+          "monitorTransitions": {}
+        }
+      },
+      "firstHttpRequestOfferedTools": [
+        "click",
+        "type",
+        "keypress",
+        "hotkey",
+        "scroll",
+        "drag",
+        "wait",
+        "terminate",
+        "interact",
+        "click_element",
+        "select_option",
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get",
+        "memory_get",
+        "memory_write_fact",
+        "memory_mark_fact_needs_check",
+        "memory_search"
+      ],
+      "httpStatuses": {
+        "200": 36
+      },
+      "modelCallsByTool": {
+        "task_create": 2,
+        "click_element": 19,
+        "memory_write_fact": 5,
+        "task_update": 1,
+        "scroll": 4,
+        "wait": 2,
+        "click": 2,
+        "memory_get": 2
+      },
+      "planningMutationCount": 3,
+      "planningOperations": {
+        "created": 2,
+        "updated": 1
+      },
+      "modelMemoryMutationCount": 4,
+      "modelMemoryOperations": {
+        "upsert_fact": 4
+      },
+      "lifecycleMemoryMutationCount": 0,
+      "batchProposalTurns": 0,
+      "batchAllReceiptsCompletedTurns": 0,
+      "planningMemoryComputerWriteGroups": 0,
+      "planningMemoryBatchAllCompletedGroups": 0,
+      "groupEvidence": [],
+      "receiptCounts": {
+        "completed": 27
+      },
+      "receiptFailureCodes": {},
+      "modelSummary": "已完成。清单如下（均为 pumch.cn 官方公开页；观测时间 2026-10-14T16:08:19.051Z）。\n\n一、内分泌科（从 https://www.pumch.cn/patient.html 患者版进入科室导航）\n• 科室页：https://www.pumch.cn/department_neifmk.html；科室导航列表页：https://www.pumch.cn/department.html\n• 科室位置页：https://www.pumch.cn/detail/12497.html\n  - 该页发布时间：2017.12.09（来源：本站原创）\n  - 记录到的位置（按该页原文）：\n    · 内分泌科门诊：门诊楼5层\n    · 内分泌科特需门诊：门诊楼5层\n    · 内分泌科国际门诊：国际部门诊3层\n    · 内分泌科一病房：老楼11楼2层；内分泌科二病房：老楼11楼3层\n    · 老年医学科病房（包含内分泌科床位）：老楼6楼2层\n  - 说明：该页只写到“门诊楼/国际部门诊”楼层，未区分东单、西单院区。因此“各位置所属院区”官方页面未明确——未明确。\n\n二、两院区地址（来源：https://www.pumch.cn/nosocomial.html 医院位置及服务时间页，就医指南栏目）\n• 东单院区：北京市东城区帅府园1号\n• 西单院区：北京市西城区辟才胡同7号\n（该页为医院整体布局说明，未把上述内分泌科各门诊位置对应到具体院区，故“院区↔科室门诊”的对应关系记为：未明确。）\n\n三、从患者版到公开“门诊出诊表（新）”的路径与 URL\n• 路径：患者版 https://www.pumch.cn/patient.html → 首页/导航“就医指南”栏目中的“门诊出诊表”入口 → 打开“门诊出诊表（新）”\n• 到达页面 URL：https://www.pumch.cn/news_visitiinfo.html\n• 该页面包屑（页面内“您现在的位置”）：首页 > 就医指南 > 门诊出诊表（新）\n（该页含“门诊出诊表 / 就医须知 / 医院位置 / 院内导航 / 感谢信”入口及“出诊信息查询”表单；此为到达页面本身的观测。）\n\n未找到/未明确项：①各门诊位置与东单、西单院区的对应关系（官方页未明确）；②“门诊出诊表（新）”页面上未显示单独标注的发布时间，故未找到其发布时间。全程仅以只读方式浏览官方公开页面，未登录、未预约/办理/提交、未输入任何个人信息。",
+      "cleanupConfirmed": true,
+      "cost": null,
+      "costStatus": "unknown",
+      "formalScoring": "not_run",
+      "planningMemoryLocalGroups": [],
+      "planningMemoryLocalBothWritesCommitted": 0,
+      "planningEvidence": [
+        {
+          "eventSequence": 9,
+          "type": "planning.task.updated",
+          "tool": "task_create",
+          "operation": "created",
+          "task": {
+            "id": "t1",
+            "subject": "定位内分泌科页面并记录科室位置与发布时间",
+            "status": "pending"
+          }
+        },
+        {
+          "eventSequence": 66,
+          "type": "planning.task.updated",
+          "tool": "task_update",
+          "operation": "updated",
+          "task": {
+            "id": "t1",
+            "subject": "定位内分泌科页面并记录科室位置与发布时间",
+            "status": "completed"
+          }
+        },
+        {
+          "eventSequence": 68,
+          "type": "planning.task.updated",
+          "tool": "task_create",
+          "operation": "created",
+          "task": {
+            "id": "t2",
+            "subject": "记录两院区地址并定位“门诊出诊表（新）”路径",
+            "status": "pending"
+          }
+        }
+      ],
+      "memoryEvidence": [
+        {
+          "eventSequence": 58,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m1",
+            "key": "内分泌科科室位置页信息",
+            "value": "URL: https://www.pumch.cn/detail/12497.html (科室位置页，从/department_neifmk.html进入)。发布时间：2017.12.09，来源：本站原创。内容：内分泌科门诊：门诊楼5层；内分泌科特需门诊：门诊楼5层；内分泌科国际门诊：国际部门诊3层；内分泌科一病房：老楼11楼2层；内分泌科二病房：老楼11楼3层；老年医学科病房（包含内分泌科床位）：老楼6楼2层。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 60,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m2",
+            "key": "内分泌科页面URL",
+            "value": "内分泌科科室页：https://www.pumch.cn/department_neifmk.html；科室导航列表页：https://www.pumch.cn/department.html；患者版入口：https://www.pumch.cn/patient.html",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 188,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m3",
+            "key": "医院位置及服务时间页-两院区地址与来源",
+            "value": "东单院区地址：北京市东城区帅府园1号；西单院区地址：北京市西城区辟才胡同7号。来源：https://www.pumch.cn/nosocomial.html（医院位置及服务时间页，就医指南栏目）。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 325,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m4",
+            "key": "门诊出诊表（新）路径与URL",
+            "value": "路径：患者版 https://www.pumch.cn/patient.html → 顶部导航/首页“就医指南”栏目“门诊出诊表”入口的“门诊出诊表（新）”链接 → https://www.pumch.cn/news_visitiinfo.html（面包屑：您现在的位置：首页 > 就医指南 > 门诊出诊表（新））。",
+            "retentionClass": "stable"
+          }
+        }
+      ],
+      "nativeResponseCount": 34,
+      "businessReview": {
+        "businessOutcome": "not_fully_passed_required_schedule_url",
+        "modelChecklistDelivered": true,
+        "fullyAccepted": false,
+        "locationAndDate": "Reported ordinary5/special5/international3 and 2017.12.09, matching the official location page",
+        "locationSource": "https://www.pumch.cn/detail/12497.html",
+        "claimedScheduleUrl": "https://www.pumch.cn/news_visitiinfo.html",
+        "claimedScheduleHttpStatus": 404,
+        "actualFinalVisibleUrl": "https://www.pumch.cn/news_visitinfo.html",
+        "newScheduleVisibleInFinalScreenshot": true,
+        "correctScheduleSource": "https://www.pumch.cn/news_visitinfo.html",
+        "dongdanAddress": "北京市东城区帅府园1号",
+        "xidanBodyAddress": "北京市西城区辟才胡同7号",
+        "xidanFooterAddress": "北京市西城区大木仓胡同41号",
+        "xidanBodySource": "https://www.pumch.cn/Article/Index/detail.html?id=12980&dir_name=patient&tpl_file=register_detail",
+        "addressBoundary": "Official Xidan panel and shared footer contain different address strings; 辟才胡同7号 is supported by the panel, not fabricated",
+        "roundSpecificIssue": "Actual new schedule reached, but final delivered URL has extra i and returns404",
+        "formalScoring": "not_run",
+        "externalReviewNotModelAnswerInjection": true
+      },
+      "actualConfigFile": "member-c-deepseek-all-on-2026-10-15/round-1-config.json",
+      "finalPageImage": "member-c-deepseek-all-on-2026-10-15/round-1-final-page.png",
+      "daemonStopExitCode": 0,
+      "daemonExited": true
+    },
+    {
+      "round": 2,
+      "date": "2026-10-15",
+      "startedAt": "2026-10-14T16:08:49.875Z",
+      "finishedAt": "2026-10-14T16:10:55.958Z",
+      "durationMs": 126083,
+      "productionSummary": {
+        "model": "deepseek-flash",
+        "planning": true,
+        "memory": "facts",
+        "memoryRetrieval": "lexical",
+        "batching": "same-control-input-v1",
+        "grounding": "hybrid-catalog-v1",
+        "windowSwitch": "off",
+        "windowHandoff": "off",
+        "riskGuard": "layered",
+        "riskModel": "off",
+        "maxSteps": 100,
+        "maxModelRequests": 100,
+        "deepseekRequestTimeoutMs": 90000,
+        "deepseekMaxOutputTokens": 4096,
+        "runtimeOutcome": "succeeded",
+        "modelReportedStatus": "success",
+        "modelUsage": {
+          "inputTokens": 724120,
+          "outputTokens": 12706,
+          "totalTokens": 736826
+        },
+        "metrics": {
+          "steps": 28,
+          "modelRequests": 37,
+          "guardEvaluations": 28,
+          "riskModelRequests": 0,
+          "approvalsRequested": 0,
+          "guardDecisions": {
+            "allow": 28
+          },
+          "eventCount": 339,
+          "invalidToolCalls": 7,
+          "rejectedToolCalls": 7,
+          "budgetRejectedToolCalls": 0,
+          "budgetRuntimeErrors": 0,
+          "argumentRejectedToolCalls": 6,
+          "toolExecutionFailed": 1,
+          "windowHandoffsRequested": 0,
+          "windowHandoffsCompleted": 0,
+          "windowSwitch": {
+            "proposed": 0,
+            "actionsStarted": 0,
+            "completed": 0,
+            "refused": 0,
+            "failed": 0,
+            "cancelled": 0
+          },
+          "providerFailed": 1,
+          "runtimeErrors": 0,
+          "providerErrors": [
+            {
+              "category": "provider",
+              "code": "DEEPSEEK_UNAVAILABLE_TOOL",
+              "retryable": true,
+              "message": "DeepSeek selected a tool not offered by this run; no tool was executed; retrying model request 1/1"
+            }
+          ],
+          "monitorTransitions": {}
+        }
+      },
+      "firstHttpRequestOfferedTools": [
+        "click",
+        "type",
+        "keypress",
+        "hotkey",
+        "scroll",
+        "drag",
+        "wait",
+        "terminate",
+        "interact",
+        "click_element",
+        "select_option",
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get",
+        "memory_get",
+        "memory_write_fact",
+        "memory_mark_fact_needs_check",
+        "memory_search"
+      ],
+      "httpStatuses": {
+        "200": 37
+      },
+      "modelCallsByTool": {
+        "task_create": 3,
+        "memory_write_fact": 8,
+        "click_element": 14,
+        "task_update": 1,
+        "scroll": 10,
+        "click": 6
+      },
+      "planningMutationCount": 1,
+      "planningOperations": {
+        "created": 1
+      },
+      "modelMemoryMutationCount": 5,
+      "modelMemoryOperations": {
+        "upsert_fact": 5
+      },
+      "lifecycleMemoryMutationCount": 0,
+      "batchProposalTurns": 0,
+      "batchAllReceiptsCompletedTurns": 0,
+      "planningMemoryComputerWriteGroups": 0,
+      "planningMemoryBatchAllCompletedGroups": 0,
+      "groupEvidence": [],
+      "receiptCounts": {
+        "completed": 28
+      },
+      "receiptFailureCodes": {},
+      "modelSummary": "以下为逐项清单（均为官网公开页面，未登录/未提交任何信息；未调用电话或在线客服）：\n\n【1】科室位置页（内分泌科）\n- 来源URL：https://www.pumch.cn/detail/12497.html（标题「科室位置」，来源标注：本站原创）\n- 该页发布时间：2017.12.09（页面标注日期）\n- 页内明确记载：\n  · 普通门诊（内分泌科门诊）：门诊楼5层\n  · 特需门诊（内分泌科特需门诊）：门诊楼5层\n  · 国际门诊（内分泌科国际门诊）：国际部门诊3层\n- 关于院区：该页仅给出门诊楼/国际部门诊楼层，未标明这三个门诊分别属于东单还是西单院区 → 院区对应关系「未明确」。\n\n【2】官网所列东单、西单两院区地址\n- 来源URL：https://www.pumch.cn/nosocomial.html（「医院位置及服务时间」）\n- 东单院区：北京市东城区帅府园一号，100730\n- 西单院区：北京市西城区大木仓胡同41号，100032\n- 同页另有文字「西单院区地址：北京市西城区辟才胡同7号」（西单院区国际医疗部所在，工作日8:00-19:00）\n- 说明：按任务要求，院区地址不能作为“内分泌科在该院区分设门诊”的证据；页面未把内分泌科门诊与任一院区对应，故该对应关系「未明确」。\n\n【3】从患者版到公开「门诊出诊表（新）」的路径与URL\n- URL：https://www.pumch.cn/visitiinfo.html\n- 路径：患者版 https://www.pumch.cn/patient.html → 顶部导航/页面入口「就医指南」 → 「门诊出诊表」\n- 页面内面包屑（当前位置）实测为：首页 > 就医指南 > 门诊出诊表\n- 该页底部提供「出诊信息查询」（按疾病名称/科室名称/医师名称查询）；本次仅查看，未提交任何查询。\n\n补充说明：本次仅访问上述任务列出的官方公开页面，未遇到登录、验证码、实名或提交类边界；来源未提供的信息均照实记为「未找到/未明确」，未作推测。",
+      "cleanupConfirmed": true,
+      "cost": null,
+      "costStatus": "unknown",
+      "formalScoring": "not_run",
+      "planningMemoryLocalGroups": [
+        {
+          "modelResponseSequence": 7,
+          "toolNames": [
+            "task_create",
+            "memory_write_fact"
+          ],
+          "planningWriteCommitted": false,
+          "memoryWriteCommitted": false,
+          "allToolResultsCompleted": false
+        },
+        {
+          "modelResponseSequence": 56,
+          "toolNames": [
+            "memory_write_fact",
+            "task_update",
+            "task_create"
+          ],
+          "planningWriteCommitted": false,
+          "memoryWriteCommitted": true,
+          "allToolResultsCompleted": false
+        },
+        {
+          "modelResponseSequence": 65,
+          "toolNames": [
+            "memory_write_fact",
+            "task_create"
+          ],
+          "planningWriteCommitted": true,
+          "memoryWriteCommitted": true,
+          "allToolResultsCompleted": true
+        }
+      ],
+      "planningMemoryLocalBothWritesCommitted": 1,
+      "planningEvidence": [
+        {
+          "eventSequence": 70,
+          "type": "planning.task.updated",
+          "tool": "task_create",
+          "operation": "created",
+          "task": {
+            "id": "t1",
+            "subject": "查找东单/西单院区地址与“门诊出诊表（新）”路径",
+            "status": "pending"
+          }
+        }
+      ],
+      "memoryEvidence": [
+        {
+          "eventSequence": 60,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m1",
+            "key": "neifenmk_position",
+            "value": "内分泌科科室位置页 URL=https://www.pumch.cn/detail/12497.html ；页面时间为 2017.12.09，来源：本站原创。内容：内分泌科门诊：门诊楼5层；内分泌科特需门诊：门诊楼5层；内分泌科国际门诊：国际部门诊3层；内分泌科一病房：老楼11楼2层；内分泌科二病房：老楼11楼3层；老年医学科病房（包含内分泌科床位）：老楼6楼2层。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 68,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m2",
+            "key": "neifenmk_position_confirmed",
+            "value": "内分泌科科室位置页 https://www.pumch.cn/detail/12497.html（标题“科室位置”，时间2017.12.09，来源：本站原创）明确内容：内分泌科门诊：门诊楼5层；内分泌科特需门诊：门诊楼5层；内分泌科国际门诊：国际部门诊3层。该页未标注上述三个门诊分别属于哪个院区。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 147,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m3",
+            "key": "visitinfo_path",
+            "value": "患者版菜单路径：患者版(https://www.pumch.cn/patient.html) → “就医指南”栏目 → “门诊出诊表”（新）链接 → 打开出诊信息查询页 https://www.pumch.cn/news_visitinfo.html 。该页为科室分类按钮列表，最底部另有超链接“门诊出诊表”。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 332,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m4",
+            "key": "visitiinfo_url_from_patientnav",
+            "value": "公开“门诊出诊表”页 URL = https://www.pumch.cn/visitiinfo.html ；breadcrumb：首页 > 就医指南 > 门诊出诊表。从患者版(https://www.pumch.cn/patient.html)路径：患者版 → 就医指南 → 门诊出诊表。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 334,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m5",
+            "key": "campus_addresses_both_listed",
+            "value": "来源 https://www.pumch.cn/nosocomial.html（医院位置及服务时间）：东单院区 北京市东城区帅府园一号，100730；西单院区 北京市西城区大木仓胡同41号，100032；同页另有“西单院区地址：北京市西城区辟才胡同7号”。",
+            "retentionClass": "stable"
+          }
+        }
+      ],
+      "nativeResponseCount": 36,
+      "businessReview": {
+        "businessOutcome": "not_fully_passed_required_schedule_url",
+        "modelChecklistDelivered": true,
+        "fullyAccepted": false,
+        "locationAndDate": "Reported ordinary5/special5/international3 and 2017.12.09, matching the official location page",
+        "locationSource": "https://www.pumch.cn/detail/12497.html",
+        "claimedScheduleUrl": "https://www.pumch.cn/visitiinfo.html",
+        "claimedScheduleHttpStatus": 404,
+        "actualFinalVisibleUrl": "https://www.pumch.cn/visitinfo.html",
+        "newScheduleVisibleInFinalScreenshot": false,
+        "correctScheduleSource": "https://www.pumch.cn/news_visitinfo.html",
+        "dongdanAddress": "北京市东城区帅府园1号",
+        "xidanBodyAddress": "北京市西城区辟才胡同7号",
+        "xidanFooterAddress": "北京市西城区大木仓胡同41号",
+        "xidanBodySource": "https://www.pumch.cn/Article/Index/detail.html?id=12980&dir_name=patient&tpl_file=register_detail",
+        "addressBoundary": "Official Xidan panel and shared footer contain different address strings; 辟才胡同7号 is supported by the panel, not fabricated",
+        "roundSpecificIssue": "Final screenshot is old visitinfo.html; delivered typo URL returns404, new schedule requirement not proven",
+        "formalScoring": "not_run",
+        "externalReviewNotModelAnswerInjection": true
+      },
+      "actualConfigFile": "member-c-deepseek-all-on-2026-10-15/round-2-config.json",
+      "finalPageImage": "member-c-deepseek-all-on-2026-10-15/round-2-final-page.png",
+      "daemonStopExitCode": 0,
+      "daemonExited": true
+    },
+    {
+      "round": 3,
+      "date": "2026-10-15",
+      "startedAt": "2026-10-14T16:11:05.168Z",
+      "finishedAt": "2026-10-14T16:12:13.478Z",
+      "durationMs": 68310,
+      "productionSummary": {
+        "model": "deepseek-flash",
+        "planning": true,
+        "memory": "facts",
+        "memoryRetrieval": "lexical",
+        "batching": "same-control-input-v1",
+        "grounding": "hybrid-catalog-v1",
+        "windowSwitch": "off",
+        "windowHandoff": "off",
+        "riskGuard": "layered",
+        "riskModel": "off",
+        "maxSteps": 100,
+        "maxModelRequests": 100,
+        "deepseekRequestTimeoutMs": 90000,
+        "deepseekMaxOutputTokens": 4096,
+        "runtimeOutcome": "succeeded",
+        "modelReportedStatus": "success",
+        "modelUsage": {
+          "inputTokens": 412143,
+          "outputTokens": 6142,
+          "totalTokens": 418285
+        },
+        "metrics": {
+          "steps": 16,
+          "modelRequests": 22,
+          "guardEvaluations": 16,
+          "riskModelRequests": 0,
+          "approvalsRequested": 0,
+          "guardDecisions": {
+            "allow": 16
+          },
+          "eventCount": 198,
+          "invalidToolCalls": 0,
+          "rejectedToolCalls": 0,
+          "budgetRejectedToolCalls": 0,
+          "budgetRuntimeErrors": 0,
+          "argumentRejectedToolCalls": 0,
+          "toolExecutionFailed": 0,
+          "windowHandoffsRequested": 0,
+          "windowHandoffsCompleted": 0,
+          "windowSwitch": {
+            "proposed": 0,
+            "actionsStarted": 0,
+            "completed": 0,
+            "refused": 0,
+            "failed": 0,
+            "cancelled": 0
+          },
+          "providerFailed": 0,
+          "runtimeErrors": 0,
+          "providerErrors": [],
+          "monitorTransitions": {}
+        }
+      },
+      "firstHttpRequestOfferedTools": [
+        "click",
+        "type",
+        "keypress",
+        "hotkey",
+        "scroll",
+        "drag",
+        "wait",
+        "terminate",
+        "interact",
+        "click_element",
+        "select_option",
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get",
+        "memory_get",
+        "memory_write_fact",
+        "memory_mark_fact_needs_check",
+        "memory_search"
+      ],
+      "httpStatuses": {
+        "200": 22
+      },
+      "modelCallsByTool": {
+        "task_create": 2,
+        "click_element": 10,
+        "memory_write_fact": 2,
+        "task_update": 1,
+        "click": 4,
+        "scroll": 1,
+        "wait": 1
+      },
+      "planningMutationCount": 3,
+      "planningOperations": {
+        "created": 2,
+        "updated": 1
+      },
+      "modelMemoryMutationCount": 2,
+      "modelMemoryOperations": {
+        "upsert_fact": 2
+      },
+      "lifecycleMemoryMutationCount": 0,
+      "batchProposalTurns": 0,
+      "batchAllReceiptsCompletedTurns": 0,
+      "planningMemoryComputerWriteGroups": 0,
+      "planningMemoryBatchAllCompletedGroups": 0,
+      "groupEvidence": [],
+      "receiptCounts": {
+        "completed": 16
+      },
+      "receiptFailureCodes": {},
+      "modelSummary": "任务完成。以下为官网公开页面所见信息（未登录、未提交任何表单；仅浏览公开页面）。\n\n一、内分泌科“科室位置”页\n来源URL：https://www.pumch.cn/detail/12497.html （页面标注时间：2017.12.09，来源：本站原创）\n- 普通门诊位置：门诊楼 5 层（内分泌科普通门诊）\n- 特需门诊位置：门诊楼 5 层（特需门诊）\n- 国际门诊位置：国际部门诊 3 层\n- 该“科室位置”页面的发布时间：2017.12.09\n\n二、两院区地址（来源：医院位置及服务时间页 https://www.pumch.cn/nosocomial.html ）\n- 东单院区地址：北京市东城区帅府园1号\n- 西单院区地址：北京市西城区辟才胡同7号\n\n三、从患者版到“门诊出诊表（新）”的路径与URL\n路径：患者版首页 https://www.pumch.cn/patient.html → 点击“门诊出诊表”卡片 → 进入就医指南栏目\nURL：https://www.pumch.cn/news_visiitinfo.html （页面面包屑：首页 > 就医指南 > 门诊出诊表（新））\n\n四、关于“未明确”的对应关系\n- 科室位置页仅出现“门诊楼”“国际部门诊”等楼栋/楼层名称，未出现“东单院区”“西单院区”字样，故该科室普通/特需/国际门诊与东单、西单两院区的对应关系：未明确。\n- 上述东单、西单地址来自“医院位置及服务时间”页，属院区地址信息，并非该科室分院门诊的对应证据；两页之间亦无相互指认的链接或说明，故对应关系未明确。\n- 内分泌科“科室位置”页未提供其位置页以外的其他发布/更新时间信息；官网该页未显示除 2017.12.09 之外的时间。\n\n说明：以上均为观察到的官方公开页内容；未找到的信息按“未找到/未明确”如实记录，未作任何推测，未涉及诊断治疗评价，全程未登录、未输入任何证件或验证码、未预约或提交。",
+      "cleanupConfirmed": true,
+      "cost": null,
+      "costStatus": "unknown",
+      "formalScoring": "not_run",
+      "planningMemoryLocalGroups": [],
+      "planningMemoryLocalBothWritesCommitted": 0,
+      "planningEvidence": [
+        {
+          "eventSequence": 9,
+          "type": "planning.task.updated",
+          "tool": "task_create",
+          "operation": "created",
+          "task": {
+            "id": "t1",
+            "subject": "从患者版打开内分泌科科室页",
+            "status": "pending"
+          }
+        },
+        {
+          "eventSequence": 62,
+          "type": "planning.task.updated",
+          "tool": "task_update",
+          "operation": "updated",
+          "task": {
+            "id": "t1",
+            "subject": "从患者版打开内分泌科科室页",
+            "status": "completed"
+          }
+        },
+        {
+          "eventSequence": 67,
+          "type": "planning.task.updated",
+          "tool": "task_create",
+          "operation": "created",
+          "task": {
+            "id": "t2",
+            "subject": "查找东单/西单院区地址与门诊出诊表路径",
+            "status": "pending"
+          }
+        }
+      ],
+      "memoryEvidence": [
+        {
+          "eventSequence": 57,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m1",
+            "key": "内分泌科科室位置页内容",
+            "value": "URL https://www.pumch.cn/detail/12497.html 标题“科室位置”，时间：2017.12.09，来源：本站原创。内容：内分泌科门诊：门诊楼5层；内分泌科特需门诊：门诊楼5层；内分泌科国际门诊：国际部门诊3层；内分泌科一病房：老楼11楼2层；内分泌科二病房：老楼11楼3层；老年医学科病房（包含内分泌科床位）：老楼6楼2层。",
+            "retentionClass": "stable"
+          }
+        },
+        {
+          "eventSequence": 193,
+          "type": "memory.updated",
+          "tool": "memory_write_fact",
+          "operation": "upsert_fact",
+          "fact": {
+            "id": "m2",
+            "key": "院区地址(nosocomial.html)",
+            "value": "官网“医院位置及服务时间”页 https://www.pumch.cn/nosocomial.html ：东单院区地址 北京市东城区帅府园1号；西单院区地址 北京市西城区辟才胡同7号。",
+            "retentionClass": "stable"
+          }
+        }
+      ],
+      "nativeResponseCount": 22,
+      "businessReview": {
+        "businessOutcome": "not_fully_passed_required_schedule_url",
+        "modelChecklistDelivered": true,
+        "fullyAccepted": false,
+        "locationAndDate": "Reported ordinary5/special5/international3 and 2017.12.09, matching the official location page",
+        "locationSource": "https://www.pumch.cn/detail/12497.html",
+        "claimedScheduleUrl": "https://www.pumch.cn/news_visiitinfo.html",
+        "claimedScheduleHttpStatus": 404,
+        "actualFinalVisibleUrl": "https://www.pumch.cn/nosocomial.html",
+        "newScheduleVisibleInFinalScreenshot": false,
+        "correctScheduleSource": "https://www.pumch.cn/news_visitinfo.html",
+        "dongdanAddress": "北京市东城区帅府园1号",
+        "xidanBodyAddress": "北京市西城区辟才胡同7号",
+        "xidanFooterAddress": "北京市西城区大木仓胡同41号",
+        "xidanBodySource": "https://www.pumch.cn/Article/Index/detail.html?id=12980&dir_name=patient&tpl_file=register_detail",
+        "addressBoundary": "Official Xidan panel and shared footer contain different address strings; 辟才胡同7号 is supported by the panel, not fabricated",
+        "roundSpecificIssue": "Final screenshot is Xidan address panel; delivered new-schedule typo URL returns404, reaching the new schedule is not proven by final image",
+        "formalScoring": "not_run",
+        "externalReviewNotModelAnswerInjection": true
+      },
+      "actualConfigFile": "member-c-deepseek-all-on-2026-10-15/round-3-config.json",
+      "finalPageImage": "member-c-deepseek-all-on-2026-10-15/round-3-final-page.png",
+      "daemonStopExitCode": 0,
+      "daemonExited": true
+    }
+  ],
+  "officialAddressBoundary": {
+    "xidanPanelAddress": "北京市西城区辟才胡同7号",
+    "xidanPanelSource": "https://www.pumch.cn/Article/Index/detail.html?id=12980&dir_name=patient&tpl_file=register_detail",
+    "sharedFooterAddress": "北京市西城区大木仓胡同41号",
+    "interpretation": "两者均来自官网不同位置，不把已核实的西单面板地址误报成幻觉；保留源位置区别"
+  },
+  "operationBoundaries": {
+    "formalScoring": "not_run",
+    "cost": "unknown",
+    "productCodeChanges": false,
+    "defaultHostFeaturesChanged": false,
+    "softwareInstallation": false,
+    "byteChecks": false,
+    "extraPublicationTestsOrRuns": "not_performed",
+    "windowsKeptRunning": true,
+    "batchFinal": {
+      "ownedTemporaryScriptsRemoved": true,
+      "windowsKeptRunning": true,
+      "logsAndRunArtifactsKept": true,
+      "byteChecks": "not_performed",
+      "finishedRounds": 3
+    }
+  }
+}

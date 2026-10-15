@@ -708,11 +708,19 @@ export class RunController {
     return budget !== undefined && budget.remaining === 0;
   }
 
+  private closingRequestConsumed(): boolean {
+    const budget = this.requestBudget();
+    // Scale the reserve with the budget, retaining at least the legacy final
+    // request and capping the closing tail at three requests.
+    return budget !== undefined && budget.remaining < Math.min(3, Math.max(1, Math.floor(budget.limit / 10)));
+  }
+
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
     let providerFailureSummary: string | undefined;
     let localRequestPreparation = false;
+    let closingRetryFeedback: { error: unknown; retryCount: number } | undefined;
     try {
       await this.commitEvent({ type: "run.created", goal });
       this.throwIfAborted();
@@ -863,6 +871,10 @@ export class RunController {
             continue;
           }
           let requestContext = context;
+          if (closingRetryFeedback !== undefined) {
+            requestContext = addProviderRetryFeedback(context, closingRetryFeedback.error, closingRetryFeedback.retryCount, MAX_PROVIDER_RETRIES);
+            closingRetryFeedback = undefined;
+          }
           const decisionId = this.idFactory.eventId();
           const prepareProvider = this.provider.prepare?.bind(this.provider);
           const generatePrepared = this.provider.generatePrepared?.bind(this.provider);
@@ -972,6 +984,17 @@ export class RunController {
                 if (outcome === "failed") providerFailureSummary = this.providerFailureProgressSummary();
                 providerFailed = true;
                 break;
+              }
+              const remainingBudget = this.requestBudget();
+              if (requestBudget !== undefined && remainingBudget !== undefined) {
+                const closingRequests = Math.min(3, Math.max(1, Math.floor(remainingBudget.limit / 10)));
+                if (requestBudget.remaining > closingRequests && remainingBudget.remaining <= closingRequests) {
+                  // Retry payload reuse must not carry ordinary GUI tools
+                  // across the closing boundary. Recompile the next request.
+                  if (details.retryMode !== "same_input") closingRetryFeedback = { error, retryCount: nextRetryCount };
+                  decisionInvalidated = true;
+                  break;
+                }
               }
               retryCount = nextRetryCount;
               await waitBeforeProviderRetry(this.abortController.signal, retryCount);
@@ -1161,6 +1184,10 @@ export class RunController {
           if (this.finalRequestConsumed()) {
             outcome = await this.commitRunFinished({ outcome: "budget_exhausted" });
             break;
+          }
+          if (this.closingRequestConsumed()) {
+            await this.commitEvent({ type: "runtime.error", category: "budget", message: "reserved closing requests require a final result with verified findings and missing items, not a user-input request" });
+            continue;
           }
           await this.commitEvent({ type: "user.input.requested", question: turn.question });
           continue;
@@ -2050,6 +2077,10 @@ export class RunController {
     if (this.finalRequestConsumed()) {
       await this.commitEvent({ type: "runtime.error", category: "budget", message: "the final reserved model request was consumed without a valid terminate decision; no returned tool call was executed" });
       for (const call of calls) await this.rejectToolCall(call.id, "model request budget is exhausted; no tool calls can be dispatched");
+      return { correction: false };
+    }
+    if (this.closingRequestConsumed()) {
+      for (const call of calls) await this.rejectToolCall(call.id, "model request budget is reserved for termination; provide verified findings and explicit missing items instead of tool calls");
       return { correction: false };
     }
     const ids = new Set<ToolCallId>();
@@ -3572,6 +3603,12 @@ export class RunController {
         ...(this.snapshot.status === "finished" ? { terminal: true } : {}),
       });
       this.monitorPolicyState = policy.state;
+      // Deferred help belongs to the preceding candidate, not to a later
+      // changed or incomparable screen captured before the tool-turn boundary.
+      if (!progress.output.candidate && progress.output.evidence.some((item) =>
+        item.kind === "visual_transition_changed" || item.kind === "visual_transition_unknown")) {
+        this.monitorPendingHelp = undefined;
+      }
       if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
       const proposalEvent = this.monitorProposalEvent(policy.proposal, progress.output, event.eventId);
       if (proposalEvent === undefined || this.monitorProposalCount >= 64) return;
@@ -3608,7 +3645,7 @@ export class RunController {
     try {
       await this.commitEvent({
         type: "user.input.requested",
-        question: "页面连续多次操作后没有出现可确认的变化，任务已暂停。请检查电脑当前画面后再补充下一步；不要重复输入网址或重复点击同一入口。若页面仍无变化，请说明“停止任务”。",
+        question: "当前操作的观察结果仍需人工确认，任务已暂停。请检查电脑画面后补充下一步；不要盲目重复输入网址或点击同一入口。若不能确认，请说明“停止任务”。",
       });
     } catch (error) {
       // A diagnostic request is best effort.  If its own event cannot be

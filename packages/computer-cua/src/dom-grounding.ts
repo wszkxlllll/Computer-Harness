@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
 import type {
   ComputerSessionId,
   GroundingCatalog,
@@ -44,6 +45,8 @@ export interface DomGroundingRawCandidate {
   readonly inputType?: unknown;
   readonly name?: unknown;
   readonly description?: unknown;
+  /** Resolved HTML anchor destination, not label/ARIA/input text. */
+  readonly href?: unknown;
   readonly frame?: unknown;
   readonly visible?: unknown;
   readonly interactive?: unknown;
@@ -83,6 +86,8 @@ export interface DomGroundingContentRect {
 
 export interface DomGroundingTransportResult {
   readonly candidates: readonly DomGroundingRawCandidate[];
+  /** Exact current-page URL from this collection, never the startup URL. */
+  readonly pageUrl?: unknown;
   readonly complete?: boolean;
   readonly degraded?: boolean;
   readonly tabId?: string;
@@ -244,6 +249,7 @@ export function materializeDomGrounding(
       role,
       ...(name === undefined ? {} : { name }),
       ...(description === undefined ? {} : { description }),
+      ...((candidate.tagName === "a" || candidate.tagName === "A") && role === "link" && isGroundingWebUrl(candidate.href) ? { href: candidate.href } : {}),
       bbox: { ...clipped, coordinateSpace: "physical" },
       ...(state === undefined ? {} : { state }),
       source: "dom",
@@ -268,6 +274,7 @@ export function materializeDomGrounding(
       source: "dom",
       observationId: request.observationId,
       computerSessionId: request.computerSessionId,
+      ...(isGroundingWebUrl(result.pageUrl) ? { pageUrl: result.pageUrl } : {}),
       completeness: result.complete === true && !truncated ? "complete" : "partial",
       degraded: result.degraded === true,
       maxElements,

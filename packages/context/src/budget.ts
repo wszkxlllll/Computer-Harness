@@ -1,15 +1,17 @@
 import type { RuntimeEvent } from "@computer-harness/protocol";
+import type { ObservationId } from "@computer-harness/protocol";
+import { observedPageUrlText } from "./messages.js";
 import { findOldestEvictableHistoryGroup } from "./history.js";
 
-export function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxTokens: number, protectedEvents: readonly RuntimeEvent[] = []): RuntimeEvent[] {
+export function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxTokens: number, protectedEvents: readonly RuntimeEvent[] = [], latestObservationId?: ObservationId): RuntimeEvent[] {
   const protectedSet = new Set(protectedEvents);
   const authoritativeInputs = events.filter((event) => event.type === "user.input.received");
-  if (estimateEventTokens(authoritativeInputs) > maxTokens) {
+  if (estimateEventTokens(authoritativeInputs, latestObservationId) > maxTokens) {
     throw Object.assign(new Error("Authoritative user inputs exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
   }
-  if (estimateEventTokens(events.filter((event) => event.type === "user.input.received" || protectedSet.has(event))) > maxTokens) throw Object.assign(new Error("Authoritative user inputs and latest GUI history exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
+  if (estimateEventTokens(events.filter((event) => event.type === "user.input.received" || protectedSet.has(event)), latestObservationId) > maxTokens) throw Object.assign(new Error("Authoritative user inputs and latest GUI history exceed maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
   let retained = [...events];
-  while (estimateEventTokens(retained) > maxTokens) {
+  while (estimateEventTokens(retained, latestObservationId) > maxTokens) {
     const group = findOldestEvictableHistoryGroup(retained.filter((event) => !protectedSet.has(event)));
     if (group.length === 0) throw Object.assign(new Error("Context history cannot fit maxInputTokens"), { code: "CONTEXT_INPUT_TOO_LARGE" });
     const discarded = new Set(group);
@@ -19,12 +21,14 @@ export function fitEventsToTokenBudget(events: readonly RuntimeEvent[], maxToken
   }
   return retained;
 }
-export function estimateEventTokens(events: readonly RuntimeEvent[]): number {
-  return Math.ceil(events.reduce((total, event) => total + estimateProjectedEventCharacters(event), 0) / 4);
+export function estimateEventTokens(events: readonly RuntimeEvent[], latestObservationId?: ObservationId): number {
+  return Math.ceil(events.reduce((total, event) => total + estimateProjectedEventCharacters(event, latestObservationId), 0) / 4);
 }
 
 export function isProjectableHistoryEvent(event: RuntimeEvent): boolean {
   switch (event.type) {
+    case "observation.created":
+      return observedPageUrlText(event.observation) !== undefined;
     case "model.response.received":
     case "tool.call.completed":
     case "tool.call.failed":
@@ -36,8 +40,10 @@ export function isProjectableHistoryEvent(event: RuntimeEvent): boolean {
   }
 }
 
-function estimateProjectedEventCharacters(event: RuntimeEvent): number {
+function estimateProjectedEventCharacters(event: RuntimeEvent, latestObservationId?: ObservationId): number {
   switch (event.type) {
+    case "observation.created":
+      return event.observation.id === latestObservationId ? 0 : (observedPageUrlText(event.observation)?.length ?? 0);
     case "model.response.received": {
       const assessmentCharacters = event.turn.observationAssessment === undefined
         ? 0
@@ -58,9 +64,8 @@ function estimateProjectedEventCharacters(event: RuntimeEvent): number {
     case "user.input.received":
       return event.text.length;
     default:
-      // run/control/observation/request/diagnostic events are not serialized
-      // as ModelMessages by the Context compiler. In particular, Trace and
-      // prepared metadata must not consume model history budget.
+      // Other run/control/request/diagnostic events are not serialized as
+      // ModelMessages. Trace and prepared metadata consume no history budget.
       return 0;
   }
 }
