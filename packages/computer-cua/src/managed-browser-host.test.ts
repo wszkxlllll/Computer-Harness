@@ -25,6 +25,60 @@ describe("managed browser host pilot", () => {
       .toContain("/usr/bin/chromium");
   });
 
+  it("captures the current page and distinct resolved destinations for same-label visible HTML links", () => {
+    const morning = syntheticElement("a", { attrs: { href: "morning?day=1%2F2#departures" }, textContent: "Schedule" });
+    const evening = syntheticElement("a", { attrs: { href: "../evening?day=2#departures" }, textContent: "Schedule" });
+    const hidden = syntheticElement("a", { attrs: { href: "/hidden" }, textContent: "Hidden schedule" });
+    const fakeLink = syntheticElement("div", { attrs: { role: "link", href: "https://fake.example/" }, textContent: "https://fake.example/", onclick: () => {}, rect: { x: 10, y: 190, width: 120, height: 24 } });
+    const input = syntheticElement("input", { attrs: { type: "url", value: "https://typed.example/", "aria-label": "https://label.example/" } });
+    const page = new SyntheticDocument([morning, evening, hidden, input, fakeLink]);
+    morning.baseURI = evening.baseURI = "https://timetable.example/base/routes/";
+    const location = { href: "https://timetable.example/start?lang=en#overview" };
+    const context = {
+      document: page,
+      Element: SyntheticElement,
+      URL,
+      getComputedStyle: (element: SyntheticElement) => ({ display: element === hidden ? "none" : "block", visibility: "visible", pointerEvents: "auto" }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1, location },
+    };
+    const first = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation;
+    expect(first.pageUrl).toBe("https://timetable.example/start?lang=en#overview");
+    expect(first.candidates.filter((candidate) => candidate.name === "Schedule").map((candidate) => candidate.href))
+      .toEqual(["https://timetable.example/base/routes/morning?day=1%2F2#departures", "https://timetable.example/base/evening?day=2#departures"]);
+    expect(first.candidates.some((candidate) => candidate.name === "Hidden schedule")).toBe(false);
+    expect(first.candidates.some((candidate) => candidate.name === "https://fake.example/")).toBe(true);
+    expect(first.candidates.filter((candidate) => candidate.href !== undefined)).toHaveLength(2);
+
+    location.href = "https://timetable.example/current?lang=zh#arrivals";
+    const navigated = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, context) as SyntheticEvaluation;
+    expect(navigated.pageUrl).toBe("https://timetable.example/current?lang=zh#arrivals");
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "file:///private/schedule.html",
+    "https://user:password@example.com/schedule",
+    "https://example.com/schedule#access_token=private",
+    "https://example.com/schedule?token=private",
+    "https://example.com/schedule?api_key=private",
+    "https://example.com/schedule?session=private",
+    `https://example.com/${"a".repeat(2048)}`,
+  ])("omits unsafe current-page and anchor URL evidence: %s", (unsafeUrl) => {
+    const link = syntheticElement("a", { attrs: { href: unsafeUrl }, textContent: "Schedule" });
+    const page = new SyntheticDocument([link]);
+    const evaluation = runInNewContext(MANAGED_DOM_EVALUATION_SCRIPT, {
+      document: page,
+      Element: SyntheticElement,
+      URL,
+      getComputedStyle: () => ({ display: "block", visibility: "visible", pointerEvents: "auto" }),
+      window: { innerWidth: 1_000, innerHeight: 800, devicePixelRatio: 1, location: { href: unsafeUrl } },
+    }) as SyntheticEvaluation;
+    expect(evaluation).not.toHaveProperty("pageUrl");
+    expect(evaluation.candidates).toHaveLength(1);
+    expect(evaluation.candidates[0]).toMatchObject({ name: "Schedule", visible: true });
+    expect(evaluation.candidates[0]).not.toHaveProperty("href");
+  });
+
   it("uses bounded accessible names and selected descriptions in a synthetic page", () => {
     const departureLabel = syntheticElement("label", { attrs: { for: "departure-time" }, textContent: "Departure time" });
     const departureOption = syntheticElement("option", { attrs: { value: "08:00" }, textContent: "08:00" });
@@ -1159,6 +1213,7 @@ interface SyntheticCandidate {
 
 interface SyntheticEvaluation {
   readonly candidates: readonly SyntheticCandidate[];
+  readonly pageUrl?: string;
   readonly complete: boolean;
 }
 
@@ -1176,6 +1231,8 @@ class SyntheticElement {
   public readonly isContentEditable: boolean;
   public readonly shadowRoot: undefined;
   public clicked = false;
+  public readonly namespaceURI = "http://www.w3.org/1999/xhtml";
+  public baseURI = "https://fixture.example/";
   private readonly attrs: Readonly<Record<string, string>>;
   private rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
   private readonly usesDefaultRect: boolean;
@@ -1199,6 +1256,12 @@ class SyntheticElement {
 
   public layoutDefaultAt(y: number): void {
     if (this.usesDefaultRect) this.rect = { x: 10, y, width: 120, height: 24 };
+  }
+
+  public get href(): string {
+    const raw = this.getAttribute("href");
+    if (raw === null) return "";
+    try { return new URL(raw, this.baseURI).href; } catch { return raw; }
   }
 
   public contains(element: SyntheticElement): boolean {

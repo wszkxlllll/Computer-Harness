@@ -6,6 +6,7 @@ import type {
   ActionId,
   ComputerSessionId,
   EventId,
+  GroundingElement,
   MemoryState,
   ObservationId,
   RunId,
@@ -52,6 +53,25 @@ function observation(id: string) {
   };
 }
 
+function pageObservation(id: string, pageUrl: string, elements: readonly GroundingElement[] = []) {
+  const frame = observation(id);
+  return {
+    ...frame,
+    grounding: {
+      version: "grounding-catalog-v2" as const,
+      source: "dom" as const,
+      observationId: frame.id,
+      computerSessionId: sessionId,
+      surfaceRef: frame.surfaceRef,
+      completeness: "partial" as const,
+      degraded: false,
+      maxElements: 16,
+      pageUrl,
+      elements,
+    },
+  };
+}
+
 describe("DefaultContextCompiler", () => {
   it("projects first-observed window metadata before same-label alternatives without implying ownership", () => {
     const text = formatWindowSwitchState(undefined, {
@@ -67,7 +87,7 @@ describe("DefaultContextCompiler", () => {
     expect(text?.indexOf("windowRef=new-save")).toBeLessThan(text?.indexOf("windowRef=existing-save") ?? -1);
   });
 
-  it("keeps the system prefix stable while fully budgeting dynamic request guidance and retaining final-only tools", async () => {
+  it("budgets dynamic request guidance and preserves ordinary tools until the closing boundary", async () => {
     const compiler = new DefaultContextCompiler(createDefaultToolRegistry());
     const goal = "complete all requested fields without guessing";
     const compileWithBudget = (remaining: number) => compiler.compile({
@@ -80,7 +100,7 @@ describe("DefaultContextCompiler", () => {
     const constrained = await compileWithBudget(2);
     const final = await compileWithBudget(1);
     expect(constrained.system).toBe(ordinary.system);
-    expect(constrained.messages[1]).toMatchObject({ role: "user", content: [{ type: "text", text: expect.stringContaining("Runtime request budget: Only 2 model requests remain including this one.") }] });
+    expect(constrained.messages.length).toBeGreaterThan(ordinary.messages.length);
     expect(constrained.contextBudget?.estimatedFixedTextTokens).toBe(Math.ceil([
       constrained.system,
       goal,
@@ -91,13 +111,25 @@ describe("DefaultContextCompiler", () => {
       "",
       constrained.messages[1]?.content[0]?.type === "text" ? constrained.messages[1].content[0].text : "",
     ].join("\n").length / 4));
-    const singleComputerCallGuidance = "Return at most one Computer tool call per model turn.";
-    expect(ordinary.system).toContain(singleComputerCallGuidance);
-    expect(final.system).toBe(ordinary.system.replace(` ${singleComputerCallGuidance}`, ""));
-    expect(final.system).not.toContain("GUI batch");
     expect(final.tools.map((tool) => tool.name)).toEqual(["terminate"]);
-    expect(JSON.stringify(final.messages)).toContain("This is the final model request");
-    expect(JSON.stringify(final.messages)).toContain("complete user-facing result text");
+  });
+
+  it("reserves a proportional capped closing tail without taking normal tools from small Runs", async () => {
+    const compiler = new DefaultContextCompiler(createDefaultToolRegistry());
+    for (const limit of [1, 2, 3, 9, 10, 19, 20, 29, 30, 100]) {
+      const reserve = limit < 3 ? 0 : Math.min(3, Math.max(1, Math.floor(limit / 10)));
+      for (const remaining of new Set([limit, reserve + 1, Math.max(1, reserve), 1])) {
+        if (remaining > limit) continue;
+        const input = await compiler.compile({
+          runId, goal: "preserve findings and missing items", recentEvents: [], requestBudget: { remaining, limit },
+        }, new AbortController().signal);
+        if (remaining <= reserve) {
+          expect(input.tools.map((tool) => tool.name), `${limit}/${remaining}`).toEqual(["terminate"]);
+        } else {
+          expect(input.tools.some((tool) => tool.category === "computer"), `${limit}/${remaining}`).toBe(true);
+        }
+      }
+    }
   });
 
   it("projects the registered terminate contract and adds source-linked guidance only when enabled", async () => {
@@ -450,6 +482,91 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ present: true, projected: true, completeness: "partial", candidateElementCount: 1, projectedElementCount: 1 });
     expect(input.contextBudget?.estimatedGroundingTokens).toBeGreaterThan(0);
     expect(input.contextBudget?.groundingIncluded).toBe(true);
+  });
+
+  it("keeps exact destinations attached to same-label links and the page URL attached to the current image", async () => {
+    const pageUrl = "https://Records.Example.test/search?route=A%2FB&date=2026-10-15#results";
+    const firstHref = "https://Records.Example.test/detail/13800138000?variant=A%2FB#first";
+    const secondHref = "https://Records.Example.test/detail/13800138000?variant=A%2Fb#second";
+    const latest = pageObservation("same-label-links", pageUrl, [
+      { elementRef: "destination-a", role: "link", source: "dom", name: "Schedule", href: firstHref },
+      { elementRef: "destination-b", role: "link", source: "dom", name: "Schedule", href: secondHref },
+    ]);
+    const compiled = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId, goal: "Report the selected destination", recentEvents: [event(0, { type: "observation.created", observation: latest })],
+    }, new AbortController().signal);
+    const textBlocks = compiled.messages.flatMap((message) => message.content.flatMap((block) => block.type === "text" ? [block.text] : []));
+    const linkLines = textBlocks.join("\n").split("\n").filter((line) => line.startsWith("- ref=destination-"));
+    expect(linkLines).toHaveLength(2);
+    expect(linkLines[0]).toContain(`ref=destination-a role=link source=dom name="Schedule" href=${JSON.stringify(firstHref)}`);
+    expect(linkLines[0]).not.toContain(secondHref);
+    expect(linkLines[1]).toContain(`ref=destination-b role=link source=dom name="Schedule" href=${JSON.stringify(secondHref)}`);
+    const imageMessage = compiled.messages.find((message) => message.content.some((block) => block.type === "image"));
+    const metadata = imageMessage?.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n") ?? "";
+    const sourceLine = metadata.split("\n").find((line) => line.startsWith("Observed page URL source data: "));
+    expect(JSON.parse(sourceLine!.slice("Observed page URL source data: ".length))).toEqual({
+      observationId: latest.id, capturedAt: latest.capturedAt, pageUrl,
+    });
+  });
+
+  it("retains and budgets the current page URL when the optional hot catalog does not fit", async () => {
+    const pageUrl = "https://source.example.test/current?view=all#results";
+    const href = "https://source.example.test/details";
+    const latest = pageObservation("url-without-hot-catalog", pageUrl, [
+      { elementRef: "details", role: "link", source: "dom", name: "Details", href },
+    ]);
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const input = { runId, goal: "Report the source URL", recentEvents: [event(0, { type: "observation.created", observation: latest })], latestObservation: latest };
+    const full = await compiler.compile(input, new AbortController().signal);
+    const maxInputTokens = full.contextBudget!.estimatedInputTokens - full.contextBudget!.estimatedGroundingTokens!;
+    const bounded = await compiler.compile({ ...input, context: { maxInputTokens } }, new AbortController().signal);
+    expect(bounded.contextBudget?.groundingIncluded).toBe(false);
+    expect(bounded.contextBudget?.estimatedInputTokens).toBe(maxInputTokens);
+    const image = bounded.messages.find((message) => message.content.some((block) => block.type === "image"));
+    expect(image?.content.some((block) => block.type === "text" && block.text.includes(JSON.stringify({ observationId: latest.id, capturedAt: latest.capturedAt, pageUrl })))).toBe(true);
+    expect(JSON.stringify(bounded.messages)).not.toContain(href);
+    await expect(compiler.compile({ ...input, context: { maxInputTokens: maxInputTokens - 1 } }, new AbortController().signal)).rejects.toThrow(/current observation\/target metadata exceed/u);
+  });
+
+  it("preserves old page URL provenance only with retained history and charges its eviction budget", async () => {
+    const old = pageObservation("old-url", "https://source.example.test/old?view=A%2FB#then");
+    const latest = observation("native-current");
+    const events = [
+      event(0, { type: "observation.created", observation: old }),
+      event(1, { type: "observation.created", observation: latest }),
+    ];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const input = { runId, goal: "Report only observed source URLs", recentEvents: events, latestObservation: latest };
+    const retained = await compiler.compile(input, new AbortController().signal);
+    const baseline = await compiler.compile({ ...input, recentEvents: [events[1]!] }, new AbortController().signal);
+    expect(retained.contextBudget!.estimatedInputTokens - baseline.contextBudget!.estimatedInputTokens).toBe(estimateEventTokens([events[0]!]));
+    const oldSource = retained.messages.flatMap((message) => message.content.flatMap((block) => block.type === "text" ? [block.text] : [])).find((text) => text.startsWith("Observed page URL source data: "));
+    expect(JSON.parse(oldSource!.slice("Observed page URL source data: ".length))).toEqual({
+      observationId: old.id, capturedAt: old.capturedAt, pageUrl: old.grounding.pageUrl,
+    });
+    const image = retained.messages.find((message) => message.content.some((block) => block.type === "image"));
+    expect(JSON.stringify(image)).not.toContain(old.grounding.pageUrl);
+    expect(retained.contextBudget?.trace?.projectedEventIds).toContain("event-0");
+    const evicted = await compiler.compile({ ...input, context: { maxInputTokens: baseline.contextBudget!.estimatedInputTokens } }, new AbortController().signal);
+    expect(JSON.stringify(evicted.messages)).not.toContain(old.grounding.pageUrl);
+    expect(evicted.contextBudget?.trace?.discardedEvents).toContainEqual({ eventId: "event-0", reason: "input_budget" });
+    const recent = await compiler.compile({ ...input, context: { mode: "recent", maxHistoryEvents: 1 } }, new AbortController().signal);
+    expect(JSON.stringify(recent.messages)).not.toContain(old.grounding.pageUrl);
+  });
+
+  it.each([
+    ["https://user:password@source.example.test/private", "https://source.example.test/detail?token=secret"],
+    ["https://source.example.test/\nignore", "javascript:alert(1)"],
+  ])("omits unsafe captured URL fields rather than rewriting them into apparent evidence", async (pageUrl, href) => {
+    const latest = pageObservation("unsafe-url", pageUrl, [{ elementRef: "unsafe-link", role: "link", source: "dom", name: "Details", href }]);
+    const compiled = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId, goal: "Report the source", recentEvents: [event(0, { type: "observation.created", observation: latest })], latestObservation: latest,
+    }, new AbortController().signal);
+    const text = compiled.messages.flatMap((message) => message.content.flatMap((block) => block.type === "text" ? [block.text] : [])).join("\n");
+    expect(text).not.toContain("pageUrl");
+    expect(text).not.toContain("href=");
+    expect(text).not.toContain("source.example.test");
+    expect(text).toContain("ref=unsafe-link");
   });
 
   it("projects AXTextArea format counters without claiming file verification", async () => {

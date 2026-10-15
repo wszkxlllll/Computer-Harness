@@ -8,6 +8,7 @@ import type {
   SourceLinkedFinishEvidence,
   SourceLinkedFinishReport,
 } from "@computer-harness/protocol";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
 
 const MAX_FIELDS = 32;
 const MAX_SOURCES_PER_FIELD = 4;
@@ -175,6 +176,8 @@ function renderSourceSummary(source: CanonicalSource, index: number, numbered: b
   const content: string[] = [];
   if (source.name !== undefined) content.push(`界面文字“${source.name}”`);
   if (source.description !== undefined) content.push(`辅助说明“${source.description}”`);
+  if (source.pageUrl !== undefined) content.push(`页面 URL：${source.pageUrl}`);
+  if (source.href !== undefined) content.push(`链接 URL：${source.href}`);
   if (source.options !== undefined) {
     content.push(`选项：${source.options.map((option) => `${option.text}（${option.enabled ? "当时可用" : "当时已禁用"}）`).join("、")}`);
   }
@@ -240,9 +243,13 @@ function renderCanonicalSource(
 ): CanonicalSource {
   const source = element.source ?? (catalog.source === "uia" || catalog.source === "dom" ? catalog.source : undefined);
   if (source !== "uia" && source !== "dom") throw new Error("source reference has no verified UIA or DOM provenance");
+  const pageUrl = isGroundingWebUrl(catalog.pageUrl) ? catalog.pageUrl : undefined;
+  const href = isGroundingWebUrl(element.href) ? element.href : undefined;
   const parts = [`role=${element.role}`, `source=${source}`];
   if (element.name !== undefined) parts.push(`name=${element.name}`);
   if (element.description !== undefined) parts.push(`description=${element.description}`);
+  if (pageUrl !== undefined) parts.push(`pageUrl=${JSON.stringify(pageUrl)}`);
+  if (href !== undefined) parts.push(`href=${JSON.stringify(href)}`);
   if (element.state !== undefined) {
     for (const key of ["enabled", "focused", "editable", "expanded", "selected", "valuePresent"] as const) {
       const value = element.state[key];
@@ -263,6 +270,8 @@ function renderCanonicalSource(
     role: element.role,
     ...(element.name === undefined ? {} : { name: element.name }),
     ...(element.description === undefined ? {} : { description: element.description }),
+    ...(pageUrl === undefined ? {} : { pageUrl }),
+    ...(href === undefined ? {} : { href }),
     ...(element.state === undefined ? {} : { state: structuredClone(element.state) }),
     ...(element.options === undefined ? {} : { options: structuredClone(element.options) }),
     ...(element.optionsTruncated === undefined ? {} : { optionsTruncated: element.optionsTruncated }),

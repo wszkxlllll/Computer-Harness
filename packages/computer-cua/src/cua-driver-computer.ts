@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { BoundWindowMissingError } from "@computer-harness/protocol";
+import { BoundWindowMissingError, isGroundingWebUrl } from "@computer-harness/protocol";
 import { dirname, join } from "node:path";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type { ToolResult } from "./cua-sdk-contract.js";
@@ -4338,7 +4338,7 @@ export class CuaDriverComputer implements Computer {
         ? await this.readBrowserChromeFocus(current, session, action.basedOn, decisionObservation.viewport, intent.browserTarget, signal)
         : undefined;
       if (intent.fingerprint === undefined || liveFingerprint !== intent.fingerprint) {
-        return refused(action.actionId, "BROWSER_CHROME_FOCUS_UNCONFIRMED", "address-bar identity and focus are not positively verified; no keyboard input was sent. Observe and choose a verified target, or set the initial browser URL");
+        return refused(action.actionId, "BROWSER_CHROME_FOCUS_UNCONFIRMED", "address-bar identity and focus are not positively verified; no keyboard input was sent. Stop retrying type without new positive focus evidence. If address-bar proof is unavailable, use currently visible links or controls within the Goal instead. For page input, observe again, focus a real editable target, then observe to confirm focus before typing");
       }
       chromeVerifiedForAction = true;
     }
@@ -4348,7 +4348,7 @@ export class CuaDriverComputer implements Computer {
       const focused = [...(latestGrounding?.elements.values() ?? [])].filter((item) => item.element.source === "dom" && item.element.state?.focused === true && item.element.state.editable === true);
       const candidate = focused.length === 1 ? focused[0] : undefined;
       if (candidate?.candidateFingerprint === undefined || candidate.element.bbox === undefined || latestGrounding?.browserTarget === undefined) {
-        return refused(action.actionId, "DOM_INPUT_FOCUS_MISMATCH", "no unique observed editable browser control owns page focus; no keyboard input was sent. Observe again, click the current editable control, then observe before typing");
+        return refused(action.actionId, "DOM_INPUT_FOCUS_MISMATCH", "no unique observed editable browser control owns page focus; no keyboard input was sent. Stop blindly retrying type. Inspect a fresh observation, focus a real editable target, then observe again for positive focus evidence before typing. If address-bar proof is unavailable, use currently visible links or controls within the Goal instead");
       }
       adoptedDomInput = true;
       this.expectedDomInput = {
@@ -4370,7 +4370,7 @@ export class CuaDriverComputer implements Computer {
         const result = await domTransport.verifyFocus(expected, signal);
         if (result.status !== "completed" || result.tabId !== expected.browserTarget.tabId || result.generation !== expected.browserTarget.generation) {
           if (adoptedDomInput) this.expectedDomInput = undefined;
-          return refused(action.actionId, result.driverCode ?? "DOM_INPUT_FOCUS_MISMATCH", "managed-browser input identity or focus changed; no keyboard input was sent. Observe again and click the current editable control before typing");
+          return refused(action.actionId, result.driverCode ?? "DOM_INPUT_FOCUS_MISMATCH", "managed-browser input identity or focus changed; no keyboard input was sent. Stop blindly retrying type. Inspect a fresh observation, focus a real editable target, then observe again for positive focus evidence before typing. If address-bar proof is unavailable, use currently visible links or controls within the Goal instead");
         }
       } catch (error) {
         signal.throwIfAborted();
@@ -5221,6 +5221,7 @@ function mergeGroundings(
       source: "hybrid",
       observationId,
       computerSessionId,
+      ...(isGroundingWebUrl(dom.catalog.pageUrl) ? { pageUrl: dom.catalog.pageUrl } : {}),
       completeness: truncated ? "partial" : "complete",
       degraded: uia.catalog.degraded || dom.catalog.degraded,
       maxElements: GROUNDING_MAX_ELEMENTS,

@@ -5,6 +5,7 @@ import { execFile as execFileCallback, spawn, type ChildProcess } from "node:chi
 import { homedir, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
 import { loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import { validateWindowTarget, type CuaWindowTarget } from "./window-contract.js";
 import {
@@ -740,6 +741,8 @@ const MANAGED_DOM_CLICK_LISTENER_SCRIPT = String.raw`
 export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   ${MANAGED_DOM_CLICK_POINT_SCRIPT}
   ${MANAGED_DOM_CLICK_LISTENER_SCRIPT}
+  // Keep the browser-side filter identical to the public transport boundary.
+  const isWebUrl = ${isGroundingWebUrl.toString()};
   const cssWidth = Number(window.innerWidth);
   const cssHeight = Number(window.innerHeight);
   const deviceScaleFactor = Number(window.devicePixelRatio);
@@ -922,11 +925,14 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
     const inputType = (element.getAttribute("type") || "text").toLowerCase();
     const editable = element.isContentEditable === true || element.localName === "textarea" || (element.localName === "input" && ["text", "search", "email", "url", "tel", "password", "number"].includes(inputType));
     const optionProjection = visibleNativeSelectOptions(element);
+    const href = element.localName === "a" && element.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+      roleName === "link" && element.getAttribute("href") !== null ? element.href : undefined;
     candidates.push({
       tagName: element.localName,
       ariaRole: role,
       name,
       description,
+      ...(isWebUrl(href) ? { href } : {}),
       frame,
       visible: true,
       interactive: true,
@@ -958,8 +964,10 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const priorityLinks = document.querySelectorAll('a, [role="link"]');
   for (const element of priorityLinks) emit(element);
   walk(document);
+  const pageUrl = window.location?.href;
   return {
     candidates,
+    ...(isWebUrl(pageUrl) ? { pageUrl } : {}),
     // Main-document completeness does not cover visible iframe contents,
     // which use a separate identity and are intentionally not traversed.
     complete: !truncated && !visibleUntraversedFrame,
@@ -1344,7 +1352,12 @@ export class ManagedBrowserHost {
         throw new DomGroundingUnavailableError("managed DOM evaluation returned invalid CSS viewport metadata");
       }
       return {
-        candidates: value.candidates as DomGroundingRawCandidate[],
+        candidates: (value.candidates as DomGroundingRawCandidate[]).map((candidate) => {
+          if (candidate.href === undefined || isGroundingWebUrl(candidate.href)) return candidate;
+          const { href: _unsafeHref, ...withoutHref } = candidate;
+          return withoutHref;
+        }),
+        ...(isGroundingWebUrl(value.pageUrl) ? { pageUrl: value.pageUrl } : {}),
         complete: value.complete === true,
         coordinateSpace: "css",
         viewportMetrics,

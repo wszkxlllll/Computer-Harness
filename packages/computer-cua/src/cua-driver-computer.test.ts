@@ -2598,6 +2598,68 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("retains current-page and link URL evidence across hybrid observation binding without native fallback invention", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-observed-urls-"));
+    const fake = windowDriver();
+    const nativeUrlLabel = "https://native-label.example/schedule";
+    fake.setGroundingState({
+      elements_complete: true,
+      elements: [
+        { role: "Document", frame: { x: 106, y: 220, width: 940, height: 560 }, enabled: true },
+        { role: "Hyperlink", name: nativeUrlLabel, href: nativeUrlLabel, frame: { x: 200, y: 260, width: 180, height: 32 }, enabled: true },
+      ],
+    });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "fixture-profile",
+      windowTarget: fake.target, tabId: "fixture-tab", generation: "fixture-generation", delivery: "loopback-cdp",
+    };
+    let pageUrl = "https://routes.example/current?day=1%2F2#departures";
+    let attested = true;
+    const destinations = ["https://routes.example/morning?day=1#departures", "https://routes.example/evening?day=1#departures"];
+    const domGroundingTransport = createMockDomGroundingTransport((request) => ({
+      complete: true,
+      pageUrl,
+      ...(attested ? { tabId: request.browserTarget.tabId, generation: request.browserTarget.generation } : {}),
+      candidates: destinations.map((href, index) => ({
+        tagName: "a", name: "Schedule", href, visible: true, interactive: true,
+        frame: { x: 20, y: 100 + index * 40, width: 120, height: 24 },
+      })),
+    }));
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport, driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const first = await computer.observe(session, "hybrid-url-first" as ObservationId, signal);
+      expect(first.grounding).toMatchObject({
+        source: "hybrid", observationId: "hybrid-url-first", surfaceRef: first.surfaceRef, pageUrl,
+      });
+      const firstLinks = first.grounding!.elements.filter((element) => element.source === "dom");
+      expect(firstLinks.map((element) => ({ name: element.name, href: element.href })))
+        .toEqual(destinations.map((href) => ({ name: "Schedule", href })));
+      expect(first.grounding!.elements.filter((element) => element.source === "uia").every((element) => element.href === undefined)).toBe(true);
+
+      pageUrl = "https://routes.example/navigated?day=2#arrivals";
+      const second = await computer.observe(session, "hybrid-url-second" as ObservationId, signal);
+      expect(second.grounding).toMatchObject({ observationId: "hybrid-url-second", surfaceRef: second.surfaceRef, pageUrl });
+      expect(second.grounding!.elements.filter((element) => element.source === "dom").map((element) => element.elementRef))
+        .not.toEqual(firstLinks.map((element) => element.elementRef));
+
+      // URL data from a producer without attested identity must not survive,
+      // nor can native URL-looking labels replace that missing DOM evidence.
+      attested = false;
+      const fallback = await computer.observe(session, "hybrid-url-unattested" as ObservationId, signal);
+      expect(fallback.grounding).not.toHaveProperty("pageUrl");
+      expect(fallback.grounding!.elements.some((element) => element.name === nativeUrlLabel)).toBe(true);
+      expect(fallback.grounding!.elements.every((element) => element.href === undefined)).toBe(true);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves the prior bound browser Surface after a proven exact-target activation refusal", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-switch-refusal-preserves-parent-"));
     const fake = windowDriver();

@@ -599,6 +599,8 @@ export interface GroundingElement {
   readonly role: string;
   readonly name?: string;
   readonly description?: string;
+  /** Exact resolved destination of an observed DOM link; never inferred from its label. */
+  readonly href?: string;
   readonly bbox?: GroundingBoundingBox;
   readonly state?: GroundingElementState;
   /** Coarse source only; raw accessibility/DOM identities never cross this boundary. */
@@ -668,6 +670,8 @@ export interface GroundingCatalog {
   readonly computerSessionId: ComputerSessionId;
   /** Exact Surface incarnation whose pixels/UIA/DOM produced this catalog. */
   readonly surfaceRef: SurfaceRef;
+  /** Exact current managed-page URL from this observation, not the configured startup URL. */
+  readonly pageUrl?: string;
   readonly completeness: GroundingCompleteness;
   readonly degraded: boolean;
   /** Adapter safety cap (currently at most 256); Runtime persists a hot subset. */
@@ -675,6 +679,22 @@ export interface GroundingCatalog {
   readonly elements: readonly GroundingElement[];
   /** Present when Runtime narrowed an adapter catalog for persistence/Context. */
   readonly selection?: GroundingSelectionTrace;
+}
+
+/** Keep complete public web addresses, or omit them; never redact/truncate into another URL. */
+export function isGroundingWebUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2048 || !/^https?:\/\//iu.test(value) || /[\s\u0000-\u001F\u007F\\]/u.test(value)) return false;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") return false;
+    if (/(?:^|[?&#])(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|authorization|password|passwd|secret|credential|session[_-]?id|session|sid|jwt|signature|ticket|auth[_-]?code)=/iu.test(url.hash)) return false;
+    for (const key of url.searchParams.keys()) {
+      if (/^(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|authorization|password|passwd|secret|credential|session[_-]?id|session|sid|jwt|signature|ticket|auth[_-]?code)$/iu.test(key)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface ObservationFrame {
@@ -866,6 +886,8 @@ export interface SourceLinkedFinishEvidence {
           readonly role: string;
           readonly name?: string;
           readonly description?: string;
+          readonly pageUrl?: string;
+          readonly href?: string;
           readonly state?: GroundingElementState;
           readonly options?: readonly GroundingOption[];
           readonly optionsTruncated?: boolean;

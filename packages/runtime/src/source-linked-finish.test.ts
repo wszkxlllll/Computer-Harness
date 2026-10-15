@@ -6,10 +6,11 @@ import { canonicalizeSourceLinkedFinish, parseSourceLinkedFinishContractJson, va
 const runId = "source-linked-test" as RunId;
 const surfaceRef: SurfaceRef = { surfaceId: "source-linked-surface" as SurfaceId, generation: 1, kind: "desktop" };
 
-function observationEvent(overrides: { runId?: RunId; sessionId?: string; catalogSessionId?: string; elements?: unknown[] } = {}): RuntimeEvent {
+function observationEvent(overrides: { runId?: RunId; sessionId?: string; catalogSessionId?: string; elements?: unknown[]; pageUrl?: string; observationId?: string; capturedAt?: string; sequence?: number } = {}): RuntimeEvent {
   const eventRunId = overrides.runId ?? runId;
   const sessionId = overrides.sessionId ?? "session-1";
   const catalogSessionId = overrides.catalogSessionId ?? sessionId;
+  const observationId = overrides.observationId ?? "observation-1";
   const elements = overrides.elements ?? [{
     elementRef: "cpu-m6",
     role: "StaticText",
@@ -19,25 +20,26 @@ function observationEvent(overrides: { runId?: RunId; sessionId?: string; catalo
     options: [{ text: "M6 12-core CPU", enabled: false }],
   }];
   const observation = {
-    id: "observation-1",
+    id: observationId,
     runId: eventRunId,
     computerSessionId: sessionId,
-    capturedAt: "2026-10-12T00:00:01.000Z",
+    capturedAt: overrides.capturedAt ?? "2026-10-12T00:00:01.000Z",
     surfaceRef,
     screenshot: { mediaType: "image/png", data: new Uint8Array([1]), assetId: "asset-1" },
     grounding: {
       version: "uia-catalog-v1",
       source: "uia",
-      observationId: "observation-1",
+      observationId,
       computerSessionId: catalogSessionId,
       surfaceRef,
       completeness: "partial",
       degraded: false,
       maxElements: 256,
+      ...(overrides.pageUrl === undefined ? {} : { pageUrl: overrides.pageUrl }),
       elements,
     },
   };
-  return { type: "observation.created", runId: eventRunId, sequence: 10, eventId: "event-1", occurredAt: observation.capturedAt, observation } as unknown as RuntimeEvent;
+  return { type: "observation.created", runId: eventRunId, sequence: overrides.sequence ?? 10, eventId: `event-${observationId}`, occurredAt: observation.capturedAt, observation } as unknown as RuntimeEvent;
 }
 
 function finishReport(fields: unknown[]) {
@@ -93,6 +95,65 @@ describe("source-linked finish validation", () => {
       disposition: "source_bound",
       sources: [{ capturedAt: "2026-10-12T00:00:01.000Z", state: { enabled: false, selected: false } }],
     });
+  });
+
+  it("renders referenced historical URLs from committed data despite same-label links and invented model URLs", () => {
+    const pageUrl = "https://Records.Example.test/search?route=A%2FB#old";
+    const href = "https://Records.Example.test/detail/13800138000?view=A%2FB#selected";
+    const otherHref = "https://Records.Example.test/detail/13800138000?view=A%2Fb#other";
+    const inventedUrl = "https://invented.example.test/schedule";
+    const old = observationEvent({ pageUrl, elements: [
+      { elementRef: "link-a", role: "link", source: "dom", name: "Schedule", href },
+      { elementRef: "link-b", role: "link", source: "dom", name: "Schedule", href: otherHref },
+    ] });
+    const current = observationEvent({
+      observationId: "observation-2", sequence: 11, capturedAt: "2026-10-12T00:00:02.000Z",
+      pageUrl: "https://current.example.test/current",
+      elements: [{ elementRef: "link-a", role: "link", source: "dom", name: "Schedule", href: "https://current.example.test/different" }],
+    });
+    const report = finishReport([{ fieldId: "cpu", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "link-a" }] }]);
+    const canonical = canonicalizeSourceLinkedFinish(report, contract, [old, current], runId, 12, `Schedule: ${inventedUrl}`);
+    expect(canonical.resultEvidence.fields[0]).toMatchObject({
+      disposition: "source_bound",
+      sources: [{
+        observationId: "observation-1", elementRef: "link-a", capturedAt: "2026-10-12T00:00:01.000Z",
+        name: "Schedule", pageUrl, href,
+        excerpt: expect.stringContaining(`href=${JSON.stringify(href)}`),
+      }],
+    });
+    expect(canonical.summary).toContain(pageUrl);
+    expect(canonical.summary).toContain(href);
+    expect(canonical.summary).not.toContain(otherHref);
+    expect(canonical.summary).not.toContain("https://current.example.test");
+    expect(JSON.stringify(canonical)).not.toContain(inventedUrl);
+    expect(() => canonicalizeSourceLinkedFinish(finishReport([{
+      fieldId: "cpu", disposition: "source_bound",
+      sources: [{ observationId: "observation-1", elementRef: "link-a", href: inventedUrl }],
+    }]), contract, [old], runId, 12)).toThrow(/malformed observation reference/u);
+  });
+
+  it("omits unsafe committed URL fields without modifying the remaining canonical evidence", () => {
+    const event = observationEvent({
+      pageUrl: "https://user:secret@example.test/source",
+      elements: [{ elementRef: "source", role: "link", source: "dom", name: "Details", href: "https://example.test/detail?api_key=secret" }],
+    });
+    const canonical = canonicalizeSourceLinkedFinish(finishReport([{
+      fieldId: "cpu", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "source" }],
+    }]), contract, [event], runId, 11);
+    expect(canonical.resultEvidence.fields[0]).toMatchObject({ disposition: "source_bound", sources: [{ name: "Details", source: "dom" }] });
+    expect(JSON.stringify(canonical)).not.toContain("example.test");
+    const field = canonical.resultEvidence.fields[0]!;
+    if (field.disposition !== "source_bound") throw new Error("expected source-bound result");
+    expect(field.sources[0]).not.toHaveProperty("pageUrl");
+    expect(field.sources[0]).not.toHaveProperty("href");
+  });
+
+  it("rejects a URL that exceeds the existing complete excerpt budget rather than clipping it", () => {
+    const href = `https://source.example.test/${"x".repeat(2_000)}`;
+    const event = observationEvent({ elements: [{ elementRef: "long-link", role: "link", source: "dom", name: "Details", href }] });
+    expect(() => canonicalizeSourceLinkedFinish(finishReport([{
+      fieldId: "cpu", disposition: "source_bound", sources: [{ observationId: "observation-1", elementRef: "long-link" }],
+    }]), contract, [event], runId, 11)).toThrow(/complete canonical excerpt/u);
   });
 
   it("marks conflicting_sources as a model-reported label and never invents a Runtime comparison", () => {

@@ -10,8 +10,9 @@ import type {
 import { createHash } from "node:crypto";
 import { currentObservationAssessmentBinding, decorateToolsWithActionEffects, ToolRegistry } from "@computer-harness/runtime";
 import type { GroundingCatalog, RunAssistantPreferencesSnapshot, RuntimeEvent, SourceLinkedFinishContract, SurfaceRef, ToolCallId, ToolResult } from "@computer-harness/protocol";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
 import { composeSystemPrompt, formatExecutionSegment, formatMemory, formatPlan, formatWindowSwitchState } from "./projections.js";
-import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./messages.js";
+import { findLatestObservation, modelTurnMessage, observedPageUrlText, toolResultMessage } from "./messages.js";
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
 import { latestGuiHistoryGroup, selectHistoryEvents } from "./history.js";
 
@@ -77,6 +78,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       throw new Error("authorizedSavedDocumentEvidence must match the exact current Observation and Surface");
     }
     const capturedAt = latestObservation === undefined ? undefined : canonicalCapturedAt(latestObservation.capturedAt);
+    const currentPageUrlText = latestObservation === undefined ? undefined : observedPageUrlText(latestObservation);
     const authorizedDocumentEvidenceText = authorizedDocumentEvidence === undefined
       ? undefined
       : authorizedDocumentEvidence.status === "authorized_file_absent"
@@ -88,6 +90,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       ? undefined
       : [
           `Runtime observation metadata: Observation ID ${latestObservation.id}; capturedAt ${capturedAt ?? "unknown (missing or invalid)"}. This timestamp belongs to this image observation.`,
+          ...(currentPageUrlText === undefined ? [] : [currentPageUrlText]),
           ...(authorizedDocumentEvidenceText === undefined ? [] : [authorizedDocumentEvidenceText]),
         ].join("\n");
     const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
@@ -108,10 +111,13 @@ export class DefaultContextCompiler implements ContextCompiler {
     const features = input.features ?? this.features;
     const allowance = input.requestBudget;
     const knownBudget = typeof allowance === "object" && allowance !== null && Number.isSafeInteger(allowance.limit) && allowance.limit >= 3 && Number.isSafeInteger(allowance.remaining) && allowance.remaining >= 0 && allowance.remaining <= allowance.limit ? allowance : undefined;
-    const finishOnly = knownBudget?.remaining === 1;
-    const requestBudgetText = knownBudget === undefined || knownBudget.remaining > 2 ? "" : finishOnly
-      ? `This is the final model request. Call the exposed terminate tool exactly once with status success or failure and the complete user-facing result text. Use failure for every incomplete or unverified goal, preserve findings, and state requested fields that remain unknown. No other tool calls or memory writes are allowed. Do not claim completion unless the original goal is fully supported by evidence.`
-      : `Only ${knownBudget.remaining} model requests remain including this one. Prepare a concise evidence and unknown ledger now, preserving original scope and all requested fields; reserve the last request to terminate with the complete result.`;
+    // Match Runtime's closing dispatch boundary without reducing small Runs'
+    // ordinary tool opportunities or extending the total request allowance.
+    const closingRequests = knownBudget === undefined ? 0 : Math.min(3, Math.max(1, Math.floor(knownBudget.limit / 10)));
+    const finishOnly = knownBudget !== undefined && knownBudget.remaining <= closingRequests;
+    const requestBudgetText = knownBudget === undefined || knownBudget.remaining > closingRequests + 1 ? "" : finishOnly
+      ? `Only ${knownBudget.remaining} model requests remain including this one, reserved for finishing. Call the exposed terminate tool exactly once with status success or failure and the complete user-facing result text now. Use failure for every incomplete or unverified goal, preserve verified findings, and explicitly identify each requested item still missing or unknown. No other tool calls or memory writes are allowed. Do not claim completion unless the original goal is fully supported by evidence. Any protocol feedback must be resolved within the remaining requests, not by extending the budget.`
+      : `Only ${knownBudget.remaining} model requests remain including this one. Preserve verified findings and requested items still missing or unknown now; the next ${closingRequests} requests are reserved for termination with the complete result.`;
     const requestBudgetMessageText = requestBudgetText.length === 0 ? "" : `Runtime request budget: ${requestBudgetText}`;
     const baseTools = this.tools.modelTools("main", {
       ...(input.enabledCategories === undefined ? {} : { enabledCategories: input.enabledCategories }),
@@ -168,7 +174,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     const pinnedGuiHistory = latestGuiHistoryGroup(orderedEvents);
     const selectedHistory = new Set([...selectHistoryEvents(orderedEvents, input.context?.mode ?? this.mode, input.context?.maxHistoryEvents ?? this.maxHistoryEvents), ...pinnedGuiHistory]);
     const historyCandidates = orderedEvents.filter((event) => selectedHistory.has(event));
-    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received" || pinnedGuiHistory.includes(event)));
+    const authoritativeHistoryTokens = estimateEventTokens(historyCandidates.filter((event) => event.type === "user.input.received" || pinnedGuiHistory.includes(event)), latestObservation?.id);
     let selectedEvents = historyCandidates;
     const maxInputTokens = input.context?.maxInputTokens ?? this.maxInputTokens;
     const maxWireInputTokens = input.context?.maxWireInputTokens ?? this.maxWireInputTokens;
@@ -188,7 +194,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     let monitorGuidanceText = rawMonitorGuidanceText;
     let monitorGuidanceIncluded = rawMonitorGuidanceText !== undefined;
     let monitorGuidanceOmittedReason: "budget" | undefined;
-    const groundingCatalog = input.latestObservation?.grounding;
+    const groundingCatalog = latestObservation?.grounding;
     const groundingCandidate = groundingCatalog === undefined ? undefined : formatGroundingCatalog(groundingCatalog);
     let groundingText = groundingCandidate?.text;
     let groundingIncluded = groundingText !== undefined;
@@ -227,7 +233,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       }
       if (groundingIncluded) remainingAfterAuthoritative -= rawGroundingTokens;
       historyBudget = authoritativeHistoryTokens + remainingAfterAuthoritative;
-      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget, pinnedGuiHistory);
+      selectedEvents = fitEventsToTokenBudget(selectedEvents, historyBudget, pinnedGuiHistory, latestObservation?.id);
     }
     const monitorGuidanceTokens = monitorGuidanceIncluded && monitorGuidanceText !== undefined
       ? estimateTextTokens(monitorGuidanceText)
@@ -282,6 +288,13 @@ export class DefaultContextCompiler implements ContextCompiler {
       switch (event.type) {
         case "observation.created":
           currentViewport = event.observation.viewport;
+          if (event.observation.id !== latestObservation?.id) {
+            const pageUrlText = observedPageUrlText(event.observation);
+            if (pageUrlText !== undefined) {
+              flushPendingResults();
+              messages.push({ role: "user", content: [{ type: "text", text: pageUrlText }] });
+            }
+          }
           break;
         case "model.response.received":
           messages.push(modelTurnMessage(event.turn, currentViewport));
@@ -365,7 +378,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     const rawOperationGuidanceTokens = operationGuidanceText === undefined ? 0 : [...operationGuidanceText].length;
     signal.throwIfAborted();
     const estimatedToolSchemaTokens = Math.ceil(JSON.stringify(tools).length / 4);
-    const baseEstimatedHistoryTextTokens = estimateEventTokens(selectedEvents) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
+    const baseEstimatedHistoryTextTokens = estimateEventTokens(selectedEvents, latestObservation?.id) + assessmentBindingTokens + observationMetadataTokens + windowSwitchStateTokens;
     const baseEstimatedInputTokens = estimatedFixedTextTokens + baseEstimatedHistoryTextTokens + assistantPreferencesTokens + monitorGuidanceTokens + groundingTokens;
     if (maxInputTokens !== undefined && baseEstimatedInputTokens > maxInputTokens) {
       throw Object.assign(new Error("Context history exceeds maxInputTokens after selection"), { code: "CONTEXT_INPUT_TOO_LARGE" });
@@ -387,7 +400,7 @@ export class DefaultContextCompiler implements ContextCompiler {
       ? undefined
       : orderedEvents.find((event) => event.type === "observation.created" && event.observation.id === latestObservation.id)?.eventId;
     const projectedEventIds = [
-      ...selectedEvents.filter(isProjectableHistoryEvent).map((event) => event.eventId),
+      ...selectedEvents.filter((event) => isProjectableHistoryEvent(event) && (event.type !== "observation.created" || event.observation.id !== latestObservation?.id)).map((event) => event.eventId),
       ...(latestObservationEventId === undefined ? [] : [latestObservationEventId]),
     ];
     const discardedEvents = [
@@ -595,6 +608,7 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
         : `bbox=[${round(element.bbox.x)},${round(element.bbox.y)},${round(element.bbox.width)},${round(element.bbox.height)}]`;
       const label = element.name === undefined ? "" : ` name="${compactLabel(element.name, 96)}"`;
       const description = element.description === undefined ? "" : ` description="${compactLabel(element.description, 120)}"`;
+      const href = isGroundingWebUrl(element.href) ? ` href=${JSON.stringify(element.href)}` : "";
       const states = element.state === undefined ? "" : ` state=${formatGroundingState(element.state)}`;
       const provenance = element.source === undefined ? "" : ` source=${element.source}${element.browserRegion === undefined ? "" : `/${element.browserRegion}`}`;
       const options = element.options === undefined
@@ -605,7 +619,7 @@ function formatGroundingCatalog(catalog: GroundingCatalog): GroundingProjection 
         : element.textFormat.status === "over_limit"
           ? " textFormat=ax-cfstring-v1/over_limit (AX CFString only; not file verification)"
           : ` textFormat=ax-cfstring-v1/complete bytes=${element.textFormat.utf8Bytes} codePoints=${element.textFormat.codePointCount} LF=${element.textFormat.lineFeedCount} trailingLF=${element.textFormat.trailingLineFeedCount} CR=${element.textFormat.carriageReturnCount} (AX CFString format only; not file verification)`;
-      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description} ${box}${states}${options}${textFormat}`;
+      return `- ref=${element.elementRef} role=${compactLabel(element.role, 48)}${provenance}${label}${description}${href} ${box}${states}${options}${textFormat}`;
     }),
   ];
   const text = lines.join("\n");

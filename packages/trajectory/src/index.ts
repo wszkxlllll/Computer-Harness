@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname, relative as pathRelative, resolve } from "node:path";
 import { z } from "zod";
-import { reduceMemoryMutation } from "@computer-harness/protocol";
+import { isGroundingWebUrl, reduceMemoryMutation } from "@computer-harness/protocol";
 import type {
   ActionId,
   ActionIntent,
@@ -1079,11 +1079,13 @@ const groundingTextFormatSchema = z.discriminatedUnion("status", [
     context.addIssue({ code: z.ZodIssueCode.custom, message: "AXTextArea format counters are inconsistent" });
   }
 });
+const groundingWebUrlSchema = z.string().max(2_048).refine(isGroundingWebUrl, "expected a complete public HTTP(S) source URL");
 const groundingElementSchema = z.object({
   elementRef: nonEmptyString.max(96),
   role: nonEmptyString.max(64),
   name: z.string().max(160).optional(),
   description: z.string().max(240).optional(),
+  href: groundingWebUrlSchema.optional(),
   bbox: groundingBoundingBoxSchema.optional(),
   state: groundingElementStateSchema.optional(),
   source: z.enum(["uia", "dom"]).optional(),
@@ -1092,6 +1094,9 @@ const groundingElementSchema = z.object({
   optionsTruncated: z.boolean().optional(),
   textFormat: groundingTextFormatSchema.optional(),
 }).superRefine((element, context) => {
+  if (element.href !== undefined && (element.source !== "dom" || element.role !== "link" || element.browserRegion !== "content")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["href"], message: "href requires an observed DOM content link" });
+  }
   if (element.textFormat !== undefined && (element.source !== "uia" || element.role !== "AXTextArea" || element.browserRegion === "content")) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "textFormat is restricted to native UIA AXTextArea elements" });
   }
@@ -1122,11 +1127,16 @@ const groundingCatalogSchema = z.object({
   observationId: nonEmptyString,
   computerSessionId: nonEmptyString,
   surfaceRef: surfaceRefSchema,
+  pageUrl: groundingWebUrlSchema.optional(),
   completeness: z.enum(["complete", "partial", "unknown"]),
   degraded: z.boolean(),
   maxElements: z.number().int().positive().max(256),
   elements: z.array(groundingElementSchema).max(256),
   selection: groundingSelectionTraceSchema.optional(),
+}).superRefine((catalog, context) => {
+  if (catalog.pageUrl !== undefined && catalog.source === "uia") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["pageUrl"], message: "pageUrl requires managed DOM observation evidence" });
+  }
 });
 const authorizedSavedDocumentEvidenceSchema = z.object({
   source: z.literal("host-authorized-file-and-native-proof-v1"),
@@ -1239,6 +1249,8 @@ const sourceLinkedFinishEvidenceSourceSchema = z.object({
   role: nonEmptyString.max(64),
   name: z.string().max(160).optional(),
   description: z.string().max(240).optional(),
+  pageUrl: groundingWebUrlSchema.optional(),
+  href: groundingWebUrlSchema.optional(),
   state: z.object({
     enabled: z.boolean().optional(),
     focused: z.boolean().optional(),
