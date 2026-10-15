@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-15 [PR30拆分与队友接续](./pr30-deepseek-only-integration-2026-10-15.md)：仅提取DeepSeek注册、恢复及凭据预检；DOM/网页绑定、Context/Monitor后续改动留原PR30。新分支验收及CI完成后单独合入，不关闭PR30、不替换Preview，队友先同步最新main再接续整改。
+
 2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。
 
 2026-10-14 接续：Actions已恢复，66实际Windows共享evaluator hook路径错误已定位，测试portable file URL修复/新head验证优先；详见[当前执行记录](./astra-prfix-merge-execution-2026-10-14.md)。

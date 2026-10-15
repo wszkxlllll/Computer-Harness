@@ -23,6 +23,40 @@ const hostArguments: HostArguments = {
 };
 
 describe("Host-local Run profile configuration", () => {
+  it("isolates DeepSeek settings from GLM thinking and budgets without exposing the private key", () => {
+    const config = createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {
+      DEEPSEEK_API_KEY: "private-fixture-key",
+      DEEPSEEK_BASE_URL: "https://api.deepseek.com/chat/completions",
+      DEEPSEEK_REQUEST_TIMEOUT_MS: "180000",
+      DEEPSEEK_MAX_OUTPUT_TOKENS: "8192",
+      GLM_THINKING: "invalid",
+      GLM_REQUEST_TIMEOUT_MS: "invalid",
+      GLM_MAX_INPUT_TOKENS: "invalid",
+    });
+    expect(config).toMatchObject({
+      model: "deepseek-flash",
+      deepseekEndpoint: "https://api.deepseek.com/chat/completions",
+      deepseekRequestTimeoutMs: 180000,
+      deepseekMaxOutputTokens: 8192,
+    });
+    expect(JSON.stringify(config)).not.toContain("private-fixture-key");
+  });
+
+  it.each([
+    { DEEPSEEK_REQUEST_TIMEOUT_MS: "241000" },
+    { DEEPSEEK_REQUEST_TIMEOUT_MS: "invalid" },
+    { DEEPSEEK_MAX_OUTPUT_TOKENS: "0" },
+    { DEEPSEEK_MAX_OUTPUT_TOKENS: "131073" },
+  ])("rejects invalid DeepSeek request limits", (env) => {
+    expect(() => createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, env)).toThrow();
+  });
+
   it("keeps both local profiles off by default and accepts only their enums", () => {
     expect(resolveHostRunProfileSettings({})).toEqual({});
     expect(resolveHostRunProfileSettings({
@@ -148,7 +182,6 @@ describe("Host-local Run profile configuration", () => {
     }
   });
 });
-
 async function waitForRunFinish(handle: Awaited<ReturnType<ApplicationSession["startRun"]>>): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (handle.controller.getSnapshot().status !== "finished") {

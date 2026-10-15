@@ -1,5 +1,5 @@
 import { appendFile } from "node:fs/promises";
-import { FetchGlmHttpClient, type GlmHttpClient, type GlmHttpDiagnostics, type GlmTransportEvidence } from "@computer-harness/provider-glm";
+import { FetchGlmHttpClient, FetchDeepseekHttpClient, type DeepseekHttpClient, type GlmHttpClient, type GlmHttpDiagnostics, type GlmTransportEvidence } from "@computer-harness/provider-glm";
 import { FetchQwenHttpClient, type QwenHttpClient, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode } from "@computer-harness/provider-qwen";
 import {
   providerRequestToolProjection,
@@ -9,11 +9,11 @@ import {
   trustedProviderModel,
 } from "./provider-summary.js";
 
-export class RecordingGlmHttpClient implements GlmHttpClient {
+class RecordingChatCompletionsHttpClient implements GlmHttpClient {
   private readonly inner: GlmHttpClient;
   private requestNumber = 0;
 
-  public constructor(private readonly path: string, inner: GlmHttpClient = new FetchGlmHttpClient()) {
+  public constructor(private readonly path: string, inner: GlmHttpClient = new FetchGlmHttpClient(), private readonly provider: "glm" | "deepseek" = "glm") {
     this.inner = inner;
   }
 
@@ -38,7 +38,7 @@ export class RecordingGlmHttpClient implements GlmHttpClient {
     try {
       const response = await this.inner.post(url, body, headers, signal, forwardedDiagnostics);
       await appendGlmRecord(this.path, {
-        provider: "glm",
+        provider: this.provider,
         request: requestNumber,
         latencyMs: Date.now() - startedAt,
         ...correlation,
@@ -55,7 +55,7 @@ export class RecordingGlmHttpClient implements GlmHttpClient {
       return response;
     } catch (error) {
       await appendGlmRecord(this.path, {
-        provider: "glm",
+        provider: this.provider,
         request: requestNumber,
         latencyMs: Date.now() - startedAt,
         ...correlation,
@@ -66,6 +66,14 @@ export class RecordingGlmHttpClient implements GlmHttpClient {
       });
       throw error;
     }
+  }
+}
+
+export class RecordingGlmHttpClient extends RecordingChatCompletionsHttpClient {}
+
+export class RecordingDeepseekHttpClient extends RecordingChatCompletionsHttpClient {
+  public constructor(path: string, inner: DeepseekHttpClient = new FetchDeepseekHttpClient()) {
+    super(path, inner, "deepseek");
   }
 }
 

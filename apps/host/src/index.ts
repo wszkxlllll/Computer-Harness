@@ -168,10 +168,12 @@ function parseArguments(argv: readonly string[]): HostArguments {
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
-      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
+      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
       process.stdout.write("Optional local env-file settings: HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1; HARNESS_OPERATION_GUIDANCE=off|catalog-v1.\n");
       process.stdout.write("foreground-caret-v1 is only for an explicitly verified candidate CUA socket; it is not a general stock CUA 0.22 compatibility claim.\n");
       process.stdout.write("Optional Run result contract: HARNESS_SOURCE_LINKED_FINISH_CONTRACT may contain a bounded source-linked-finish-v1 JSON field contract.\n");
+      process.stdout.write("The startup model is fixed for all Runs in this Host process; restart the Host to change it. Web/phone has no model picker, hot switch, fallback, or action replay.\n");
+      process.stdout.write("DeepSeek private env: DEEPSEEK_API_KEY; optional DEEPSEEK_BASE_URL, DEEPSEEK_REQUEST_TIMEOUT_MS (default 90000), DEEPSEEK_MAX_OUTPUT_TOKENS (default 4096). Native tools, thinking disabled, actual-pixel coordinates; no Qwen coordinate flag needed.\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");
@@ -197,7 +199,7 @@ function parseArguments(argv: readonly string[]): HostArguments {
   if (envFile === undefined || socket === undefined || output === undefined) {
     throw new Error("--env-file, --socket, and --output are required.");
   }
-  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") throw new Error("--model must be glm-5.3-flash or qwen3.8-flash.");
+  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash" && model !== "deepseek-flash") throw new Error("--model must be glm-5.3-flash, qwen3.8-flash, or deepseek-flash.");
   const port = Number(rawPort);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535.");
   const origins = values.get("--origin") ?? ["http://localhost:" + (port === 0 ? "4317" : String(port))];
@@ -219,11 +221,13 @@ function parseBoundedPositiveInteger(raw: string | undefined, option: string, ma
 function readProviderCredentials(): ProviderCredentials {
   const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   const qwenApiKey = process.env.DASHSCOPE_API_KEY;
+  const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
   const memoryEmbeddingApiKey = process.env.MEMORY_EMBEDDING_API_KEY;
   const osworldBridgeToken = process.env.OSWORLD_BRIDGE_TOKEN;
   return {
     ...(glmApiKey === undefined ? {} : { glmApiKey }),
     ...(qwenApiKey === undefined ? {} : { qwenApiKey }),
+    ...(deepseekApiKey === undefined ? {} : { deepseekApiKey }),
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
