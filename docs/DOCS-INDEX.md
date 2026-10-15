@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-15 最新 M01 业务结果：[DeepSeek Flash low 扩额两轮完成](./member-c-deepseek-low-expanded-2026-10-15.md)。Windows两个独立Run，49／42真实请求均HTTP200且enabled／low；最终清单、官网事实与本轮截图复核通过，正确交付新版出诊表URL。公开实际配置、完整最终清单及官网内容裁图；非正式评分／稳定性放行，无多GUI Batch或macOS实机，默认及产品源码未改，既有失败保留。
+
 2026-10-14 PR30修复验收：[DeepSeek接入与click/Batch一致性回归](./pr30-deepseek-repair-2026-10-14.md)。源码审查及2419项Vitest通过；8次真实API均HTTP200，但Plan+Memory+Batch同轮输出尚未通过。以已合并main `a2757d6`为基底，隔离移入PR30并保留作者；本轮不替换Preview。下方PR22合并前CI状态保留为历史，main基底的[CI已通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38553980139)，不代表本地修复分支已经运行远端CI。
 
 2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。

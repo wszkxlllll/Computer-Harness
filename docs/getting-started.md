@@ -241,6 +241,12 @@ guidance 额度针对尚未解决的停滞：新的 changed 观察重置该额�
 [脱敏结构化摘要](member-c-deepseek-convergence-2026-10-15.json)。
 两轮分别因过早接管和结束工具连续违规而未交付最终清单，不作为完整业务通过。
 
+同日后续按 `low` 思考及扩额配置实跑的两个独立 Windows M01 Run 均交付完整清单：
+[业务完成报告及来源截图](member-c-deepseek-low-expanded-2026-10-15.md)、
+[实际配置与原样最终清单](member-c-deepseek-low-expanded-2026-10-15.json)。
+91次真实HTTP均确认enabled／low；这是本轮两个开发样本的业务通过，不是稳定性、
+多GUI Batch或macOS验收。产品默认配置未变，既有失败和时序／记忆投影限制保留。
+
 ## 7. 贡献前检查
 
 默认贡献路径不需要 API、桌面或 VM：
