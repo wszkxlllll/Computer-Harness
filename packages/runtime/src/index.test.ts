@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -918,15 +919,27 @@ function lowConfidenceMonitorNotes(input: ModelInput): string[] {
     .map((block) => block.text);
 }
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 5000; attempt += 1) {
-    if (predicate()) {
-      return;
-    }
-    await new Promise<void>((resolve) => setImmediate(resolve));
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("waitUntil timeoutMs must be positive");
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) throw new Error(`condition was not reached within ${timeoutMs}ms`);
+    await sleep(Math.min(10, remainingMs));
   }
-  throw new Error("condition was not reached during the deterministic test window");
 }
+
+describe("runtime test waitUntil helper", () => {
+  it("fails a missing condition at its bounded wall-clock deadline", async () => {
+    let attempts = 0;
+    const startedAt = performance.now();
+    await expect(waitUntil(() => { attempts += 1; return false; }, 25))
+      .rejects.toThrow("condition was not reached within 25ms");
+    const elapsedMs = performance.now() - startedAt;
+    expect(attempts).toBeGreaterThan(1);
+    expect(elapsedMs).toBeGreaterThanOrEqual(20);
+  });
+});
 
 function committedApprovalSignal(occurrence = 1) {
   let observed = 0;

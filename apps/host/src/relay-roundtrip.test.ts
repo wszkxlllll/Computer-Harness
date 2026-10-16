@@ -362,17 +362,22 @@ describe("relay roundtrip test port binding", () => {
       expect(hostBinding.port).not.toBe(occupiedPort);
       expect(relayFixtures).toHaveLength(2);
       expect(successfulRelay.server.listening).toBe(true);
-      const relayHealth = await fetch(`${relayOrigin}/healthz`);
+      const relayHealth = await fetch(`${relayOrigin}/healthz`, { signal: AbortSignal.timeout(5_000) });
       expect(relayHealth.status).toBe(200);
-      const hostileOrigin = await fetch(`${relayOrigin}/healthz`, { headers: { Origin: "http://127.0.0.1:1" } });
+      await expect(relayHealth.json()).resolves.toEqual({ status: "ok" });
+      const hostileOrigin = await fetch(`${relayOrigin}/healthz`, {
+        headers: { Origin: "http://127.0.0.1:1" },
+        signal: AbortSignal.timeout(5_000),
+      });
       expect(hostileOrigin.status).toBe(403);
+      await expect(hostileOrigin.json()).resolves.toEqual({ error: "origin_check_failed" });
       expect(hostBinding.fixture.origin).toBe(`http://localhost:${String(hostBinding.port)}`);
     } finally {
       if (successfulHost !== undefined) await successfulHost.close().catch(() => undefined);
       if (successfulRelay !== undefined) await successfulRelay.close().catch(() => undefined);
       await closeTcpServer(occupiedServer);
     }
-  });
+  }, 15_000);
 
   it("cleans up but does not retry a non-EADDRINUSE listen failure", async () => {
     const failure = new Error("fixture listen failed for a different reason");

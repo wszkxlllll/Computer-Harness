@@ -2,6 +2,8 @@
 
 本批修复最新入口：[中文PR #33](https://github.com/wszkxlllll/Computer-Harness/pull/33)；修复head的[完整CI已通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38874655299)，PR自身检查与合入状态以PR实时结果为准。[详细报告](./life-business-eight-task-results-2026-10-16.md)已记录profile保存重开实机确认、三类CI根因及本机symlink权限限制。Preview未替换；本条优先于下方按时点保留的等待状态。
 
+PR #33检查通过并已合main；合入后Windows又暴露共同测试等待器的固定次数轮询问题，补充分支`codex/ci-runtime-waits-20261016`集中修等待机制、同类GLM测试时钟及Relay fixture响应释放。Luna实施、Sol GO，根构建及2443项完整Vitest通过（本机限制并发4），不改生产Runtime/Provider/安全接口。补充PR及实际CI/合入结果通过PR #33关联说明查阅；不将原main失败隐去，Preview不变。
+
 2026-10-16 当前：[八题结果及离线修复/Monitor验收](./life-business-eight-task-results-2026-10-16.md)。八题全桌面前台DeepSeek/B00已结束、跳过G03，T03额外尝试均保留；没有足够证据判完整业务通过。后续修窗口清单合同、取消记录及非阻断Monitor，shadow记录候选不发送，guidance只提示不拒绝/暂停；2432项测试及类型检查通过，尚未重跑或部署Preview。评测入口提交`c0e64f2`、Runtime提交`d2b03d2`，目标分支`codex/life-eval-ready-20261015`，按用户授权推送，不合main。旧冻结记录不回写，后续须新包；用户每天手动通知开始实机，不设自动提醒。此记录优先于下方历史状态。
 
 推送后接续修复：layered Guard指引改为按公开schema决定是否填写`_harnessEffect`，消除list_windows额外参数歧义，保持Runtime校验/Guard准入不变；单独提交，Sol GO，完整回归及最终46项合同回归通过。详见同一报告末节，不另建分散文档。
