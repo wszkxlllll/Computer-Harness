@@ -179,6 +179,8 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 
 ## 当前操作、评测与验证专题
 
+- 购物售后与通信日程候选（2026-10-16）：[六题任务卡与独立来源预检](./life-business-shopping-communication-preflight-2026-10-16.md)；独立manifest及runner未整合状态见[套件说明](../eval/life-business-shopping-communication-20261016/README.md)。不属于原八题运行记录。
+
 - 入门与本机启动：[开发者上手](./getting-started.md)、[本地启动器](./local-launcher.md)。
 - SDK 与模块装配：[Run SDK 示例](./sdk-run-composition.md)、[Planning / Run Memory 组合](./pi-module-composition-2026-09-23.md)。
 - 手机控制：[快速操作指南](./mobile-control-guide-2026-09-26.md)、[技术与测试报告](./mobile-control-technical-report-2026-09-26.md)、[独立审查](./mobile-control-review-2026-09-26.md)、[问题与验收边界](./mobile-control-issues-2026-09-26.md)。
