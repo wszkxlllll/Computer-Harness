@@ -19,3 +19,4 @@ export {
   type GlmAdapterOptions,
 } from "./chat-completions.js";
 export * from "./deepseek.js";
+export * from "./ark.js";

@@ -366,14 +366,6 @@ describe("CLI DeepSeek Run configuration", () => {
     expect(JSON.stringify(config)).not.toContain("private-fixture-key");
   });
 
-  it("leaves absent overrides to runtime defaults", () => {
-    vi.stubEnv("DEEPSEEK_REQUEST_TIMEOUT_MS", undefined);
-    vi.stubEnv("DEEPSEEK_MAX_OUTPUT_TOKENS", undefined);
-    const config = toResolvedRunConfig(parseArgs(baseArgs), "Inspect the open task");
-    expect(config).not.toHaveProperty("deepseekRequestTimeoutMs");
-    expect(config).not.toHaveProperty("deepseekMaxOutputTokens");
-  });
-
   it.each([
     ["DEEPSEEK_REQUEST_TIMEOUT_MS", "241000"],
     ["DEEPSEEK_REQUEST_TIMEOUT_MS", "not-a-number"],
@@ -390,5 +382,95 @@ describe("CLI DeepSeek Run configuration", () => {
     glmArgs[3] = "glm-5.3-flash";
     expect(toResolvedRunConfig(parseArgs(glmArgs), "Inspect the open task")).not.toHaveProperty("deepseekRequestTimeoutMs");
     expect(() => toResolvedRunConfig(parseArgs([...glmArgs, "--risk-guard", "layered", "--risk-model", "deepseek-flash"]), "Inspect the open task")).toThrow();
+  });
+});
+
+describe("CLI Ark Agent Plan Run configuration", () => {
+  const baseArgs = ["--goal", "Inspect the open task", "--model", "deepseek-v4.1-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
+
+  it.each(["off", "same", "deepseek-v4.1-flash"] as const)("selects Ark without Qwen calibration with risk model %s", (riskModel) => {
+    const options = parseArgs([...baseArgs, "--risk-guard", "layered", "--risk-model", riskModel]);
+    const config = toResolvedRunConfig(options, "Inspect the open task");
+    expect(config.model).toBe("deepseek-v4.1-flash");
+    expect(config.riskModel).toBe(riskModel);
+    expect(config).not.toHaveProperty("qwenCoordinateMode");
+    expect(config).not.toHaveProperty("qwenThinking");
+    expect(() => parseArgs([...baseArgs, "--qwen-coordinate-mode", "actual_pixels"])).toThrow(/only valid with a Qwen model/u);
+  });
+
+  it("forwards only Ark overrides and keeps both provider keys out of configuration", () => {
+    vi.stubEnv("ARK_API_KEY", "private-ark-fixture-key");
+    vi.stubEnv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3");
+    vi.stubEnv("ARK_REQUEST_TIMEOUT_MS", "180000");
+    vi.stubEnv("ARK_MAX_OUTPUT_TOKENS", "8192");
+    vi.stubEnv("DEEPSEEK_API_KEY", "private-official-fixture-key");
+    vi.stubEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com");
+    vi.stubEnv("DEEPSEEK_REQUEST_TIMEOUT_MS", "invalid");
+    vi.stubEnv("DEEPSEEK_MAX_OUTPUT_TOKENS", "invalid");
+    vi.stubEnv("GLM_REQUEST_TIMEOUT_MS", "invalid");
+    const config = toResolvedRunConfig(parseArgs(baseArgs), "Inspect the open task");
+    expect(config).toMatchObject({
+      arkEndpoint: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      arkRequestTimeoutMs: 180000,
+      arkMaxOutputTokens: 8192,
+    });
+    for (const field of ["arkApiKey", "deepseekApiKey", "deepseekEndpoint", "deepseekRequestTimeoutMs", "deepseekMaxOutputTokens", "glmRequestTimeoutMs"]) {
+      expect(config).not.toHaveProperty(field);
+    }
+    expect(JSON.stringify(config)).not.toContain("private-ark-fixture-key");
+    expect(JSON.stringify(config)).not.toContain("private-official-fixture-key");
+  });
+
+  it.each([
+    ["ARK_REQUEST_TIMEOUT_MS", "241000"],
+    ["ARK_REQUEST_TIMEOUT_MS", "not-a-number"],
+    ["ARK_MAX_OUTPUT_TOKENS", "0"],
+    ["ARK_MAX_OUTPUT_TOKENS", "131073"],
+  ])("validates %s only when the main or risk model selects Ark", (name, value) => {
+    vi.stubEnv(name, value);
+    expect(() => toResolvedRunConfig(parseArgs(baseArgs), "Inspect the open task")).toThrow();
+    const officialArgs = [...baseArgs];
+    officialArgs[3] = "deepseek-flash";
+    expect(toResolvedRunConfig(parseArgs(officialArgs), "Inspect the open task")).not.toHaveProperty("arkRequestTimeoutMs");
+    expect(() => toResolvedRunConfig(parseArgs([...officialArgs, "--risk-guard", "layered", "--risk-model", "deepseek-v4.1-flash"]), "Inspect the open task")).toThrow();
+  });
+
+  it.each([
+    ["deepseek-flash", "deepseek-v4.1-flash"],
+    ["deepseek-v4.1-flash", "deepseek-flash"],
+  ])("keeps %s main-model settings independent from %s risk-model settings", (model, riskModel) => {
+    vi.stubEnv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3");
+    vi.stubEnv("ARK_REQUEST_TIMEOUT_MS", "90000");
+    vi.stubEnv("ARK_MAX_OUTPUT_TOKENS", "4096");
+    vi.stubEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com");
+    vi.stubEnv("DEEPSEEK_REQUEST_TIMEOUT_MS", "180000");
+    vi.stubEnv("DEEPSEEK_MAX_OUTPUT_TOKENS", "8192");
+    const args = [...baseArgs];
+    args[3] = model;
+    const config = toResolvedRunConfig(parseArgs([...args, "--risk-guard", "layered", "--risk-model", riskModel]), "Inspect the open task");
+    expect(config).toMatchObject({
+      model,
+      riskModel,
+      arkEndpoint: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      arkRequestTimeoutMs: 90000,
+      arkMaxOutputTokens: 4096,
+      deepseekEndpoint: "https://api.deepseek.com",
+      deepseekRequestTimeoutMs: 180000,
+      deepseekMaxOutputTokens: 8192,
+    });
+  });
+
+  it.each(["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"])("does not forward Ark settings to an unrelated %s Run", (model) => {
+    vi.stubEnv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3");
+    vi.stubEnv("ARK_REQUEST_TIMEOUT_MS", "invalid");
+    vi.stubEnv("ARK_MAX_OUTPUT_TOKENS", "invalid");
+    const args = [...baseArgs];
+    args[3] = model;
+    if (model === "qwen3.8-flash") args.push("--qwen-coordinate-mode", "normalized_1000");
+    const config = toResolvedRunConfig(parseArgs(args), "Inspect the open task");
+    expect(config.model).toBe(model);
+    expect(config).not.toHaveProperty("arkEndpoint");
+    expect(config).not.toHaveProperty("arkRequestTimeoutMs");
+    expect(config).not.toHaveProperty("arkMaxOutputTokens");
   });
 });

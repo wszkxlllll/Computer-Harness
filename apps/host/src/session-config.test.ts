@@ -57,6 +57,68 @@ describe("Host-local Run profile configuration", () => {
     }, env)).toThrow();
   });
 
+  it("isolates Ark Agent Plan from official DeepSeek and GLM configuration", () => {
+    const config = createHostSessionConfig({ ...hostArguments, model: "deepseek-v4.1-flash" }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {
+      ARK_API_KEY: "private-ark-fixture-key",
+      ARK_BASE_URL: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      ARK_REQUEST_TIMEOUT_MS: "180000",
+      ARK_MAX_OUTPUT_TOKENS: "8192",
+      DEEPSEEK_API_KEY: "private-official-fixture-key",
+      DEEPSEEK_BASE_URL: "https://api.deepseek.com",
+      DEEPSEEK_REQUEST_TIMEOUT_MS: "invalid",
+      DEEPSEEK_MAX_OUTPUT_TOKENS: "invalid",
+      GLM_THINKING: "invalid",
+      GLM_REQUEST_TIMEOUT_MS: "invalid",
+      GLM_MAX_INPUT_TOKENS: "invalid",
+      GLM_MAX_WIRE_INPUT_TOKENS: "invalid",
+    });
+    expect(config).toMatchObject({
+      model: "deepseek-v4.1-flash",
+      riskModel: "same",
+      arkEndpoint: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      arkRequestTimeoutMs: 180000,
+      arkMaxOutputTokens: 8192,
+      contextMaxInputTokens: 16_384,
+      contextMaxWireInputTokens: 24_576,
+    });
+    for (const field of ["arkApiKey", "deepseekApiKey", "deepseekEndpoint", "deepseekRequestTimeoutMs", "deepseekMaxOutputTokens", "glmThinking", "glmRequestTimeoutMs", "qwenCoordinateMode"]) {
+      expect(config).not.toHaveProperty(field);
+    }
+    expect(JSON.stringify(config)).not.toContain("private-ark-fixture-key");
+    expect(JSON.stringify(config)).not.toContain("private-official-fixture-key");
+  });
+
+  it.each([
+    { ARK_REQUEST_TIMEOUT_MS: "241000" },
+    { ARK_REQUEST_TIMEOUT_MS: "invalid" },
+    { ARK_MAX_OUTPUT_TOKENS: "0" },
+    { ARK_MAX_OUTPUT_TOKENS: "131073" },
+  ])("rejects invalid Ark request limits only for Ark", (env) => {
+    const profile = { profileLabel: "fixture", profileRoot: "fixture-profile" };
+    expect(() => createHostSessionConfig({ ...hostArguments, model: "deepseek-v4.1-flash" }, "fixture-output", profile, env)).toThrow();
+    const official = createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", profile, env);
+    expect(official).not.toHaveProperty("arkRequestTimeoutMs");
+    expect(official).not.toHaveProperty("arkMaxOutputTokens");
+  });
+
+  it.each(["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"] as const)("does not forward Ark settings into a %s Host", (model) => {
+    const config = createHostSessionConfig({ ...hostArguments, model }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {
+      ARK_BASE_URL: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      ARK_REQUEST_TIMEOUT_MS: "invalid",
+      ARK_MAX_OUTPUT_TOKENS: "invalid",
+    });
+    expect(config.model).toBe(model);
+    expect(config).not.toHaveProperty("arkEndpoint");
+    expect(config).not.toHaveProperty("arkRequestTimeoutMs");
+    expect(config).not.toHaveProperty("arkMaxOutputTokens");
+  });
+
   it("keeps both local profiles off by default and accepts only their enums", () => {
     expect(resolveHostRunProfileSettings({})).toEqual({});
     expect(resolveHostRunProfileSettings({

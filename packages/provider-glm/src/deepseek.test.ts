@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type ModelInput } from "@computer-harness/runtime";
-import { DeepseekFlashAdapter, DeepseekProviderError, FetchDeepseekHttpClient, type DeepseekHttpClient, type DeepseekTransportEvidence } from "./index.js";
+import { ArkDeepseekFlashAdapter, FetchArkHttpClient, DeepseekFlashAdapter, DeepseekProviderError, FetchDeepseekHttpClient, type DeepseekHttpClient, type DeepseekTransportEvidence } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "image" as AssetId, relativePath: "screenshots/image.png", mediaType: "image/png", byteLength: 3 };
@@ -257,5 +257,41 @@ describe("DeepSeek transport deadlines and privacy", () => {
       message: status === 200 ? "DeepSeek response body is not valid JSON" : "DeepSeek HTTP 401",
       retryable: false,
     });
+  });
+});
+
+describe("Ark Agent Plan transport boundary", () => {
+  it.each(["headers", "body"])("preserves the non-retryable %s deadline boundary", async (phase) => {
+    vi.useFakeTimers();
+    const never = new Promise<never>(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => phase === "headers" ? never : { ok: true, status: 200, json: () => never }));
+    const pending = new FetchArkHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, signal);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_REQUEST_TIMEOUT", retryable: false });
+    await vi.advanceTimersByTimeAsync(11);
+    await rejected;
+  });
+
+  it("preserves cancellation without converting it to an Ark failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<never>(() => {})));
+    const controller = new AbortController();
+    const reason = new Error("Run cancelled");
+    const pending = new FetchArkHttpClient().post("https://fixture.invalid", {}, {}, controller.signal);
+    const rejected = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+    await rejected;
+  });
+
+  it.each([[401, false], [429, true], [503, true]] as const)("keeps HTTP %s failures private and independently named", async (status, retryable) => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status, json: async () => ({ error: { message: "private credential and payload" } }) })));
+    await expect(new FetchArkHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({
+      name: "ArkProviderError", message: `Ark HTTP ${status}`, code: `ARK_HTTP_${status}`, retryable, retryMode: retryable ? "same_input" : "feedback",
+    });
+  });
+
+  it("retains finite response feedback and rejects interrupted responses", async () => {
+    const invalid = new ArkDeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: new Client({ choices: [] }) });
+    await expect(invalid.generate(input(), { signal })).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_INVALID_RESPONSE", retryable: true, retryMode: "feedback" });
+    const interrupted = new ArkDeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: new Client(response("click", { x: 1, y: 2 }, "length")) });
+    await expect(interrupted.generate(input(), { signal })).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_INCOMPLETE_RESPONSE", retryable: false });
   });
 });

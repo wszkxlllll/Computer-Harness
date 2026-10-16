@@ -198,6 +198,20 @@ describe("app-runtime RunHandle", () => {
       expect(createComputer).not.toHaveBeenCalled();
       expect(createEventWriter).not.toHaveBeenCalled();
       expect(createAssetStore).not.toHaveBeenCalled();
+      for (const risk of [false, true]) {
+        const outputDir = join(root, risk ? "ark-risk-run" : "ark-main-run");
+        await expect(createRun({
+          ...config(outputDir),
+          ...(risk ? { riskGuard: "layered" as const, riskModel: "deepseek-v4.1-flash" as const } : { model: "deepseek-v4.1-flash" as const }),
+        }, {
+          credentials: { glmApiKey: "fixture-main-key", deepseekApiKey: "fixture-official-key" },
+          createComputer, createEventWriter, createAssetStore,
+        })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+        await expect(readdir(outputDir)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(createComputer).not.toHaveBeenCalled();
+        expect(createEventWriter).not.toHaveBeenCalled();
+        expect(createAssetStore).not.toHaveBeenCalled();
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -210,6 +224,7 @@ describe("app-runtime RunHandle", () => {
       for (const [name, riskGuard, riskModel] of [
         ["guard-off", "off", "qwen3.8-flash"],
         ["guard-off-deepseek", "off", "deepseek-flash"],
+        ["guard-off-ark", "off", "deepseek-v4.1-flash"],
         ["same-model", "layered", "same"],
       ] as const) {
         const handle = await createRun({ ...config(join(root, name)), riskGuard, riskModel }, {
@@ -557,14 +572,18 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it("runs official DeepSeek with only its own credential and reports native multimodal usage privately", async () => {
+  it.each([
+    ["deepseek-flash", "deepseek", "https://api.deepseek.com/chat/completions"],
+    ["deepseek-v4.1-flash", "ark", "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"],
+  ] as const)("runs %s with only its own credential and reports native multimodal usage privately", async (model, channel, endpoint) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-deepseek-exchange-"));
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string) as Record<string, unknown>;
-      expect(_url).toBe("https://api.deepseek.com/chat/completions");
-      expect(body).toMatchObject({ model: "deepseek-flash", thinking: { type: "disabled" }, max_tokens: 4096 });
+      expect(_url).toBe(endpoint);
+      expect(init.headers).toMatchObject({ Authorization: "Bearer synthetic-provider-secret" });
+      expect(body).toMatchObject({ model, thinking: { type: "disabled" }, max_tokens: 4096 });
       return { ok: true, status: 200, json: async () => ({
-        model: "deepseek-flash",
+        model,
         choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{
           id: "deepseek-terminate", type: "function",
           function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result could not be verified." }) },
@@ -574,22 +593,23 @@ describe("app-runtime RunHandle", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const handle = await createRun({ ...config(outputDir), model: "deepseek-flash" }, {
-        credentials: { deepseekApiKey: "synthetic-deepseek-secret" },
+      const handle = await createRun({ ...config(outputDir), model }, {
+        credentials: channel === "ark" ? { arkApiKey: "synthetic-provider-secret" } : { deepseekApiKey: "synthetic-provider-secret" },
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
       await expect(handle.start()).resolves.toBe("failed");
       const report = await handle.report();
       expect(report.summary).toMatchObject({
-        model: "deepseek-flash", thinkingMode: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels",
-        glmThinking: null, glmMaxOutputTokens: null, deepseekMaxOutputTokens: 4096, deepseekRequestTimeoutMs: 90000,
+        model, thinkingMode: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels",
+        glmThinking: null, glmMaxOutputTokens: null,
+        ...(channel === "ark" ? { arkMaxOutputTokens: 4096, arkRequestTimeoutMs: 90000 } : { deepseekMaxOutputTokens: 4096, deepseekRequestTimeoutMs: 90000 }),
         modelReportedStatus: "failure", modelSummary: "The requested result could not be verified.",
       });
       const completed = report.events.find((event) => event.type === "model.response.received");
       expect(completed).toMatchObject({ turn: { usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30, cacheReadTokens: 15 } } });
       const record = JSON.parse((await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim()) as Record<string, unknown>;
       expect(record).toMatchObject({
-        provider: "deepseek", requestedModel: "deepseek-flash",
+        provider: channel, requestedModel: model,
         httpEvidence: { source: "fetch", stages: [
           { stage: "fetch_invoked", deadlineMs: 90000, requestConfiguration: { thinking: "disabled", maxTokens: 4096, imageCount: 1 } },
           { stage: "headers_received" }, { stage: "body_received", outcome: "success" },
@@ -597,9 +617,9 @@ describe("app-runtime RunHandle", () => {
         response: { usage: { cachedReadTokens: 15, cacheMissTokens: 5 } },
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(record)).not.toContain("synthetic-deepseek-secret");
+      expect(JSON.stringify(record)).not.toContain("synthetic-provider-secret");
       expect(JSON.stringify(record)).not.toContain("The requested result could not be verified.");
-      expect(JSON.stringify(report.summary)).not.toContain("synthetic-deepseek-secret");
+      expect(JSON.stringify(report.summary)).not.toContain("synthetic-provider-secret");
       await handle.close();
     } finally {
       vi.unstubAllGlobals();

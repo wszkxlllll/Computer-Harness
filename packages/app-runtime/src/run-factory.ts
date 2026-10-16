@@ -33,13 +33,13 @@ import { assertBuiltInProviderCredentials, createProvider } from "./providers.js
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { selectOperationGuidance } from "./operation-guidance.js";
-import { DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
+import { DEFAULT_ARK_REQUEST_TIMEOUT_MS, DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
-  if (typeof input.model === "string" && !["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"].includes(input.model)) {
+  if (typeof input.model === "string" && !["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash", "deepseek-v4.1-flash"].includes(input.model)) {
     throw new Error(`unsupported Provider model '${input.model}'`);
   }
-  if (!["off", "same", "glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"].includes(input.riskModel)) {
+  if (!["off", "same", "glm-5.3-flash", "qwen3.8-flash", "deepseek-flash", "deepseek-v4.1-flash"].includes(input.riskModel)) {
     throw new Error(`unsupported risk Provider model '${input.riskModel}'`);
   }
   const sourceLinkedFinish = validateSourceLinkedFinishContract(input.sourceLinkedFinish);
@@ -92,6 +92,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   if (input.model === "deepseek-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-flash")) {
     validateDeepseekRequestTimeoutMs(input.deepseekRequestTimeoutMs);
     validateDeepseekMaxOutputTokens(input.deepseekMaxOutputTokens);
+  }
+  if (input.model === "deepseek-v4.1-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-v4.1-flash")) {
+    validateDeepseekRequestTimeoutMs(input.arkRequestTimeoutMs);
+    validateDeepseekMaxOutputTokens(input.arkMaxOutputTokens);
   }
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
@@ -315,6 +319,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       } : {}),
       ...(dependencies.createProvider === undefined && config.model === "deepseek-flash" ? {
         providerAttemptReserveMs: config.deepseekRequestTimeoutMs ?? DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS,
+      } : {}),
+      ...(dependencies.createProvider === undefined && config.model === "deepseek-v4.1-flash" ? {
+        providerAttemptReserveMs: config.arkRequestTimeoutMs ?? DEFAULT_ARK_REQUEST_TIMEOUT_MS,
       } : {}),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,

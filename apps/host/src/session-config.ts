@@ -66,12 +66,19 @@ export function createHostSessionConfig(
   const baseUrl = env.DASHSCOPE_BASE_URL ?? env.DASHSCOPE_ENDPOINT;
   const glmEndpoint = env.GLM_BASE_URL;
   const deepseekModel = args.model === "deepseek-flash";
+  const arkModel = args.model === "deepseek-v4.1-flash";
   const deepseekRequestTimeoutMs = deepseekModel && env.DEEPSEEK_REQUEST_TIMEOUT_MS !== undefined
     ? Number(env.DEEPSEEK_REQUEST_TIMEOUT_MS.trim()) : DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS;
   const deepseekMaxOutputTokens = deepseekModel && env.DEEPSEEK_MAX_OUTPUT_TOKENS !== undefined
     ? Number(env.DEEPSEEK_MAX_OUTPUT_TOKENS.trim()) : DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS;
   validateDeepseekRequestTimeoutMs(deepseekRequestTimeoutMs);
   validateDeepseekMaxOutputTokens(deepseekMaxOutputTokens);
+  const arkRequestTimeoutMs = arkModel && env.ARK_REQUEST_TIMEOUT_MS !== undefined
+    ? Number(env.ARK_REQUEST_TIMEOUT_MS.trim()) : undefined;
+  const arkMaxOutputTokens = arkModel && env.ARK_MAX_OUTPUT_TOKENS !== undefined
+    ? Number(env.ARK_MAX_OUTPUT_TOKENS.trim()) : undefined;
+  validateDeepseekRequestTimeoutMs(arkRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(arkMaxOutputTokens);
   const profileSettings = resolveHostRunProfileSettings(env);
   return {
     model,
@@ -94,7 +101,7 @@ export function createHostSessionConfig(
     batching: "same-control-input-v1",
     contextMode: "recent",
     contextMaxHistoryEvents: 32,
-    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : deepseekModel ? { contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
+    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : deepseekModel || arkModel ? { contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
     ...(profileSettings.operationGuidance === undefined ? {} : { operationGuidance: profileSettings.operationGuidance }),
     riskProfile: "live-interactive",
     riskGuard: "layered",
@@ -106,7 +113,7 @@ export function createHostSessionConfig(
     // blocking a phone-driven action while the interaction path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
-    ...(!deepseekModel ? {
+    ...(!deepseekModel && !arkModel ? {
       glmThinking: readGlmThinking(env.GLM_THINKING),
       glmMaxOutputTokens: args.glmMaxOutputTokens,
       glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
@@ -116,6 +123,11 @@ export function createHostSessionConfig(
       deepseekRequestTimeoutMs,
       deepseekMaxOutputTokens,
       ...(env.DEEPSEEK_BASE_URL === undefined ? {} : { deepseekEndpoint: env.DEEPSEEK_BASE_URL }),
+    } : {}),
+    ...(arkModel ? {
+      ...(arkRequestTimeoutMs === undefined ? {} : { arkRequestTimeoutMs }),
+      ...(arkMaxOutputTokens === undefined ? {} : { arkMaxOutputTokens }),
+      ...(env.ARK_BASE_URL === undefined ? {} : { arkEndpoint: env.ARK_BASE_URL }),
     } : {}),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: env.DASHSCOPE_WORKSPACE_ID }),

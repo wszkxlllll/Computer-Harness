@@ -1,5 +1,9 @@
 # Computer Harness 文档索引
 
+## 火山方舟 Agent Plan 接入与 Windows 运行记录（2026-10-16）
+
+[接入、使用说明与运行边界](./volcengine-ark-agent-plan-2026-10-16.md)、[脱敏结果 JSON](./volcengine-ark-agent-plan-2026-10-16.json)：新增独立 `deepseek-v4.1-flash`／`ARK_API_KEY` 渠道，保留官方 DeepSeek。记录接入 smoke、disabled 两轮未完整通过和 Run 级 low 两轮业务通过，保留失败、有限恢复和截图／DOM时序限制。产品默认仍 disabled；low 是样本 Run 级配置，不修改团队默认。新 PR 只集成适配及材料，未把既有 Windows 修复候选的实跑冒充新分支验收。
+
 2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。
 
 2026-10-14 接续：Actions已恢复，66实际Windows共享evaluator hook路径错误已定位，测试portable file URL修复/新head验证优先；详见[当前执行记录](./astra-prfix-merge-execution-2026-10-14.md)。

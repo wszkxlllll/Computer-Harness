@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
-import { DeepseekFlashAdapter, FetchDeepseekHttpClient, FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
+import { ArkDeepseekFlashAdapter, FetchArkHttpClient, DeepseekFlashAdapter, FetchDeepseekHttpClient, FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
 import { Qwen38FlashAdapter } from "@computer-harness/provider-qwen";
 import type { ProviderAdapter } from "@computer-harness/runtime";
-import { RecordingDeepseekHttpClient, RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
-import { DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type ProviderFactory, type ProviderFactoryOptions } from "./config.js";
+import { RecordingArkHttpClient, RecordingDeepseekHttpClient, RecordingGlmHttpClient, RecordingQwenHttpClient } from "./diagnostics/recording-clients.js";
+import { DEFAULT_ARK_REQUEST_TIMEOUT_MS, DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type ProviderFactory, type ProviderFactoryOptions } from "./config.js";
 
 export class ProviderConfigurationError extends Error {
   public readonly code = "PROVIDER_CREDENTIALS_MISSING";
@@ -17,12 +17,14 @@ export class ProviderConfigurationError extends Error {
 /** Pure preflight shared by Run allocation and the Provider boundary. */
 export function assertBuiltInProviderCredentials(options: Pick<ProviderFactoryOptions, "model" | "credentials">): void {
   if (typeof options.model !== "string") return;
-  if (options.model !== "glm-5.3-flash" && options.model !== "qwen3.8-flash" && options.model !== "deepseek-flash") return;
+  if (options.model !== "glm-5.3-flash" && options.model !== "qwen3.8-flash" && options.model !== "deepseek-flash" && options.model !== "deepseek-v4.1-flash") return;
   const key = options.model === "glm-5.3-flash"
     ? options.credentials.glmApiKey
     : options.model === "qwen3.8-flash"
       ? options.credentials.qwenApiKey
-      : options.credentials.deepseekApiKey;
+      : options.model === "deepseek-v4.1-flash"
+        ? options.credentials.arkApiKey
+        : options.credentials.deepseekApiKey;
   if (key === undefined || key.trim().length === 0) throw new ProviderConfigurationError();
 }
 
@@ -47,6 +49,7 @@ export const createProvider: ProviderFactory = (options: ProviderFactoryOptions)
   }
   if (options.model === "qwen3.8-flash") return createQwenProvider(options);
   if (options.model === "deepseek-flash") return createDeepseekProvider(options);
+  if (options.model === "deepseek-v4.1-flash") return createArkProvider(options);
   if (options.model === "glm-5.3-flash") return createGlmProvider(options);
   throw new Error(`unsupported Provider model '${options.model}'`);
 };
@@ -106,5 +109,20 @@ function createDeepseekProvider(options: ProviderFactoryOptions): ProviderAdapte
     ),
     ...(options.config.deepseekEndpoint === undefined ? {} : { endpoint: options.config.deepseekEndpoint }),
     ...(options.config.deepseekMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.deepseekMaxOutputTokens }),
+  });
+}
+
+function createArkProvider(options: ProviderFactoryOptions): ProviderAdapter {
+  validateDeepseekRequestTimeoutMs(options.config.arkRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(options.config.arkMaxOutputTokens);
+  return new ArkDeepseekFlashAdapter({
+    apiKey: options.credentials.arkApiKey!,
+    assetReader: options.assetReader,
+    httpClient: options.httpClients?.ark ?? new RecordingArkHttpClient(
+      resolve(options.outputDir, "provider-exchanges.jsonl"),
+      new FetchArkHttpClient({ requestTimeoutMs: options.config.arkRequestTimeoutMs ?? DEFAULT_ARK_REQUEST_TIMEOUT_MS }),
+    ),
+    ...(options.config.arkEndpoint === undefined ? {} : { endpoint: options.config.arkEndpoint }),
+    ...(options.config.arkMaxOutputTokens === undefined ? {} : { maxOutputTokens: options.config.arkMaxOutputTokens }),
   });
 }

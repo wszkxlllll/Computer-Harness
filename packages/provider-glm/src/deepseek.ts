@@ -40,6 +40,7 @@ function isRetryableDeepseekResponseCode(code: string): boolean {
 
 const deepseekBoundary: ChatCompletionsBoundary = {
   label: "DeepSeek",
+  errorCodePrefix: "DEEPSEEK",
   endpoint: "https://api.deepseek.com/chat/completions",
   requestTimeoutMs: 90_000,
   maxOutputTokens: 4096,

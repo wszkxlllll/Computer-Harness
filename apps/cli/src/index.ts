@@ -234,7 +234,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     confirmRiskGuardOff: argv.includes("--confirm-risk-guard-off"),
   });
   const riskModelValue = value("--risk-model") ?? "off";
-  if (riskModelValue !== "off" && riskModelValue !== "same" && riskModelValue !== "glm-5.3-flash" && riskModelValue !== "qwen3.8-flash" && riskModelValue !== "deepseek-flash") throw new Error("--risk-model must be off, same, glm-5.3-flash, qwen3.8-flash, or deepseek-flash");
+  if (riskModelValue !== "off" && riskModelValue !== "same" && riskModelValue !== "glm-5.3-flash" && riskModelValue !== "qwen3.8-flash" && riskModelValue !== "deepseek-flash" && riskModelValue !== "deepseek-v4.1-flash") throw new Error("--risk-model must be off, same, glm-5.3-flash, qwen3.8-flash, deepseek-flash, or deepseek-v4.1-flash (Ark Agent Plan)");
   if (risk.riskGuard === "off" && riskModelValue !== "off") throw new Error("--risk-model requires --risk-guard layered");
   const riskMaxModelRequests = positiveInteger(value("--risk-max-model-requests"), 20, "--risk-max-model-requests");
   const riskTimeoutMs = positiveInteger(value("--risk-timeout-ms"), 30_000, "--risk-timeout-ms");
@@ -330,9 +330,10 @@ async function main(): Promise<void> {
     process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
     process.stdout.write("Experimental direct Run only: --recover-bound-window-missing plus exact --cua-window-* and --cua-recovery-window-* targets can use --reopen-saved-document <absolute-path>; hybrid browser recovery additionally requires --grounding hybrid-catalog-v1, an explicit --managed-browser-url, and the ephemeral profile. Not available in TUI or the phone API.\n");
     process.stdout.write("Run option: --source-linked-finish-contract <json> explicitly requires a bounded source-linked-finish-v1 field contract for this Run.\n");
-    process.stdout.write("Model selection: --model glm-5.3-flash|qwen3.8-flash|deepseek-flash is fixed for each Run and TUI session; restart with another model to switch. No automatic fallback or action replay. --risk-model also accepts deepseek-flash.\n");
+    process.stdout.write("Model selection: --model glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash is fixed for each Run and TUI session; restart with another model to switch. No automatic fallback or action replay. --risk-model also accepts deepseek-flash (DeepSeek official) and deepseek-v4.1-flash (Volcengine Ark Agent Plan).\n");
     process.stdout.write("DeepSeek private env: DEEPSEEK_API_KEY; optional DEEPSEEK_BASE_URL, DEEPSEEK_REQUEST_TIMEOUT_MS (default 90000), DEEPSEEK_MAX_OUTPUT_TOKENS (default 4096). Native tools, thinking disabled, actual-pixel coordinates; no Qwen coordinate flag needed.\n");
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash|deepseek-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Volcengine Ark Agent Plan private env: ARK_API_KEY; optional ARK_BASE_URL (default https://ark.cn-beijing.volces.com/api/plan/v3), ARK_REQUEST_TIMEOUT_MS (default 90000), ARK_MAX_OUTPUT_TOKENS (default 4096). Model deepseek-v4.1-flash; native tools, thinking disabled, actual-pixel coordinates.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
   }
@@ -517,6 +518,13 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
   const deepseekMaxOutputTokens = rawDeepseekMaxOutputTokens === undefined ? undefined : Number(rawDeepseekMaxOutputTokens.trim());
   validateDeepseekRequestTimeoutMs(deepseekRequestTimeoutMs);
   validateDeepseekMaxOutputTokens(deepseekMaxOutputTokens);
+  const arkSelected = options.model === "deepseek-v4.1-flash" || options.riskModel === "deepseek-v4.1-flash";
+  const rawArkRequestTimeoutMs = arkSelected ? process.env.ARK_REQUEST_TIMEOUT_MS : undefined;
+  const rawArkMaxOutputTokens = arkSelected ? process.env.ARK_MAX_OUTPUT_TOKENS : undefined;
+  const arkRequestTimeoutMs = rawArkRequestTimeoutMs === undefined ? undefined : Number(rawArkRequestTimeoutMs.trim());
+  const arkMaxOutputTokens = rawArkMaxOutputTokens === undefined ? undefined : Number(rawArkMaxOutputTokens.trim());
+  validateDeepseekRequestTimeoutMs(arkRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(arkMaxOutputTokens);
   const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
   const hybridNativeWebDocument = options.recoverBoundWindowMissing
     && options.grounding === "hybrid-catalog-v1"
@@ -600,7 +608,10 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(deepseekRequestTimeoutMs === undefined ? {} : { deepseekRequestTimeoutMs }),
     ...(deepseekMaxOutputTokens === undefined ? {} : { deepseekMaxOutputTokens }),
-    ...(process.env.DEEPSEEK_BASE_URL === undefined ? {} : { deepseekEndpoint: process.env.DEEPSEEK_BASE_URL }),
+    ...(!deepseekSelected || process.env.DEEPSEEK_BASE_URL === undefined ? {} : { deepseekEndpoint: process.env.DEEPSEEK_BASE_URL }),
+    ...(arkRequestTimeoutMs === undefined ? {} : { arkRequestTimeoutMs }),
+    ...(arkMaxOutputTokens === undefined ? {} : { arkMaxOutputTokens }),
+    ...(!arkSelected || process.env.ARK_BASE_URL === undefined ? {} : { arkEndpoint: process.env.ARK_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };
 }
@@ -624,12 +635,14 @@ function readProviderCredentials(): ProviderCredentials {
   const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   const qwenApiKey = process.env.DASHSCOPE_API_KEY;
   const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
+  const arkApiKey = process.env.ARK_API_KEY;
   const memoryEmbeddingApiKey = process.env.MEMORY_EMBEDDING_API_KEY;
   const osworldBridgeToken = process.env.OSWORLD_BRIDGE_TOKEN;
   return {
     ...(glmApiKey === undefined ? {} : { glmApiKey }),
     ...(qwenApiKey === undefined ? {} : { qwenApiKey }),
     ...(deepseekApiKey === undefined ? {} : { deepseekApiKey }),
+    ...(arkApiKey === undefined ? {} : { arkApiKey }),
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };

@@ -30,6 +30,7 @@ describe("CLI CUA doctor command", () => {
     expect(resolveCliModel(undefined, true)).toBe("glm-5.3-flash");
     expect(resolveCliModel("qwen3.8-flash", false)).toBe("qwen3.8-flash");
     expect(resolveCliModel("deepseek-flash", false)).toBe("deepseek-flash");
+    expect(resolveCliModel("deepseek-v4.1-flash", false)).toBe("deepseek-v4.1-flash");
     expect(() => resolveCliModel("deepseek-chat", false)).toThrow(/--model must be/iu);
   });
 

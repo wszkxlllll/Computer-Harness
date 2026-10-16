@@ -22,7 +22,7 @@ import type { ComputerBackendConfig, ComputerFactoryDependencies } from "./compu
 import type { RunReport } from "./reporting.js";
 import type { RunEventFeed } from "./event-feed.js";
 
-export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash" | "deepseek-flash";
+export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash" | "deepseek-flash" | "deepseek-v4.1-flash";
 export const DEFAULT_GLM_REQUEST_TIMEOUT_MS = 90_000;
 export const MIN_GLM_REQUEST_TIMEOUT_MS = 1_000;
 export const MAX_GLM_REQUEST_TIMEOUT_MS = 240_000;
@@ -35,6 +35,8 @@ export function validateGlmRequestTimeoutMs(value: number | undefined): void {
 
 export const DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS = 90_000;
 export const DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS = 4096;
+export const DEFAULT_ARK_REQUEST_TIMEOUT_MS = 90_000;
+export const DEFAULT_ARK_MAX_OUTPUT_TOKENS = 4096;
 
 export function validateDeepseekRequestTimeoutMs(value: number | undefined): void {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < 1_000 || value > 240_000)) {
@@ -128,6 +130,11 @@ export interface ResolvedRunConfig {
   deepseekRequestTimeoutMs?: number;
   /** Non-thinking DeepSeek completion budget; defaults to 4096. */
   deepseekMaxOutputTokens?: number;
+  arkEndpoint?: string;
+  /** Wall-clock deadline for one Ark Agent Plan request; defaults to 90000ms. */
+  arkRequestTimeoutMs?: number;
+  /** Non-thinking Ark completion budget; defaults to 4096. */
+  arkMaxOutputTokens?: number;
   fixtureResult?: string;
   monitor?: MonitorPolicyMode;
 }
@@ -137,6 +144,7 @@ export interface ProviderCredentials {
   glmApiKey?: string;
   qwenApiKey?: string;
   deepseekApiKey?: string;
+  arkApiKey?: string;
   /** Independent embedding credential; never serialized into ResolvedRunConfig. */
   memoryEmbeddingApiKey?: string;
   osworldBridgeToken?: string;
@@ -153,6 +161,7 @@ export interface ProviderFactoryOptions {
     glm?: ProviderHttpClient;
     qwen?: ProviderHttpClient;
     deepseek?: ProviderHttpClient;
+    ark?: ProviderHttpClient;
   };
 }
 

@@ -1,5 +1,5 @@
 import { appendFile } from "node:fs/promises";
-import { FetchGlmHttpClient, FetchDeepseekHttpClient, type DeepseekHttpClient, type GlmHttpClient, type GlmHttpDiagnostics, type GlmTransportEvidence } from "@computer-harness/provider-glm";
+import { FetchArkHttpClient, FetchGlmHttpClient, FetchDeepseekHttpClient, type ArkHttpClient, type DeepseekHttpClient, type GlmHttpClient, type GlmHttpDiagnostics, type GlmTransportEvidence } from "@computer-harness/provider-glm";
 import { FetchQwenHttpClient, type QwenHttpClient, type Qwen38OutputMode, type Qwen38ThinkingMode, type QwenCoordinateMode } from "@computer-harness/provider-qwen";
 import {
   providerRequestToolProjection,
@@ -13,7 +13,7 @@ class RecordingChatCompletionsHttpClient implements GlmHttpClient {
   private readonly inner: GlmHttpClient;
   private requestNumber = 0;
 
-  public constructor(private readonly path: string, inner: GlmHttpClient = new FetchGlmHttpClient(), private readonly provider: "glm" | "deepseek" = "glm") {
+  public constructor(private readonly path: string, inner: GlmHttpClient = new FetchGlmHttpClient(), private readonly provider: "glm" | "deepseek" | "ark" = "glm") {
     this.inner = inner;
   }
 
@@ -74,6 +74,12 @@ export class RecordingGlmHttpClient extends RecordingChatCompletionsHttpClient {
 export class RecordingDeepseekHttpClient extends RecordingChatCompletionsHttpClient {
   public constructor(path: string, inner: DeepseekHttpClient = new FetchDeepseekHttpClient()) {
     super(path, inner, "deepseek");
+  }
+}
+
+export class RecordingArkHttpClient extends RecordingChatCompletionsHttpClient {
+  public constructor(path: string, inner: ArkHttpClient = new FetchArkHttpClient()) {
+    super(path, inner, "ark");
   }
 }
 

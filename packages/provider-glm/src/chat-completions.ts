@@ -122,6 +122,7 @@ export class GlmProviderError extends Error {
 /** Internal shared OpenAI-compatible projection and transport boundary. */
 export interface ChatCompletionsBoundary {
   readonly label: string;
+  readonly errorCodePrefix: string;
   readonly endpoint: string;
   readonly requestTimeoutMs: number;
   readonly maxOutputTokens: number;
@@ -135,6 +136,7 @@ export interface ChatCompletionsBoundary {
 
 const glmBoundary: ChatCompletionsBoundary = {
   label: "GLM",
+  errorCodePrefix: "GLM",
   endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
   requestTimeoutMs: 240_000,
   maxOutputTokens: 8192,
@@ -143,7 +145,7 @@ const glmBoundary: ChatCompletionsBoundary = {
 };
 
 function providerError(boundary: ChatCompletionsBoundary, message: string, code?: string, retryable?: boolean, retryMode?: GlmRetryMode): Error {
-  return boundary.error(message.replace(/\bGLM\b/gu, boundary.label), code?.replace(/^GLM_/u, boundary.label === "GLM" ? "GLM_" : "DEEPSEEK_"), retryable, retryMode);
+  return boundary.error(message.replace(/\bGLM\b/gu, boundary.label), code?.replace(/^GLM_/u, `${boundary.errorCodePrefix}_`), retryable, retryMode);
 }
 
 export class ChatCompletionsAdapter implements ProviderAdapter {
