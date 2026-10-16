@@ -331,3 +331,39 @@ PR #33最终head `191a527`的[PR检查38875193625](https://github.com/wszkxlllll
 集中修复已完成：共同waitUntil采用单调时钟的5秒deadline与最多10ms真实timer yield，未改变任何消费者predicate/安全断言；唯一fake timer用例不调用该helper且正常还原。新增false predicate的25ms有界失败回归，不使用依赖机器调度的耗时上界。Runtime整文件194项、原失败组重复验证通过。同类检查将GLM四处普通fake timers纳入performance统一时钟，不动其自定义monotonic spy用例、取消先后及late promise断言，64项通过。
 
 根首轮完整Vitest仍有新增Relay端口fixture超出默认5秒，其余2442项通过；未省略该失败。补全两项HTTP响应体读取并各设5秒deadline，fixture总预算15秒与原roundtrip一致；不改生产服务。未读body为实际资源处理遗漏，但没有单点计时证据证明它是首轮超时唯一原因。Sol对以上各增量最终GO。根独立相关三文件262项、构建及最终完整Vitest **134文件2443/2443通过**（本机最终全量使用`--maxWorkers 4 --minWorkers 1`控制并发，远端仍按原CI配置验证，不修改CI或跳过测试）。最后补充PR仍须实际四矩阵通过后再合main，入口由PR #33的关联补充说明进入；没有替换Preview。
+
+## 同伴更新复审：任务卡与方舟渠道（2026-10-16）
+
+范围：任务卡[PR #35](https://github.com/wszkxlllll/Computer-Harness/pull/35)已合main `e970fea`；方舟[PR #36](https://github.com/wszkxlllll/Computer-Harness/pull/36)检查head `1cdc14ea`，目标为旧`codex/runtime-surface-preview-20261003`/`d308906`，并非当前main。此处只读审源码、候选JSON和远端CI，抽查官方资料；未独立执行PR提交树测试、调用模型API、操作桌面、评论/修改PR或合并。
+
+### 任务卡：可以保留，尚不能直接批量运行
+
+新增购物售后S01/S02/S03及通信日程CM01/CM02/CM03，各为easy/medium/hard。根离线独立核对六个Markdown Goal与JSON逐字一致、九条sourceRegistry引用均可解析、每题五维权重合计100、输出文件夹与文件名分行；原九题manifest相对`b2425f6`字节不变。网页抽查商品页、重复日程手册和iCloud共享手册均可读；没有重复同伴对全部九个来源的完整预检，不把其curl回执称为本轮执行。
+
+目前是五类共15张候选卡，第六类社区缴费仍未加入；历史八题运行和评分没有被扩写。四题是公开网页调研答复，两道hard为浏览器→WPS新DOCX。CM类查询Mac/日历说明不代表实际打开信息App、创建日程或验证提醒送达；可以作信息准确性题，不可包装成该类原生应用操作已通过。S03/CM03仍需运行包填`OUTPUT_DIR`；CM02日期在正式冻结前按实际测试时间确认，对照期间不能随意改Goal。
+
+新增manifest为独立候选suite，现有`life-eval`入口仍固定原MANIFEST_PATH/SUITE_ID，且createPlan验证原suite；不能只输入S01就声称已接入。下一步在不修改旧九题的前提下接入明确suite选择、准备/冻结、成果检查和人工评分，保留来源/评分要求不进入模型Goal的边界，再做GUI预检。PR35唯一Web变更是等待录音取消后的实际焦点恢复，仍断言同一按钮及不提交文本，没有产品UI改动；PR35与合入后main CI均已实际成功。
+
+### 方舟：是独立API渠道，不是另一个Planning系统
+
+`ArkDeepseekFlashAdapter`仅约102行，复用ChatCompletionsAdapter与ToolRegistry投影，另有ARK_API_KEY、方舟endpoint/HTTP client、ARK错误前缀及recording provider=ark。官方DeepSeek渠道保留，不自动fallback，不改Computer/Context/Planning/Memory主循环。共享errorCodePrefix替代原先非GLM一律映射DEEPSEEK的分支，属于合理的最小适配；没有理由为此次接入重造Runtime。
+
+[官方模型公告](https://docs.volcengine.com/docs/ark/agent-plan-personal-model-release?lang=en)列明`deepseek-v4.1-flash`及视觉理解能力；[官方接入页](https://docs.volcengine.com/docs/ark/agent-plan-personal-deepseek-harness?lang=en)列出OpenAI兼容的plan/v3地址。本次不评定套餐价格、费用或长期可用性。Agent Plan名称不改变本项目TaskState/Planning的职责。
+
+### 优先级及接续建议
+
+| 级别 | 发现/判断 | 建议 |
+| --- | --- | --- |
+| P1：集成前置 | PR36目标是旧Preview。两条DeepSeek前置改动已在main，旧树没有PR33/34的Monitor、清理和CI收尾；其CI全绿只说明该目标树通过 | 以最新main重建干净接入分支，移植Ark增量，不重复带入已合前置、不覆盖当前修复。对最新组合重跑构建、Provider/Host/CLI/诊断回归及CI，再授权API/桌面验证 |
+| P1：回归覆盖 | Ark增量删除`apps/host/src/glm-output-budget.test.ts`整项source-contract测试，连同env加载顺序、GLM审计、输入预算及Windows输入接线检查消失 | 不为新渠道直接删除整项。可修必要文案断言，或用等价行为测试替换；明确覆盖GLM原接线且与Ark配置隔离 |
+| P1：默认切换依据不足（不否定渠道接入） | 产品Ark adapter第92行固定thinking disabled。两轮业务通过却通过自定义createProvider注入low，历史运行还含PR30本地修复 | 现证据只放行继续接入实验，不能据此切产品默认/称最新main已通过。冻结可复现low入口与有效配置，再在同版同题做对照；不把其他修复收益算给渠道 |
+| P2：统计与复现 | reporting.ts第137行把Ark thinkingMode硬编码disabled，注入low样本需靠transport才能识别；四轮没有多GUI batch | 分开报告配置默认与实际请求。先复用已有安全transport字段聚合有效thinking，不新增无消费者字段；不能从这四轮推出Batch收益或通用成功率 |
+| P2：诊断与测试 | Ark按直连DeepSeek缓存字段投影；官方Ark Chat API常见nested cached_tokens不能据品牌推定相同。PR36测试仍使用旧fake timer设置 | 按Agent Plan实际脱敏usage核对缓存字段并加Ark recorder回归，不认定当前费用已测；移植main已修的performance统一时钟，Ark headers/body用例也验证确已进入对应phase |
+
+本轮未发现证据证明模型渠道互相串key、自动回放未知动作或破坏平台Computer抽象，不虚构P0。也不因为CI通过就忽略上述集成及证据缺口。额外小项：`DEFAULT_ARK_MAX_OUTPUT_TOKENS`仅定义未消费，应统一到实际默认值生产者或删除，避免多处4096日后漂移。缓存判断依据为[Ark Chat API](https://docs.volcengine.com/docs/ark/chat-api?lang=zh&redirect=1)的字段说明；它不是Agent Plan当前账户的实回证据。
+
+### 如何看四轮结果
+
+同伴报告disabled两轮分别27请求/110.087秒（取消、无最终清单）与48请求/193.993秒（Runtime成功但业务未过）；注入low两轮41请求/391.743秒和19请求/111.910秒，均通过其M01必需清单。保留失败、区分Runtime/业务成功是正确改进。low有积极信号，但样本只有同题两次，较快与较慢的轮次都存在；没有匹配的官方渠道对照和同树验收，不能说“显著更快”或已解决事实丢失。价格和完整请求成本未知。
+
+结论：任务卡更新可继续作为候选准备，先接runner，不把五类说成六类完成；方舟适配方向可接受，先整改目标分支与回归覆盖，再作为可选渠道验证，暂不切默认、不替换Preview。审查意见仅落本报告，不擅自给同伴发评论或修改其分支。
