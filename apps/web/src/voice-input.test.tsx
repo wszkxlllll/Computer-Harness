@@ -184,7 +184,7 @@ describe("voice input control", () => {
     cancelButton.focus();
     fireEvent.click(cancelButton);
     await waitFor(() => expect(cancelVoiceInput).toHaveBeenCalledWith("voice-session-1", 2));
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "重新录音" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "重新录音" })));
     expect(capture.cancelled).toBe(true);
     expect(finishVoiceInput).not.toHaveBeenCalled();
     expect(onTranscript).not.toHaveBeenCalled();
