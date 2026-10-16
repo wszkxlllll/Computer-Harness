@@ -241,6 +241,154 @@ async function getFreePort(): Promise<number> {
   return address.port;
 }
 
+async function listenWithPortCollisionRetry<T>(options: {
+  readonly getPort: () => Promise<number>;
+  readonly create: (port: number) => T;
+  readonly listen: (fixture: T) => Promise<void>;
+  readonly close: (fixture: T) => Promise<void>;
+}): Promise<{ readonly fixture: T; readonly port: number }> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const port = await options.getPort();
+    const fixture = options.create(port);
+    try {
+      await options.listen(fixture);
+      return { fixture, port };
+    } catch (error) {
+      try {
+        await options.close(fixture);
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "failed to close a test server after listen failure", { cause: error });
+      }
+      if (!isAddressInUse(error) || attempt === 3) throw error;
+    }
+  }
+  throw new Error("test server port allocation exhausted without a listen result");
+}
+
+function isAddressInUse(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error as { readonly code?: unknown }).code === "EADDRINUSE";
+}
+
+async function listenOnTcpPort(server: ReturnType<typeof createServer>, port: number): Promise<void> {
+  await new Promise<void>((resolveListen, rejectListen) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      rejectListen(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolveListen();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function closeTcpServer(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolveClose, rejectClose) => {
+    server.close((error) => error === undefined ? resolveClose() : rejectClose(error));
+  });
+}
+
+describe("relay roundtrip test port binding", () => {
+  it("retries real Relay and Host bindings on EADDRINUSE without restarting an already-listening Relay", async () => {
+    const occupiedServer = createServer();
+    await listenOnTcpPort(occupiedServer, 0);
+    const occupiedAddress = occupiedServer.address();
+    if (occupiedAddress === null || typeof occupiedAddress === "string") throw new Error("occupied fixture did not expose its TCP port");
+    const occupiedPort = occupiedAddress.port;
+    const relayFixtures: Array<{ readonly port: number; readonly relay: ReturnType<typeof createRelayServer> }> = [];
+    const hostFixtures: Array<{ readonly port: number; readonly host: ReturnType<typeof createHostServer> }> = [];
+    let successfulRelay: ReturnType<typeof createRelayServer> | undefined;
+    let successfulHost: ReturnType<typeof createHostServer> | undefined;
+    let relayPortRequest = 0;
+    let hostPortRequest = 0;
+    const getRelayPort = async () => relayPortRequest++ === 0 ? occupiedPort : await getFreePort();
+    const getHostPort = async () => hostPortRequest++ === 0 ? occupiedPort : await getFreePort();
+    try {
+      const relayBinding = await listenWithPortCollisionRetry({
+        getPort: getRelayPort,
+        create: (port) => {
+          const origin = `http://127.0.0.1:${String(port)}`;
+          const relay = createRelayServer({
+            publicOrigin: origin,
+            listenHost: "127.0.0.1",
+            listenPort: port,
+            hostCredentials: new Map([["host_fixture", "fixture-credential"]]),
+          });
+          relayFixtures.push({ port, relay });
+          return { port, origin, relay };
+        },
+        listen: async (fixture) => {
+          await fixture.relay.listen();
+          const address = fixture.relay.server.address();
+          if (address === null || typeof address === "string" || address.port !== fixture.port) {
+            throw new Error("Relay did not bind its configured fixture port");
+          }
+        },
+        close: async (fixture) => await fixture.relay.close(),
+      });
+      successfulRelay = relayBinding.fixture.relay;
+      expect(relayFixtures).toHaveLength(2);
+      expect(relayFixtures[0]?.relay.server.listening).toBe(false);
+      expect(relayBinding.port).not.toBe(occupiedPort);
+
+      const relayOrigin = relayBinding.fixture.origin;
+      const hostBinding = await listenWithPortCollisionRetry({
+        getPort: getHostPort,
+        create: (port) => {
+          const origin = `http://localhost:${String(port)}`;
+          const host = createHostServer({
+            api: {} as unknown as Parameters<typeof createHostServer>[0]["api"],
+            allowedOrigins: [origin, relayOrigin],
+            bridgeOrigin: relayOrigin,
+            port,
+          });
+          hostFixtures.push({ port, host });
+          return { port, origin, host };
+        },
+        listen: async (fixture) => {
+          const address = new URL(await fixture.host.listen());
+          if (Number(address.port) !== fixture.port) throw new Error("Host did not bind its configured fixture port");
+        },
+        close: async (fixture) => await fixture.host.close(),
+      });
+      successfulHost = hostBinding.fixture.host;
+      expect(hostFixtures).toHaveLength(2);
+      expect(hostFixtures[0]?.host.server.server.listening).toBe(false);
+      expect(hostBinding.port).not.toBe(occupiedPort);
+      expect(relayFixtures).toHaveLength(2);
+      expect(successfulRelay.server.listening).toBe(true);
+      const relayHealth = await fetch(`${relayOrigin}/healthz`);
+      expect(relayHealth.status).toBe(200);
+      const hostileOrigin = await fetch(`${relayOrigin}/healthz`, { headers: { Origin: "http://127.0.0.1:1" } });
+      expect(hostileOrigin.status).toBe(403);
+      expect(hostBinding.fixture.origin).toBe(`http://localhost:${String(hostBinding.port)}`);
+    } finally {
+      if (successfulHost !== undefined) await successfulHost.close().catch(() => undefined);
+      if (successfulRelay !== undefined) await successfulRelay.close().catch(() => undefined);
+      await closeTcpServer(occupiedServer);
+    }
+  });
+
+  it("cleans up but does not retry a non-EADDRINUSE listen failure", async () => {
+    const failure = new Error("fixture listen failed for a different reason");
+    let portRequests = 0;
+    let cleanupCalls = 0;
+    await expect(listenWithPortCollisionRetry({
+      getPort: async () => { portRequests += 1; return 12345; },
+      create: (port) => ({ port }),
+      listen: async () => { throw failure; },
+      close: async () => { cleanupCalls += 1; },
+    })).rejects.toBe(failure);
+    expect(portRequests).toBe(1);
+    expect(cleanupCalls).toBe(1);
+  });
+});
+
 interface CdpEnvelope {
   id?: number;
   result?: Record<string, unknown>;
@@ -912,11 +1060,9 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
   it("pairs locally, approves on the Host, runs a real ApplicationSession, and reads its result/assets through Relay", async () => {
     const hostId = "host_roundtrip";
     const credential = randomBytes(32).toString("base64url");
-    const relayPort = await getFreePort();
-    const relayOrigin = "http://127.0.0.1:" + String(relayPort);
-    const hostPort = await getFreePort();
-    const localOrigin = "http://localhost:" + String(hostPort);
-    const hostWireOrigin = "http://127.0.0.1:" + String(hostPort);
+    let relayOrigin = "";
+    let localOrigin = "";
+    let hostWireOrigin = "";
     const headlessProbeEnabled = process.env.HARNESS_MOBILE_HEADLESS_RELAY_PROBE === "1";
     const screenshotDirectoryInput = process.env.HARNESS_MOBILE_HEADLESS_RELAY_ASSET_DIR;
     if (screenshotDirectoryInput !== undefined && !headlessProbeEnabled) {
@@ -939,14 +1085,7 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
     let diagnosticLargeAssetReadSuccesses = 0;
     let diagnosticInlinePreviewFailureInjected = false;
     let diagnosticScreenshotRunId: string | undefined;
-    const relay = createRelayServer({
-      publicOrigin: relayOrigin,
-      listenHost: "127.0.0.1",
-      listenPort: relayPort,
-      webRoot,
-      hostCredentials: new Map([[hostId, credential]]),
-      requestTimeoutMs: 5_000,
-    });
+    let relay: ReturnType<typeof createRelayServer> | undefined;
     let session: ApplicationSession | undefined;
     let host: ReturnType<typeof createHostServer> | undefined;
     let connector: HostRelayConnector | undefined;
@@ -968,7 +1107,34 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
     const hostStartTargets: Array<Parameters<ApplicationRemoteRunApi["startRun"]>[3]> = [];
 
     try {
-      await relay.listen();
+      const relayBinding = await listenWithPortCollisionRetry({
+        getPort: getFreePort,
+        create: (port) => {
+          const origin = `http://127.0.0.1:${String(port)}`;
+          return {
+            port,
+            origin,
+            relay: createRelayServer({
+              publicOrigin: origin,
+              listenHost: "127.0.0.1",
+              listenPort: port,
+              webRoot,
+              hostCredentials: new Map([[hostId, credential]]),
+              requestTimeoutMs: 5_000,
+            }),
+          };
+        },
+        listen: async (fixture) => {
+          await fixture.relay.listen();
+          const address = fixture.relay.server.address();
+          if (address === null || typeof address === "string" || address.port !== fixture.port) {
+            throw new Error("Relay did not bind the configured fixture endpoint");
+          }
+        },
+        close: async (fixture) => await fixture.relay.close(),
+      });
+      relay = relayBinding.fixture.relay;
+      relayOrigin = relayBinding.fixture.origin;
       session = new ApplicationSession({
         config: { ...sessionConfig(outputDir), ...(headlessProbeEnabled ? { cleanupDeadlineMs: 30_000 } : {}) },
         owner: new InProcessEnvironmentOwner(),
@@ -1083,21 +1249,41 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         if (runNoticeContentEnabled === true) hostRunNoticeContentOptIns.push(true);
         return originalStartRun(deviceId, commandId, goal, target, assistantPreferences, runNoticeContentEnabled);
       };
-      host = createHostServer({
-        api,
-        allowedOrigins: [localOrigin, relayOrigin],
-        bridgeOrigin: relayOrigin,
-        pairingUrlForToken: (token) => relayOrigin + "/pair?token=" + encodeURIComponent(token),
-        registerPairingToken: (registration) => {
-          if (connector === undefined) throw new Error("Relay connector has not been started.");
-          return connector.registerPairingToken(registration);
+      const hostBinding = await listenWithPortCollisionRetry({
+        getPort: getFreePort,
+        create: (port) => {
+          const origin = `http://localhost:${String(port)}`;
+          const wireOrigin = `http://127.0.0.1:${String(port)}`;
+          return {
+            port,
+            origin,
+            wireOrigin,
+            host: createHostServer({
+              api,
+              allowedOrigins: [origin, relayOrigin],
+              bridgeOrigin: relayOrigin,
+              pairingUrlForToken: (token) => relayOrigin + "/pair?token=" + encodeURIComponent(token),
+              registerPairingToken: (registration) => {
+                if (connector === undefined) throw new Error("Relay connector has not been started.");
+                return connector.registerPairingToken(registration);
+              },
+              unregisterPairingToken: (pairingId) => connector?.unregisterPairingToken(pairingId),
+              revokeDeviceSession: (deviceId) => connector?.revokeDeviceSession(deviceId),
+              staticRoot: webRoot,
+              port,
+            }),
+          };
         },
-        unregisterPairingToken: (pairingId) => connector?.unregisterPairingToken(pairingId),
-        revokeDeviceSession: (deviceId) => connector?.revokeDeviceSession(deviceId),
-        staticRoot: webRoot,
-        port: hostPort,
+        listen: async (fixture) => {
+          const boundAddress = await fixture.host.listen();
+          const address = new URL(boundAddress);
+          if (Number(address.port) !== fixture.port) throw new Error("Host did not bind the configured fixture endpoint");
+        },
+        close: async (fixture) => await fixture.host.close(),
       });
-      await host.listen();
+      host = hostBinding.fixture.host;
+      localOrigin = hostBinding.fixture.origin;
+      hostWireOrigin = hostBinding.fixture.wireOrigin;
       const hostRelayHandler = host.relayHandler;
       connector = new HostRelayConnector({
         relayUrl: relayOrigin,
@@ -1414,7 +1600,7 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
       connector?.close();
       if (host !== undefined) await host.close().catch(() => undefined);
       if (session !== undefined) await session.close().catch(() => undefined);
-      await relay.close().catch(() => undefined);
+      if (relay !== undefined) await relay.close().catch(() => undefined);
       await rm(outputDir, { recursive: true, force: true });
     }
   }, 15_000);

@@ -570,33 +570,6 @@ function makeOutput(
   };
 }
 
-/**
- * Guidance-mode-only deterministic guard. While the latest bound transition
- * remains an unchanged observation, it rejects every repeat on that
- * same session/viewport partition until the model chooses a different action
- * or a changed/unknown transition replaces the evidence. It deliberately
- * does not require the next action to reuse the newest observation id: a
- * model can otherwise evade the guard by taking the same coordinate from a
- * fresh screenshot whose pixels have not changed. It never inspects or returns the action
- * payload, and unknown/changed evidence never blocks.
- */
-export function shouldRejectRepeatedNoChange(state: ProgressMonitorState, action: ActionIntent): boolean {
-  // An unchanged screenshot is strong evidence that an exact click target did
-  // not take effect, but it is not proof that keyboard input or scrolling was
-  // invalid.  Repeated type/keypress/scroll actions are often intentional
-  // (for example, entering repeated characters or paging through a long list),
-  // so the deterministic execution guard is limited to discrete click-like
-  // targets.  The Monitor may still report a candidate for other repeated
-  // actions; it must not turn that diagnostic into an automatic rejection.
-  if (action.kind !== "click" && action.kind !== "double_click" && action.kind !== "right_click") return false;
-  if (state.lastTransition?.transition !== "unchanged") return false;
-  const partitionKey = actionPartition(state, action);
-  if (partitionKey === undefined) return false;
-  const signature = actionSignature(action, partitionKey);
-  return state.lastTransition.signature === signature
-    && state.lastTransition.partitionKey === partitionKey;
-}
-
 function limitEventIds(eventIds: readonly EventId[], limit: number): readonly EventId[] {
   return [...new Set(eventIds)].slice(-limit);
 }

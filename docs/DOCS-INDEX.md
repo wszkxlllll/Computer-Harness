@@ -1,5 +1,17 @@
 # Computer Harness 文档索引
 
+本批修复最新入口：[中文PR #33](https://github.com/wszkxlllll/Computer-Harness/pull/33)；修复head的[完整CI已通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38874655299)，PR自身检查与合入状态以PR实时结果为准。[详细报告](./life-business-eight-task-results-2026-10-16.md)已记录profile保存重开实机确认、三类CI根因及本机symlink权限限制。Preview未替换；本条优先于下方按时点保留的等待状态。
+
+2026-10-16 当前：[八题结果及离线修复/Monitor验收](./life-business-eight-task-results-2026-10-16.md)。八题全桌面前台DeepSeek/B00已结束、跳过G03，T03额外尝试均保留；没有足够证据判完整业务通过。后续修窗口清单合同、取消记录及非阻断Monitor，shadow记录候选不发送，guidance只提示不拒绝/暂停；2432项测试及类型检查通过，尚未重跑或部署Preview。评测入口提交`c0e64f2`、Runtime提交`d2b03d2`，目标分支`codex/life-eval-ready-20261015`，按用户授权推送，不合main。旧冻结记录不回写，后续须新包；用户每天手动通知开始实机，不设自动提醒。此记录优先于下方历史状态。
+
+推送后接续修复：layered Guard指引改为按公开schema决定是否填写`_harnessEffect`，消除list_windows额外参数歧义，保持Runtime校验/Guard准入不变；单独提交，Sol GO，完整回归及最终46项合同回归通过。详见同一报告末节，不另建分散文档。
+
+最新接续：全桌面observe当前没有UIA/DOM目录，不能把hybrid配置当作该帧已有元素。旧启动页改为显式完成手动准备时同步当前标签，不动登录资料；runner超时改为IPC先请求正常取消，再有界强制兜底。Sol GO、构建及2440项Vitest/27项runner自测通过；真实重开/取消释放尚未实机验收，Preview不变。原CI的Windows CRLF测试问题已修，`0fd1e00`的[CI全部通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38868696849)。详细范围与后续提交状态见同一报告末节。
+
+接续状态：用户已确认同一travel profile保存重开符合预期，两次准备正常关闭；真实业务取消释放仍未验收。窗口交接轮询、Relay监听端口冲突及DeepSeek超时自测混用时钟均仅修测试，Sol GO；2442项Vitest、构建/Web打包通过，最后三文件232项独立通过。本机Node评测器既有symlink fixture因权限EPERM未全绿，保留失败、不改安全测试；远端Windows完整Node261项已过，最后时钟修复的新head四矩阵仍须核对。用户授权远端CI通过后中文PR合main，Preview不变。当前合入结论以同一报告末节及对应PR实际检查为准。
+
+2026-10-15 当前评测准备：[九题完整Goal](./life-business-task-cards-2026-10-15.md)、[静态标准答案（评分员）](./life-business-static-answer-key-2026-10-15.md)、[准备/评分/启动说明](./life-business-evaluation-2026-10-15.md)。以已合DeepSeek的main `6b1d6e2`为基底，在`codex/life-eval-ready-20261015`准备CLI输入策略与候选驱动冻结；不带入PR30后续网页改动、不替换Preview。另获授权的一次DeepSeek文本联通已通过HTTP200，用户已授权打开已有登录profile供手动检查；正式桌面评测仍等待授权和监督预检，不能用联通结果代替业务验收。
+
 2026-10-15 [PR30拆分与队友接续](./pr30-deepseek-only-integration-2026-10-15.md)：仅提取DeepSeek注册、恢复及凭据预检；DOM/网页绑定、Context/Monitor后续改动留原PR30。新分支验收及CI完成后单独合入，不关闭PR30、不替换Preview，队友先同步最新main再接续整改。
 
 2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。

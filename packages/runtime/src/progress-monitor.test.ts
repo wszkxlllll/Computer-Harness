@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActionId, ActionIntent, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, SurfaceRef, ToolCallId } from "@computer-harness/protocol";
-import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange } from "./progress-monitor.js";
+import { createProgressMonitorState, reduceProgressMonitor } from "./progress-monitor.js";
 
 let sequence = 0;
 const defaultSurfaceRef: SurfaceRef = { surfaceId: "monitor-desktop" as SurfaceRef["surfaceId"], generation: 1, kind: "desktop" };
@@ -264,7 +264,7 @@ describe("progress monitor foundation", () => {
     expect(result.output.reasons).toHaveLength(0);
   });
 
-  it("emits post-action transition evidence and exposes the deterministic repeat guard", () => {
+  it("emits post-action transition evidence as a candidate only", () => {
     let state = createProgressMonitorState(runId);
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
     state = reduceProgressMonitor(state, click(runId, "same-1", "observation-1", 10, 20)).state;
@@ -274,27 +274,6 @@ describe("progress monitor foundation", () => {
     expect(first.output.candidate).toBe(true);
     expect(first.output.reasons.map((reason) => reason.code)).toEqual(["no_observed_change"]);
     expect(first.output.evidence.map((item) => item.kind)).toContain("visual_transition_unchanged");
-
-    const current = first.state;
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(true);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "rounded" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10.866, y: 20.122 } })).toBe(true);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 11, y: 20 } })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "relocated" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, groundingRef: "uia-current", point: { x: 11, y: 20 } })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-scroll" as ActionId, kind: "scroll", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 }, direction: "down", ticks: 1 })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-type" as ActionId, kind: "type", basedOn: "observation-2" as ObservationId, text: "same input" })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-key" as ActionId, kind: "keypress", basedOn: "observation-2" as ObservationId, keys: ["ARROWDOWN"] })).toBe(false);
-  });
-
-  it("blocks an ungrounded same-coordinate click after a fresh unchanged-page observation", () => {
-    let state = createProgressMonitorState(runId);
-    state = reduceProgressMonitor(state, observation(runId, "same-page-1")).state;
-    state = reduceProgressMonitor(state, click(runId, "same-page-click", "same-page-1", 100, 200)).state;
-    state = reduceProgressMonitor(state, receipt(runId, "same-page-click", "completed")).state;
-    state = reduceProgressMonitor(state, observation(runId, "same-page-2")).state;
-    // Production commits the post-action observation before its transition;
-    // only then can the monitor verify that both frames share one Surface.
-    state = reduceProgressMonitor(state, transition(runId, "same-page-click", "same-page-2", "unchanged", "same-page-1")).state;
-    expect(shouldRejectRepeatedNoChange(state, { actionId: "same-page-repeat" as ActionId, kind: "click", basedOn: "same-page-2" as ObservationId, point: { x: 100, y: 200 } })).toBe(true);
   });
 
   it("does not treat changed or unknown transition evidence as a no-change candidate", () => {
@@ -326,7 +305,6 @@ describe("progress monitor foundation", () => {
     expect(forged.output.candidate).toBe(false);
     expect(forged.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
     expect(forged.output.evidence.map((item) => item.kind)).toContain("action_binding_unavailable");
-    expect(shouldRejectRepeatedNoChange(forged.state, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
   });
 
   it("reconciles assessments with the exact action, latest observation, receipt, and visual transition", () => {

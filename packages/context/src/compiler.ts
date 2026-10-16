@@ -177,7 +177,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     let assistantPreferencesOmittedReason: "budget" | undefined;
     let assistantPreferencesTokens = rawAssistantPreferencesTokens;
     const rawMonitorGuidanceText = features.monitor === "guidance" && input.monitorGuidance !== undefined
-      ? `Low-confidence Monitor note; verify the current state before acting: ${input.monitorGuidance.text.slice(0, 240)}`
+      ? `Low-confidence Monitor note; verify the current state before acting: ${truncateUtf16CodePoints(input.monitorGuidance.text, 240)}`
       : undefined;
     const rawMonitorGuidanceTokens = rawMonitorGuidanceText === undefined ? 0 : estimateTextTokens(rawMonitorGuidanceText);
     let monitorGuidanceText = rawMonitorGuidanceText;
@@ -648,4 +648,15 @@ function round(value: number): number {
 function formatSourceLinkedFinishContract(contract: SourceLinkedFinishContract): string {
   const fields = contract.fields.map((field) => `${field.fieldId} (${field.label}; ${field.required ? "required" : "optional"})`).join(", ");
   return `Source-linked finish is enabled for this Run. The terminate call must include resultEvidence version source-linked-finish-v1 with one entry for each required field and no duplicate or unknown field IDs. Fields: ${fields}. For source_bound, submit only observationId and elementRef references to exact elements in committed Observation grounding; never submit a value, quote, copied text, or source label. Runtime will render canonical source fields from those references. Use inference with a bounded reason only when the result is inferred, or unknown with one supported reason when the field is not established. Keep free-form terminate text as a separate model report; it does not replace the canonical source-linked result. Multiple sources are preserved for review; do not choose a winner or claim semantic agreement.`;
+}
+
+function truncateUtf16CodePoints(value: string, maximumUnits: number): string {
+  const output: string[] = [];
+  let units = 0;
+  for (const point of value) {
+    if (units + point.length > maximumUnits) break;
+    output.push(point);
+    units += point.length;
+  }
+  return output.join("");
 }
