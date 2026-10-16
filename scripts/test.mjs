@@ -27,6 +27,7 @@ run(process.execPath, [
   "scripts/cross-window/life-task-policy.selftest.mjs",
   "scripts/cross-window/local-screen-recorder.selftest.mjs",
   "scripts/cross-window/provider-description-probe.selftest.mjs",
+  "scripts/provider-ark-conformance.selftest.mjs",
   "scripts/cross-window/sdk-managed-browser-probe.selftest.mjs",
   "scripts/cua-window-handoff-probe.test.mjs",
   "scripts/life-eval/life-eval-runner.test.mjs",
