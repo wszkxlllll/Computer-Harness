@@ -931,8 +931,9 @@ export interface ComputerWindowOption {
 }
 
 /** A bounded, deterministic projection of the latest opened-window topology.
- * `omittedCount` makes the fixed option budget visible to the model so it
- * cannot mistake a truncated candidate list for a complete inventory. */
+ * `truncated` is true when the source inventory is incomplete or candidates
+ * were omitted from the projection. `omittedCount` counts only known omitted
+ * candidates, so it may be zero when source completeness is unknown. */
 export interface ComputerWindowList {
   readonly options: readonly ComputerWindowOption[];
   readonly truncated: boolean;
