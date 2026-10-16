@@ -298,3 +298,20 @@ runner先等待原cleanupDeadline；逾期再强制终止，并保留发送返�
 根验证：`tsc -b`、spike noEmit通过；完整Vitest **134文件2440/2440通过**；CLI定向31项通过；runner/start **27/27通过**（包括真实Node小子进程收到IPC后flush/disconnect并退出，及强制终止/关闭未确认分支）。这不是启动真实Harness、浏览器或调用API；业务取消后真正释放桌面/profile及真实关tab→完成准备→重开仍待下一次授权验收。新增CDP测试用mock验证失败/超时/多页/blank，不把合成网页当业务成功。没有删用户文件、改Cookie/Prefs/Sessions、升级CUA或替换Preview；提交/CI的后续状态在本节接续。
 
 代码分为独立提交：取消链`9ce79ff`、启动页同步`48a6ffe`，仍在`codex/life-eval-ready-20261015`，不合main、不建PR、不部署Preview。当前下一步只需检查推送后的新head CI；下一次用户手动授权实机时再验上述两条真实闭环，不直接重跑整批八题。
+
+### 登录profile实机重开确认
+
+用户另行授权打开已有`travel` profile，手动关闭不需要的标签后确认保存。首次诊断启动没有保留stdin，不能正常发送Enter；没有据此报告保存成功。随后仅对本次已核PID的准备进程进行本地诊断，调用其原有等待流程的Enter完成回调，没有手工修改启动清单或登录数据。原共享准备流程实际返回`outcome=enter`、`cleanupDiagnostics=[]`、`profileRetention=confirmed`。临时诊断脚本已移除。
+
+以`tty=true`再次调用同一共享生产准备函数打开同一个profile（起始`about:blank`），用户确认恢复结果符合预期；此为用户对旧标签与登录状态的实际确认，不是独立页面内容抓取。确认后通过保留的stdin正常发送Enter，第二次也返回上述无异常、profile保留确认结果，退出码0。测试未调用模型API，未读改Cookie/Prefs/Sessions，没有清除锁或强杀其他浏览器。它验证此次profile准备→保存→重开链，不代替真实业务任务取消释放测试，也不证明所有Chromium会话恢复情况已覆盖。
+
+同时检查新head运行[38870166375](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38870166375)：最终失败，Windows及Node22的一组矩阵未通过，macOS和Node24矩阵通过。Windows日志明确有既有F045窗口交接测试等待条件超时；另一个失败仍需分别检查，不能将新head宣布全绿或直接归因于浏览器同步。之前`0fd1e00`的CI成功仍属历史准确结果，不代表最新提交通过。
+
+### 最新CI失败定位与合入准备
+
+用户授权继续排查、通过后以中文PR合入main；不替换Preview。两项实际失败分别为Windows F045的`missing empty stays stopped`等待轮询耗尽，以及Relay真实协议集成测试监听时`EADDRINUSE`，不是此前CRLF问题复发。
+
+- Runtime：`commitEvent`先append、更新snapshot，随后调用`onEventCommitted`。F045三参数场景改为等待匹配事件已存入历史且`waiting_window/sourceActionId`已投影，再继续断言；与提前终态和5秒watchdog竞争，消除固定100次`setImmediate`调度竞态。未修改生产Runtime，保留单次模型请求、单次动作、不重放与取消结果断言。Luna定向三场景六轮18/18、整文件193/193通过。
+- Relay集成测试：原先探测空闲端口后释放，再启动真实服务，期间存在端口被占用的竞争。测试专用启动helper仅在实际listen明确抛`EADDRINUSE`且失败fixture已关闭后重新申请端口，至多三次；其他错误、清理失败以及业务执行/断言不重试。Host失败不重启已成功Relay。真实占用端口回归覆盖两端、失败资源关闭及恶意Origin仍403；没有为测试改生产Origin接口或伪造Host头。
+
+两处Luna实施、Sol最终只读GO，无新增P1/P2。根构建、spike类型检查和Web生产打包通过，仓库统一`scripts/test.mjs`的Vitest阶段2443项通过；后续Node自测阶段因本机缺少创建symlink权限，main已有的评测器别名防覆盖fixture报EPERM，因此整个本机统一命令退出1，不能写成全量通过。没有为此修改系统设置、跳过安全测试或放宽评测器；其余本轮定向测试通过。远端既有矩阵具备不同权限环境，新head仍须完整CI成功才合入。

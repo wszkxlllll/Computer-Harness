@@ -6,6 +6,8 @@
 
 最新接续：全桌面observe当前没有UIA/DOM目录，不能把hybrid配置当作该帧已有元素。旧启动页改为显式完成手动准备时同步当前标签，不动登录资料；runner超时改为IPC先请求正常取消，再有界强制兜底。Sol GO、构建及2440项Vitest/27项runner自测通过；真实重开/取消释放尚未实机验收，Preview不变。原CI的Windows CRLF测试问题已修，`0fd1e00`的[CI全部通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38868696849)。详细范围与后续提交状态见同一报告末节。
 
+接续状态：用户已确认同一travel profile保存重开符合预期，两次准备正常关闭；真实业务取消释放仍未验收。新head CI另有窗口交接测试轮询与Relay测试监听端口冲突，已仅修测试同步/监听资源分配，Sol GO，2443项Vitest及构建/Web打包通过。本机Node评测器既有symlink fixture因权限EPERM未全绿，保留失败、不改安全测试；用户授权远端CI通过后中文PR合main，Preview不变。当前合入结论以同一报告末节及对应PR实际检查为准。
+
 2026-10-15 当前评测准备：[九题完整Goal](./life-business-task-cards-2026-10-15.md)、[静态标准答案（评分员）](./life-business-static-answer-key-2026-10-15.md)、[准备/评分/启动说明](./life-business-evaluation-2026-10-15.md)。以已合DeepSeek的main `6b1d6e2`为基底，在`codex/life-eval-ready-20261015`准备CLI输入策略与候选驱动冻结；不带入PR30后续网页改动、不替换Preview。另获授权的一次DeepSeek文本联通已通过HTTP200，用户已授权打开已有登录profile供手动检查；正式桌面评测仍等待授权和监督预检，不能用联通结果代替业务验收。
 
 2026-10-15 [PR30拆分与队友接续](./pr30-deepseek-only-integration-2026-10-15.md)：仅提取DeepSeek注册、恢复及凭据预检；DOM/网页绑定、Context/Monitor后续改动留原PR30。新分支验收及CI完成后单独合入，不关闭PR30、不替换Preview，队友先同步最新main再接续整改。
