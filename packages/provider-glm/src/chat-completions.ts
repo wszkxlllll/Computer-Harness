@@ -128,6 +128,8 @@ export interface ChatCompletionsBoundary {
   readonly maxOutputTokens: number;
   readonly userImagesOnly?: boolean;
   readonly strictResponse?: boolean;
+  /** Provider-specific wire shape for cache-read usage; unrelated to strict response parsing. */
+  readonly cacheUsageFormat?: "flat-prompt-cache" | "nested-prompt-details";
   /** Whether protocol-shape errors from a complete strict Provider response may use Runtime feedback retry. */
   readonly strictResponseRetryable?: boolean;
   readonly error: (message: string, code?: string, retryable?: boolean, retryMode?: GlmRetryMode) => Error;
@@ -737,7 +739,12 @@ function readUsage(value: unknown, boundary: ChatCompletionsBoundary): ModelUsag
   const inputTokens = usage.prompt_tokens;
   const outputTokens = usage.completion_tokens;
   const totalTokens = usage.total_tokens;
-  const cachedTokens = boundary.strictResponse ? usage.prompt_cache_hit_tokens : undefined;
+  const promptDetails = boundary.cacheUsageFormat === "nested-prompt-details" && isRecord(usage.prompt_tokens_details)
+    ? usage.prompt_tokens_details
+    : undefined;
+  const cachedTokens = boundary.cacheUsageFormat === "flat-prompt-cache"
+    ? usage.prompt_cache_hit_tokens
+    : promptDetails?.cached_tokens;
   const parsed = {
     ...(typeof inputTokens === "number" && Number.isSafeInteger(inputTokens) && inputTokens >= 0 ? { inputTokens } : {}),
     ...(typeof outputTokens === "number" && Number.isSafeInteger(outputTokens) && outputTokens >= 0 ? { outputTokens } : {}),

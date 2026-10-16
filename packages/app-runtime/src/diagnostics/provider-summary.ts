@@ -306,9 +306,10 @@ export function summarizeProviderUsage(value: unknown, options: ProviderUsageOpt
   if (value === undefined) return null;
   if (!isPlainRecord(value)) return { shape: shapeOf(value), diagnosticCodes: ["usage_not_object"] };
   const qwenCacheUsage = options.providerId === "qwen3.8-flash";
-  const deepseekCacheUsage = options.providerId === "deepseek-flash" || options.providerId === "deepseek-v4.1-flash";
+  const arkCacheUsage = options.providerId === "deepseek-v4.1-flash";
+  const deepseekCacheUsage = options.providerId === "deepseek-flash";
   const knownKeys = new Set(["prompt_tokens", "completion_tokens", "total_tokens",
-    ...(qwenCacheUsage ? ["prompt_tokens_details"] : []),
+    ...(qwenCacheUsage || arkCacheUsage ? ["prompt_tokens_details"] : []),
     ...(deepseekCacheUsage ? ["prompt_cache_hit_tokens", "prompt_cache_miss_tokens"] : []),
   ]);
   const sourceKeys = Object.keys(value);
@@ -322,8 +323,9 @@ export function summarizeProviderUsage(value: unknown, options: ProviderUsageOpt
     if (typeof item === "number" && Number.isInteger(item) && item >= 0) result[target] = item;
   }
   const diagnosticCodes = new Set<string>();
-  const promptDetails = qwenCacheUsage ? value.prompt_tokens_details : undefined;
-  if (qwenCacheUsage && promptDetails !== undefined) {
+  const nestedCacheUsage = qwenCacheUsage || arkCacheUsage;
+  const promptDetails = nestedCacheUsage ? value.prompt_tokens_details : undefined;
+  if (nestedCacheUsage && promptDetails !== undefined) {
     if (isPlainRecord(promptDetails)) {
       const cachedTokens = promptDetails.cached_tokens;
       if (typeof cachedTokens === "number" && Number.isInteger(cachedTokens) && cachedTokens >= 0) result.cachedReadTokens = cachedTokens;

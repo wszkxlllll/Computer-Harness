@@ -33,6 +33,7 @@ const arkBoundary: ChatCompletionsBoundary = {
   maxOutputTokens: 4096,
   userImagesOnly: true,
   strictResponse: true,
+  cacheUsageFormat: "nested-prompt-details",
   strictResponseRetryable: true,
   error: (message, code, retryable, retryMode) => new ArkProviderError(message, code, retryable, retryMode),
   isProviderError: (error) => error instanceof ArkProviderError,

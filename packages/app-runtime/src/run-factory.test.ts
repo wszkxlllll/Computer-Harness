@@ -588,7 +588,9 @@ describe("app-runtime RunHandle", () => {
           id: "deepseek-terminate", type: "function",
           function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result could not be verified." }) },
         }] } }],
-        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_cache_hit_tokens: 15, prompt_cache_miss_tokens: 5 },
+        usage: channel === "ark"
+          ? { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_tokens_details: { cached_tokens: 15 } }
+          : { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_cache_hit_tokens: 15, prompt_cache_miss_tokens: 5 },
       }) };
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -614,8 +616,9 @@ describe("app-runtime RunHandle", () => {
           { stage: "fetch_invoked", deadlineMs: 90000, requestConfiguration: { thinking: "disabled", maxTokens: 4096, imageCount: 1 } },
           { stage: "headers_received" }, { stage: "body_received", outcome: "success" },
         ] },
-        response: { usage: { cachedReadTokens: 15, cacheMissTokens: 5 } },
+        response: { usage: channel === "ark" ? { cachedReadTokens: 15 } : { cachedReadTokens: 15, cacheMissTokens: 5 } },
       });
+      if (channel === "ark") expect((record.response as Record<string, unknown>).usage).not.toHaveProperty("cacheMissTokens");
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(JSON.stringify(record)).not.toContain("synthetic-provider-secret");
       expect(JSON.stringify(record)).not.toContain("The requested result could not be verified.");
