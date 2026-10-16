@@ -266,3 +266,35 @@ Monitor及评测准备三项提交已经推送，文档提交`7e10b30`；GitHub 
 后续窄修只改共享Context文案及合同测试：以工具公开inputSchema为准，有声明才填写并满足必填要求，没有声明不得添加；明确list_windows空参数与switch_window仅windowRef。删除泛指内部Computer类别的重复要求。没有扩大schema、在Provider静默吞字段或放松Runtimevalidator；click/type仍须原效果声明，switch_window原Run授权/目标校验例外保持。
 
 Luna实施、Sol独立增量GO。根完成构建/typecheck及完整Vitest2432项回归；最后精简同义的类别句后再次构建，并完整运行Context及action-effect-projection两文件46/46通过。此次未重跑业务、调用API或改Guard启用配置。该问题单独提交，效果是否减少错误参数仍待后续实机；继续保留浏览器旧标签/真实点击命中/真实取消释放等待验证项，不因改了一句提示词宣布全解决。
+
+## 接续核查：全桌面元素、旧标签与CI（2026-10-16）
+
+### 全桌面不是自动具备UIA/DOM目录
+
+本批全桌面路径的`CuaDriverComputer.observe()`在desktop分支返回截图、viewport、Surface关联与时间，不携带grounding目录；`ManagedBrowserComputer.observe()`直接委托该方法，没有另行合并DOM。受管浏览器启动了CDP、配置为hybrid或descriptor声明accessibility，均不证明当前Observation向模型提供了元素。全桌面`switch_window`只激活目标并继续桌面范围，不会自动改成窗口截图/目录模式。因此这轮不能把点击问题解释为“模型已有UIA/DOM仍选错”。
+
+现有窗口绑定路径有UIA/DOM支持。若将来支持全桌面混合grounding，需要由已验证的当前目标产生元素，做窗口局部到桌面物理坐标的转换，保持Observation、窗口及浏览器tab引用失效边界；不是打开一个开关就已经完成。本轮先说明真实能力，不把未实现的全桌面目录写成可用。
+
+### 关闭标签仍返回：两种来源不能混为一谈
+
+源码确认：persistent Host每次启动读取Harness自己的`managed-browser-startup.json`并打开记录网址；注册函数只追加/去重，最多8项，关tab和完成手机准备均未同步清单。因此已经注册的网址即使被用户关掉，仍可能在下次启动被显式重新打开。普通任务访问网页不会自动全部注册；生产注册入口是显式手动准备助手。浏览器自身session restore是另一种可能，本轮未读取真实profile的Prefs、Sessions或Cookie，不能断言用户每个旧tab都来自Harness清单。
+
+修复范围限定为用户明确完成手动准备时，将当前保留的HTTP(S)标签同步到Harness启动清单；普通任务结束不改它，查询失败不误清空。登录资料与浏览器自身会话文件不在修改范围。实施/验证结果另补于本节，不用离线测试代替真实重开验收。
+
+### CI：已确认失败原因与修复结果
+
+旧运行[38867563875](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38867563875)只有Windows Node22自测失败：任务卡fenced Goal提取按LF匹配，Windows检出为CRLF后得到undefined；Vitest2432项已通过，不是Runtime或Monitor失败。提交`0fd1e00`仅修测试解析边界，规范化换行后仍严格比较原任务卡与manifest Goal，新增同一任务LF/CRLF一致性覆盖，不改题目、生产逻辑或跳过检查。Luna实施、Sol只读GO，根独立定向测试通过。
+
+新运行[38868696849](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38868696849)在该提交上Windows、macOS及两组既有其他平台矩阵与ci-required全部通过。这是已查实际结果，不是只据推送成功推断。没有合并main或替换Preview。
+
+### 旧启动页同步及取消清理：离线验收
+
+Luna分别实施、Sol最终只读GO，根独立构建与回归。旧启动页修复落在`ManagedBrowserHost.syncStartupUrlsFromCurrentPages()`及共享`prepareManagedBrowserProfile()`：用户明确Enter/手机完成后、Host关闭前，最多1秒查询自己持有的loopback CDP；仅persistent profile同步。当前HTTP(S)页按原规则去重、去query/hash后，以同目录临时文件原子替换Harness清单；超过8项整体保留旧清单，不偷偷截断。明确存在空白页且没有HTTP(S)页时可以清空；空枚举、只有worker、查询超时/失败及写入失败保留旧值。中断及普通Run结束不调用同步。best-effort结果不改变原登录准备成功判定，也不新增“已保证同步成功”的用户提示；浏览器自身恢复标签尚未实机核验。
+
+资源修复聚焦评测runner→CLI取消链，不是自动删除用户资源。旧timeout对Windows Node child调用`kill(SIGINT)`可能直接终止，跳过正常close；现在加一条固定IPC取消消息，CLI映射到已有`controller.cancel`。消息只允许`type=harness.cancel/reason=run-timeout`，不是新工具或任意执行通道。评测IPC路径的SIGINT监听持续到整个main结束（包括report与session.close），重复Ctrl+C不提前拆掉监听；非IPC普通CLI和TUI维持原行为。启动前取消排队到controller已start，避免丢请求。
+
+runner先等待原cleanupDeadline；逾期再强制终止，并保留发送返回值、回调结果、清理超时、实际终止信号及childCloseObserved，IPC发送成功不等于浏览器已清理。子进程exit但stdio未close也有有界等待；最终无法确认close时解除管道和IPC保活，仍写`childCloseObserved=false`，不擅自清lease或profile。Sol发现新增IPC可能保活父进程的P1已补channel.unref及回归。未知副作用不重试、Guard与原预算不变。
+
+根验证：`tsc -b`、spike noEmit通过；完整Vitest **134文件2440/2440通过**；CLI定向31项通过；runner/start **27/27通过**（包括真实Node小子进程收到IPC后flush/disconnect并退出，及强制终止/关闭未确认分支）。这不是启动真实Harness、浏览器或调用API；业务取消后真正释放桌面/profile及真实关tab→完成准备→重开仍待下一次授权验收。新增CDP测试用mock验证失败/超时/多页/blank，不把合成网页当业务成功。没有删用户文件、改Cookie/Prefs/Sessions、升级CUA或替换Preview；提交/CI的后续状态在本节接续。
+
+代码分为独立提交：取消链`9ce79ff`、启动页同步`48a6ffe`，仍在`codex/life-eval-ready-20261015`，不合main、不建PR、不部署Preview。当前下一步只需检查推送后的新head CI；下一次用户手动授权实机时再验上述两条真实闭环，不直接重跑整批八题。
