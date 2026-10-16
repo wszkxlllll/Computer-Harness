@@ -820,6 +820,10 @@ describe("DefaultContextCompiler", () => {
     const off = await compiler.compile({ runId, goal: "baseline", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
     expect(off.system).not.toContain("Planning tools");
     expect(off.system).not.toContain("Run Memory");
+    expect(off.system).not.toContain("_harnessEffect");
+    expect(off.tools.find((tool) => tool.name === "click")?.inputSchema).not.toMatchObject({
+      properties: expect.objectContaining({ _harnessEffect: expect.anything() }),
+    });
     expect(off.system).toContain("finish.summary is the user-facing answer");
     expect(off.system).toContain("Do not return only a status");
     expect(off.system).not.toContain("recalled Run Memory");
@@ -905,6 +909,9 @@ describe("DefaultContextCompiler", () => {
     expect(memoryOnly.system).not.toContain("Planning tools");
     const guarded = await compiler.compile({ runId, goal: "guard", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" } }, new AbortController().signal);
     expect(guarded.system).toContain("_harnessEffect");
+    expect(guarded.system).toContain("Include _harnessEffect only when the tool's exposed input schema declares that field");
+    expect(guarded.system).toContain("never add undeclared fields");
+    expect(guarded.system).not.toContain("For every Computer tool call except switch_window");
     expect(guarded.tools.find((tool) => tool.category === "computer")?.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(guarded.tools.find((tool) => tool.category === "control")?.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
 
@@ -926,9 +933,10 @@ describe("DefaultContextCompiler", () => {
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
     }, new AbortController().signal);
     const switchTool = guardedWindowSwitch.tools.find((tool) => tool.name === "switch_window")!;
+    const listWindowsTool = guardedWindowSwitch.tools.find((tool) => tool.name === "list_windows")!;
     const clickTool = guardedWindowSwitch.tools.find((tool) => tool.name === "click")!;
-    expect(guardedWindowSwitch.system).toContain("except switch_window");
-    expect(guardedWindowSwitch.system).toContain("does not need _harnessEffect");
+    expect(guardedWindowSwitch.system).toContain("switch_window accepts only its listed windowRef, has no _harnessEffect parameter, and remains exempt");
+    expect(guardedWindowSwitch.system).toContain("read-only list_windows tool is category side and takes its declared empty object, so it has no _harnessEffect");
     expect(guardedWindowSwitch.system).toContain("capture scope follows the current observed Surface");
     const desktopSwitchContext = JSON.stringify(guardedWindowSwitch.messages);
     expect(desktopSwitchContext).toContain("full primary desktop");
@@ -942,6 +950,8 @@ describe("DefaultContextCompiler", () => {
     expect(desktopSwitchContext).not.toContain("separate single-line type and Enter actions");
     expect(switchTool.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(switchTool.inputSchema).not.toMatchObject({ properties: expect.objectContaining({ _harnessEffect: expect.anything() }) });
+    expect(listWindowsTool.inputSchema).toMatchObject({ type: "object", properties: {}, required: [], additionalProperties: false });
+    expect(listWindowsTool.inputSchema).not.toMatchObject({ properties: expect.objectContaining({ _harnessEffect: expect.anything() }) });
     expect(clickTool.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
 
     const nativeLatest = {

@@ -256,3 +256,13 @@ recent配置的`maxHistoryEvents=80`当前不是80轮，也不是严格截最后
 按用户随后授权，在`codex/life-eval-ready-20261015`整理提交：评测入口/CLI输入策略及取消记录为`c0e64f2`，窗口合同与Monitor软提示为`d2b03d2`，本报告/入口另作文档提交。不是合并main或发布Preview。评测目录history仅保留旧的空模板供离线自测确认不再使用，不含真实业务成果；当前任务不打开这些模板。
 
 验证最终构建后串行runner/start自测25/25仍通过。运行产物位于被Git忽略的本地runs，报告中的对应链接是本地证据入口，不代表截图、聊天或登录资料已经公开。未上传.env、私有配置、profile或CUA二进制；作者和提交者使用仓库本地已核账号身份，推送后的GitHub解析另行核验。
+
+Monitor及评测准备三项提交已经推送，文档提交`7e10b30`；GitHub API确认三个提交的author/committer均解析到`wszkxlllll`（账号ID142909575），远端分支head匹配。没有创建PR、合并main或替换Preview。
+
+## 推送后接续：Guard指引与工具schema一致性
+
+只读追溯又确认一处可窄修的模型可见合同问题：旧layered Guard系统指引要求“所有Computer调用（switch_window除外）带_harnessEffect”，但Provider没有向模型传内部ToolRegistry.category；`list_windows`实际是side只读工具，空参数schema且additionalProperties=false，没有此字段。四次实际轨迹（G02 sequence693，T02 sequence386，T03两次sequence555/687）均因额外_harnessEffect被拒；这是与提示歧义相符的重复模式，不宣称已证明模型每次犯错的唯一原因。
+
+后续窄修只改共享Context文案及合同测试：以工具公开inputSchema为准，有声明才填写并满足必填要求，没有声明不得添加；明确list_windows空参数与switch_window仅windowRef。删除泛指内部Computer类别的重复要求。没有扩大schema、在Provider静默吞字段或放松Runtimevalidator；click/type仍须原效果声明，switch_window原Run授权/目标校验例外保持。
+
+Luna实施、Sol独立增量GO。根完成构建/typecheck及完整Vitest2432项回归；最后精简同义的类别句后再次构建，并完整运行Context及action-effect-projection两文件46/46通过。此次未重跑业务、调用API或改Guard启用配置。该问题单独提交，效果是否减少错误参数仍待后续实机；继续保留浏览器旧标签/真实点击命中/真实取消释放等待验证项，不因改了一句提示词宣布全解决。
