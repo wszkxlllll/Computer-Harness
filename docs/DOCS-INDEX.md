@@ -1,5 +1,9 @@
 # Computer Harness 文档索引
 
+2026-10-16 当前：[八题结果及离线修复/Monitor验收](./life-business-eight-task-results-2026-10-16.md)。八题全桌面前台DeepSeek/B00已结束、跳过G03，T03额外尝试均保留；没有足够证据判完整业务通过。后续修窗口清单合同、取消记录及非阻断Monitor，shadow记录候选不发送，guidance只提示不拒绝/暂停；2432项测试及类型检查通过，尚未重跑或部署Preview。评测入口提交`c0e64f2`、Runtime提交`d2b03d2`，目标分支`codex/life-eval-ready-20261015`，按用户授权推送，不合main。旧冻结记录不回写，后续须新包；用户每天手动通知开始实机，不设自动提醒。此记录优先于下方历史状态。
+
+2026-10-15 当前评测准备：[九题完整Goal](./life-business-task-cards-2026-10-15.md)、[静态标准答案（评分员）](./life-business-static-answer-key-2026-10-15.md)、[准备/评分/启动说明](./life-business-evaluation-2026-10-15.md)。以已合DeepSeek的main `6b1d6e2`为基底，在`codex/life-eval-ready-20261015`准备CLI输入策略与候选驱动冻结；不带入PR30后续网页改动、不替换Preview。另获授权的一次DeepSeek文本联通已通过HTTP200，用户已授权打开已有登录profile供手动检查；正式桌面评测仍等待授权和监督预检，不能用联通结果代替业务验收。
+
 2026-10-15 [PR30拆分与队友接续](./pr30-deepseek-only-integration-2026-10-15.md)：仅提取DeepSeek注册、恢复及凭据预检；DOM/网页绑定、Context/Monitor后续改动留原PR30。新分支验收及CI完成后单独合入，不关闭PR30、不替换Preview，队友先同步最新main再接续整改。
 
 2026-10-14 最新：33的Windows及两Ubuntu已绿；Mac gate焦点测试按实际useEffect生命周期窄修，保留手机focus合同，新head完整检查/CI后main。见[执行记录](./astra-prfix-merge-execution-2026-10-14.md)。
