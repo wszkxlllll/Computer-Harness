@@ -2,9 +2,11 @@
 
 2026-10-16。新增火山方舟独立渠道，保留 DeepSeek 官方渠道。本文记录已完成的接入与实跑，不将历史 Windows 候选的结果冒充本 PR 提交树的新验收。
 
+**接续放行范围**：最新main集成后的真实API基础合同已通过；Plan/Memory与一个GUI动作同轮返回可用，三GUI动作Batch尚未获真实API通过证据。基础渠道接入不等于批处理效果或真实业务任务成功。远端CI及合入结果以本文末节和PR36实时状态为准；Preview不变。
+
 ## 接入范围与前置提交
 
-PR base 为 `codex/runtime-surface-preview-20261003`。该分支尚无 main 已合入的 DeepSeek 共用 Chat Completions 实现，因此本 PR 先带入 `455a219`（官方接入／共用实现）及 `ee0b752`（有限恢复／凭据预检）两条必要前置提交，再加入方舟适配。原作者保留，不整包带入 PR30 的网页、来源绑定、Context 或 Monitor 修复。
+PR初始base为 `codex/runtime-surface-preview-20261003`，因此历史中先带入 `455a219`（官方接入／共用实现）及 `ee0b752`（有限恢复／凭据预检）的等价提交，再加入方舟适配。接续集成已合入最新main `e970fea`，以main源码叠加Ark增量，保留原作者及近期Monitor、清理、取消、Windows输入与无障碍修复；不整包带入PR30未合入的网页改动。最终PR目标、API及CI放行状态见本文末尾接续记录，不能以初始旧base的CI通过替代。
 
 方舟与官方渠道各自拥有模型标识、凭据、端点、HTTP 客户端和诊断名称。支持 CLI 主模型、独立风险模型及 Host 启动模型选择；凭据不进入可序列化的 Run 配置、公共响应或日志。没有自动 Provider fallback、运行中热切换或未知 GUI 动作重放。
 
@@ -77,3 +79,32 @@ M01 目标：从协和患者版进入内分泌科，交付三类门诊位置及�
 来源：[患者版](https://www.pumch.cn/patient.html)、[科室位置](https://www.pumch.cn/detail/12497.html)、[医院位置](https://www.pumch.cn/nosocomial.html)、[新版门诊出诊表](https://www.pumch.cn/news_visitinfo.html)。外部真值未输入模型；当前网页读取与各轮截图分别作为独立资料和运行事实，不互相替代。
 
 两个 disabled 和两个 low Run 均完成 close 确认，专用 daemon 正常停止；临时脚本／桥及自动化连接收尾，用户 Windows／PowerShell／Chrome 会话保留。未公开私有配置、key 文件、原轨迹、Provider exchanges、隐藏推理或本机启动器。此次 PR 提交阶段仅排除私人信息，不追加测试、安全审查、依赖或发布验收、CI 查询、字节校验或模型运行；不合并 PR。
+
+## 最新main集成及独立API验收（2026-10-16接续）
+
+以上是原作者提交时点的运行记录；本节是用户另行授权的验证合入工作，不覆盖原有失败、不替换Preview。
+
+- 合入main `e970fea`后保留原PR作者历史；Host GLM/Windows接线测试恢复，Ark deadline测试统一performance与阶段屏障，未消费的默认值常量移除。
+- 实回发现缓存字段为 `usage.prompt_tokens_details.cached_tokens`。Provider与安全诊断均映射到已有缓存读计数，官方DeepSeek仍读其平级hit/miss，Qwen保持原嵌套格式；不推断Ark的miss或费用。
+- Luna实施、Sol各增量最终GO。TypeScript构建、spike noEmit、Web打包通过；最终完整Vitest **134文件2480/2480**，原评测runner27/27，新API probe离线自测11/11。缓存修正途中一项Ark旧平级fixture失败，已改为真实嵌套格式并保留凭据/请求/阶段/usage断言，再完成全量通过。
+
+| 本次独立真实API | 请求数及结果 | 放行范围 |
+| --- | --- | --- |
+| 默认旧 `ARK_API_KEY` | 1次，HTTP401，未执行工具 | 不通过；不是网络超时或模型格式问题 |
+| 显式末尾新 `HUOSHAN_API_KEY`，composite第一轮 | 5次，Runtime成功；首轮task_create+memory_write_fact+click，hotkey/type分轮 | 严格同轮Batch验收失败，原记录保留 |
+| 已激活输入框视觉前提修正后，composite第二轮 | 5次，仍分轮；每请求1.379–3.876秒 | 不将三个分轮动作算作Batch；不为此改产品准入或其他Provider |
+| 独立baseline，batch关闭 | 3次，17项合同检查全部通过；每请求3.231/2.512/3.280秒 | 图片、Plan/Memory与click同轮、工具回执、状态持久化、多轮历史、新截图及独立terminate通过 |
+
+API使用实际Ark factory与Runtime，Computer仅接不含隐私的测试PNG及受限无系统输入fixture；因此这是渠道协议验收，**businessTaskOutcome=not_assessed**，不是桌面业务成功、性能优越或成功率结论。请求thinking disabled/输出4096/单请求90秒，每次probe上限12；本次四个probe合计14次请求（含401），没有额外桌面/模型后台实验。
+
+新脚本默认offline，只有显式live才读取指定UTF-8 env；`--key-env`默认ARK，可显式HUOSHAN且不回退。生产CLI/Host仍只读ARK_API_KEY，使用新密钥启动产品时需在私有启动环境将正确key设置为ARK_API_KEY；没有覆盖原env，也没有新增跨渠道fallback。通用复验：
+
+```text
+node scripts/provider-ark-conformance.mjs --offline
+node scripts/provider-ark-conformance.mjs --offline --scenario baseline
+node scripts/provider-ark-conformance.mjs --live --env-file <private-env-file> --key-env HUOSHAN_API_KEY --scenario baseline
+```
+
+独立证据保存在被忽略的`runs/ark-conformance/`：401 `live-20261016114951784-b4bbd546`；composite `live-20261016115045197-7add4a11`及`live-20261016115430445-3bfddde7`；baseline `live-baseline-20261016120051545-496011f5`，各自`probe-report.json`。报告只公开工具名、形状、安全错误码与数字usage，不输出密钥、原回答/隐藏推理或私有截图。脚本同轮Batch判据绑定同一响应callId及对应Receipt，并有跨轮负例；baseline单独评分，不覆盖composite失败。当前P2限制是Ark三GUI动作Batch未证实，应以单GUI基线做后续业务实验；不影响既有GLM/Qwen设置。
+
+最新PR36的远端CI与合入记录接续于评测总报告末节。API基础已过，须远端全矩阵CI通过后合main；本轮不部署、不改Preview模型默认或服务。
