@@ -314,4 +314,8 @@ runner先等待原cleanupDeadline；逾期再强制终止，并保留发送返�
 - Runtime：`commitEvent`先append、更新snapshot，随后调用`onEventCommitted`。F045三参数场景改为等待匹配事件已存入历史且`waiting_window/sourceActionId`已投影，再继续断言；与提前终态和5秒watchdog竞争，消除固定100次`setImmediate`调度竞态。未修改生产Runtime，保留单次模型请求、单次动作、不重放与取消结果断言。Luna定向三场景六轮18/18、整文件193/193通过。
 - Relay集成测试：原先探测空闲端口后释放，再启动真实服务，期间存在端口被占用的竞争。测试专用启动helper仅在实际listen明确抛`EADDRINUSE`且失败fixture已关闭后重新申请端口，至多三次；其他错误、清理失败以及业务执行/断言不重试。Host失败不重启已成功Relay。真实占用端口回归覆盖两端、失败资源关闭及恶意Origin仍403；没有为测试改生产Origin接口或伪造Host头。
 
-两处Luna实施、Sol最终只读GO，无新增P1/P2。根构建、spike类型检查和Web生产打包通过，仓库统一`scripts/test.mjs`的Vitest阶段2443项通过；后续Node自测阶段因本机缺少创建symlink权限，main已有的评测器别名防覆盖fixture报EPERM，因此整个本机统一命令退出1，不能写成全量通过。没有为此修改系统设置、跳过安全测试或放宽评测器；其余本轮定向测试通过。远端既有矩阵具备不同权限环境，新head仍须完整CI成功才合入。
+两处Luna实施、Sol最终只读GO，无新增P1/P2。根构建、spike类型检查和Web生产打包通过，仓库统一`scripts/test.mjs`的Vitest阶段2442项通过（按实际CI日志复核计数，新增Relay测试为两项）；后续Node自测阶段因本机缺少创建symlink权限，main已有的评测器别名防覆盖fixture报EPERM，因此整个本机统一命令退出1，不能写成全量通过。没有为此修改系统设置、跳过安全测试或放宽评测器；其余本轮定向测试通过。远端既有矩阵具备不同权限环境，新head仍须完整CI成功才合入。
+
+接续运行`38873622691`：Windows及两组兼容矩阵通过；Windows完整Vitest2442项、Node261项通过，确认本机symlink权限限制没有被跳过后伪装解决。macOS另暴露既有DeepSeek deadline测试`fetchStub`预期1次、实际0次，继续定位，不以其他矩阵通过代替macOS验收。
+
+macOS新增失败已定位到测试混用时钟：生产`FetchChatCompletionsHttpClient`用`performance.now()`检查逻辑deadline，Vitest默认fake timers不模拟performance；测试设10ms时，CI真实耗时可在fetch前达到deadline，合法超时但不满足该测试“已经进入headers/body”的前提。仅该测试显式模拟performance及timer，等待fetch/json阶段屏障后再推进11ms；继续严格断言1次fetch、timeout、nonretry及对应phase，并增加推进前已进入阶段的证据检查。Luna两场景重复测试及全35项通过，根独立三个相关文件232项与构建通过；Sol增量GO，新head CI另行接续，不改生产Provider或GLM/Qwen行为。
