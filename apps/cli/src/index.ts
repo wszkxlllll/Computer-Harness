@@ -16,12 +16,17 @@ import { resolveCuaWindowTargetOptions } from "./window-target-options.js";
 import { defaultManagedBrowserProfileRoot } from "./managed-browser-profile.js";
 import { validateCliArguments } from "./argument-parser.js";
 import { createJevWindowSelector } from "./window-selection-jev.js";
+import { createRunCancellationControl, type RunCancellationControl, type RunCancellationControlSource } from "./run-cancellation-control.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
 type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
 type Qwen38ThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type Qwen38OutputMode = "native_tools" | "strict_json";
+
+const runCancellationControl = process.argv.includes("--interactive") && !process.argv.includes("--tui")
+  ? createRunCancellationControl(process as unknown as RunCancellationControlSource)
+  : undefined;
 
 export interface CliOptions {
   doctor: boolean;
@@ -440,7 +445,13 @@ async function main(): Promise<void> {
     const handle = await session.startRun(
       goal,
       {},
-      (controller, activeGoal, markControllerStarted) => runWithCliControls(controller, activeGoal, options.interactive, markControllerStarted),
+      (controller, activeGoal, markControllerStarted) => runWithCliControls(
+        controller,
+        activeGoal,
+        options.interactive,
+        markControllerStarted,
+        runCancellationControl,
+      ),
     );
     await session.waitForActiveRun();
     const report = await handle.report();
@@ -663,7 +674,13 @@ async function loadEnvFile(path: string): Promise<void> {
   }
 }
 
-async function runWithCliControls(controller: RunController, goal: string, interactive: boolean, markControllerStarted?: () => void): Promise<RunOutcome> {
+async function runWithCliControls(
+  controller: RunController,
+  goal: string,
+  interactive: boolean,
+  markControllerStarted?: () => void,
+  cancellationControl?: RunCancellationControl,
+): Promise<RunOutcome> {
   let lastQuestion: string | undefined;
   let lastApprovalId: string | undefined;
   const monitor = setInterval(() => {
@@ -709,14 +726,17 @@ async function runWithCliControls(controller: RunController, goal: string, inter
       // Ignore a second Ctrl+C after the run has already finished.
     }
   };
-  process.once("SIGINT", onSigint);
+  if (cancellationControl === undefined) process.once("SIGINT", onSigint);
   try {
+    cancellationControl?.bindCancelController((reason) => controller.cancel(reason));
     markControllerStarted?.();
-    return await controller.start(goal);
+    const outcome = controller.start(goal);
+    cancellationControl?.markControllerStarted();
+    return await outcome;
   } finally {
     clearInterval(monitor);
     readline?.close();
-    process.removeListener("SIGINT", onSigint);
+    if (cancellationControl === undefined) process.removeListener("SIGINT", onSigint);
   }
 }
 
@@ -724,5 +744,5 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(p
   main().catch((error: unknown) => {
     process.stderr.write(`${sanitizeTerminalText(error instanceof Error ? error.stack ?? error.message : String(error))}\n`);
     process.exitCode = 1;
-  });
+  }).finally(() => runCancellationControl?.dispose());
 }

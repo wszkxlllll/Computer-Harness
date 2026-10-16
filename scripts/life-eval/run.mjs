@@ -311,6 +311,7 @@ export async function runLive(
     clearUserInterruptCleanupTimeout = clearTimeout,
     userInterruptForceKillDelayMs = 5_000,
     userInterruptCloseObservationMs = 1_000,
+    timeoutForceKillDelayMs = 5_000,
   } = {},
 ) {
   const attemptDir = join(packageDir, "attempts", `live-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
@@ -329,11 +330,13 @@ export async function runLive(
   const started = Date.now();
   let timedOut = false;
   let sentSignal = null;
+  let timeoutCancellationRequest = null;
+  let timeoutCleanupDeadlineExceeded = false;
   let terminateTimer;
   let killTimer;
   let userInterruptCleanupTimer;
   let userInterruptKillTimer;
-  let userInterruptCloseConfirmationTimer;
+  let closeConfirmationTimer;
   let timeout;
   let spawnError;
   let child;
@@ -344,9 +347,9 @@ export async function runLive(
   const userInterruptForcedTerminationSignalsSent = [];
   let signalListenerInstalled = false;
   const scheduleCloseConfirmation = () => {
-    if (userInterruptCloseConfirmationTimer !== undefined) return;
-    userInterruptCloseConfirmationTimer = setTimeout(() => {
-      userInterruptCloseConfirmationTimer = undefined;
+    if (closeConfirmationTimer !== undefined) return;
+    closeConfirmationTimer = setTimeout(() => {
+      closeConfirmationTimer = undefined;
       if (childCloseWatcher?.hasClosed()) return;
       childCloseWatcher?.resolveWithoutClose();
     }, userInterruptCloseObservationMs);
@@ -403,7 +406,7 @@ export async function runLive(
       cwd: ROOT,
       shell: false,
       windowsHide: true,
-      stdio: ["inherit", "pipe", "pipe"],
+      stdio: ["inherit", "pipe", "pipe", "ipc"],
       env: childEnv,
     });
     tee(child.stdout, terminalStdout, stdoutLog);
@@ -413,18 +416,54 @@ export async function runLive(
     if (userInterruptSignalCount === 0) {
       timeout = setTimeout(() => {
         timedOut = true;
-        sentSignal = "SIGINT";
-        child.kill("SIGINT");
+        terminalStdout.write("\nRunner timeout elapsed; requesting graceful CLI cancellation over IPC.\n");
+        const cancellationMessage = { type: "harness.cancel", reason: "run-timeout" };
+        if (typeof child.send !== "function" || child.connected === false) {
+          timeoutCancellationRequest = {
+            type: cancellationMessage.type,
+            reason: cancellationMessage.reason,
+            sendReturn: null,
+            completion: "unavailable",
+          };
+        } else {
+          const request = {
+            type: cancellationMessage.type,
+            reason: cancellationMessage.reason,
+            sendReturn: null,
+            completion: "pending",
+          };
+          timeoutCancellationRequest = request;
+          try {
+            const sendReturn = child.send(cancellationMessage, undefined, undefined, (error) => {
+              if (error) {
+                request.completion = "failed";
+                request.error = error.message;
+              } else {
+                request.completion = "sent";
+              }
+            });
+            request.sendReturn = typeof sendReturn === "boolean" ? sendReturn : null;
+          } catch (error) {
+            request.completion = "failed";
+            request.error = error instanceof Error ? error.message : String(error);
+          }
+        }
         terminateTimer = setTimeout(() => {
-          if (child.exitCode !== null || child.signalCode !== null) return;
+          if (childCloseWatcher?.hasClosed()) return;
+          timeoutCleanupDeadlineExceeded = true;
+          if (child.exitCode !== null || child.signalCode !== null) {
+            scheduleCloseConfirmation();
+            return;
+          }
           sentSignal = "SIGTERM";
           child.kill("SIGTERM");
           killTimer = setTimeout(() => {
-            if (child.exitCode === null && child.signalCode === null) {
+            if (!childCloseWatcher?.hasClosed() && child.exitCode === null && child.signalCode === null) {
               sentSignal = "SIGKILL";
               child.kill("SIGKILL");
             }
-          }, 5_000);
+            scheduleCloseConfirmation();
+          }, timeoutForceKillDelayMs);
         }, plan.configuration.cleanupDeadlineMs);
       }, plan.configuration.runTimeoutMs);
     }
@@ -437,13 +476,18 @@ export async function runLive(
       clearTimeout(userInterruptKillTimer);
       userInterruptKillTimer = undefined;
     }
-    if (userInterruptCloseConfirmationTimer !== undefined) {
-      clearTimeout(userInterruptCloseConfirmationTimer);
-      userInterruptCloseConfirmationTimer = undefined;
+    if (closeConfirmationTimer !== undefined) {
+      clearTimeout(closeConfirmationTimer);
+      closeConfirmationTimer = undefined;
     }
     if (result.closeObserved === false) {
       child.stdout?.destroy();
       child.stderr?.destroy();
+      try {
+        child.channel?.unref?.();
+      } catch {
+        // The IPC channel can disconnect while the wrapper stops waiting.
+      }
       child.unref?.();
     }
     if (timeout !== undefined) clearTimeout(timeout);
@@ -461,6 +505,8 @@ export async function runLive(
       signal: result.signal,
       timedOut,
       terminationSignalSent: sentSignal,
+      timeoutCancellationRequest,
+      timeoutCleanupDeadlineExceeded,
       userInterruptSignalReceived,
       userInterruptSignalCount,
       userInterruptCleanupTimedOut,
@@ -491,6 +537,8 @@ export async function runLive(
       signal: null,
       timedOut,
       terminationSignalSent: sentSignal,
+      timeoutCancellationRequest,
+      timeoutCleanupDeadlineExceeded,
       userInterruptSignalReceived,
       userInterruptSignalCount,
       userInterruptCleanupTimedOut,
@@ -510,7 +558,7 @@ export async function runLive(
     if (killTimer !== undefined) clearTimeout(killTimer);
     if (userInterruptCleanupTimer !== undefined) clearUserInterruptCleanupTimeout(userInterruptCleanupTimer);
     if (userInterruptKillTimer !== undefined) clearTimeout(userInterruptKillTimer);
-    if (userInterruptCloseConfirmationTimer !== undefined) clearTimeout(userInterruptCloseConfirmationTimer);
+    if (closeConfirmationTimer !== undefined) clearTimeout(closeConfirmationTimer);
     if (signalListenerInstalled) signalSource.removeListener("SIGINT", onSigint);
   }
 }

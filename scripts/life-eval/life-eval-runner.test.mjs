@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -739,6 +740,204 @@ test("Ctrl+C waits for child cleanup, keeps its output pipes open, and records t
     const stdoutLog = await readFile(record.stdoutLog, "utf8");
     assert.match(stdoutLog, /Runtime finished: cancelled/u);
     assert.match(stdoutLog, /Managed browser cleanup complete/u);
+  } finally {
+    terminalStdout.destroy();
+    terminalStderr.destroy();
+    if (packageDir !== undefined && packageId !== undefined) {
+      const ownedPackage = join(ROOT, "runs", SUITE_ID, packageId);
+      assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
+      await rm(ownedPackage, { recursive: true, force: false });
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("run timeout requests CLI cancellation over IPC and records bounded forced cleanup uncertainty", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-run-timeout-ipc-test-"));
+  let packageDir;
+  let packageId;
+  let child;
+  const signalSource = new EventEmitter();
+  const terminalStdout = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const terminalStderr = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  try {
+    const prepared = await createPlan({
+      "--output-dir": tempRoot,
+      "--profile-label": "LifeEval-Timeout-Ipc",
+      "--as-of-date": "2026-10-15",
+      "--travel-date": "2026-10-20",
+      "--task-id": "G01",
+      "--variant": "B00",
+    }, {
+      root: ROOT,
+      manifestPath: MANIFEST_PATH,
+      now: () => new Date("2026-10-15T10:00:00.000Z"),
+    });
+    packageDir = prepared.packageDir;
+    packageId = prepared.packageId;
+    const plan = {
+      ...prepared.plan,
+      configuration: {
+        ...prepared.plan.configuration,
+        runTimeoutMs: 10,
+        cleanupDeadlineMs: 10,
+      },
+    };
+
+    const result = await runLive({
+      plan,
+      review: prepared.review,
+      packageDir,
+      cuaSocket: "offline-timeout-ipc-fixture",
+      supervised: true,
+    }, {
+      signalSource,
+      terminalStdout,
+      terminalStderr,
+      timeoutForceKillDelayMs: 5,
+      userInterruptCloseObservationMs: 5,
+      spawnChild(_executable, _args, options) {
+        assert.deepEqual(options.stdio, ["inherit", "pipe", "pipe", "ipc"]);
+        child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.connected = true;
+        child.channel = { unrefCalls: 0, unref() { this.unrefCalls += 1; } };
+        child.killCalls = [];
+        child.unrefCalls = 0;
+        child.sendCalls = [];
+        child.send = (message, _sendHandle, _options, callback) => {
+          child.sendCalls.push(message);
+          callback(null);
+          return true;
+        };
+        child.kill = (signal) => {
+          child.killCalls.push(signal);
+          if (signal === "SIGTERM") child.exitCode = 0;
+          return true;
+        };
+        child.unref = () => { child.unrefCalls += 1; };
+        return child;
+      },
+    });
+
+    const expectedCancellationMessage = { type: "harness.cancel", reason: "run-timeout" };
+    assert.deepEqual(child.sendCalls, [expectedCancellationMessage]);
+    assert.deepEqual(child.killCalls, ["SIGTERM"]);
+    assert.equal(child.unrefCalls, 1);
+    assert.equal(child.channel.unrefCalls, 1);
+    assert.equal(result.timedOut, true);
+    assert.deepEqual(result.timeoutCancellationRequest, {
+      type: "harness.cancel",
+      reason: "run-timeout",
+      sendReturn: true,
+      completion: "sent",
+    });
+    assert.equal(result.timeoutCleanupDeadlineExceeded, true);
+    assert.equal(result.terminationSignalSent, "SIGTERM");
+    assert.equal(result.childCloseObserved, false);
+
+    const record = JSON.parse(await readFile(join(packageDir, "live-attempt.json"), "utf8"));
+    assert.deepEqual(record.final.timeoutCancellationRequest, result.timeoutCancellationRequest);
+    assert.equal(record.final.timeoutCleanupDeadlineExceeded, true);
+    assert.equal(record.final.terminationSignalSent, "SIGTERM");
+    assert.equal(record.final.childCloseObserved, false);
+  } finally {
+    terminalStdout.destroy();
+    terminalStderr.destroy();
+    if (packageDir !== undefined && packageId !== undefined) {
+      const ownedPackage = join(ROOT, "runs", SUITE_ID, packageId);
+      assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
+      await rm(ownedPackage, { recursive: true, force: false });
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("run timeout reaches a real Node child over IPC and waits for cooperative cleanup", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-run-timeout-cooperative-test-"));
+  let packageDir;
+  let packageId;
+  let terminalOutput = "";
+  const terminalStdout = new Writable({
+    write(chunk, _encoding, callback) {
+      terminalOutput += chunk.toString("utf8");
+      callback();
+    },
+  });
+  const terminalStderr = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  try {
+    const prepared = await createPlan({
+      "--output-dir": tempRoot,
+      "--profile-label": "LifeEval-Timeout-Cooperative",
+      "--as-of-date": "2026-10-15",
+      "--travel-date": "2026-10-20",
+      "--task-id": "G01",
+      "--variant": "B00",
+    }, {
+      root: ROOT,
+      manifestPath: MANIFEST_PATH,
+      now: () => new Date("2026-10-15T10:00:00.000Z"),
+    });
+    packageDir = prepared.packageDir;
+    packageId = prepared.packageId;
+    const plan = {
+      ...prepared.plan,
+      configuration: {
+        ...prepared.plan.configuration,
+        runTimeoutMs: 2_000,
+        cleanupDeadlineMs: 1_000,
+      },
+    };
+    const childSource = [
+      'process.stdout.write("FIXTURE_READY\\n");',
+      'process.on("message", (message) => {',
+      '  if (message?.type !== "harness.cancel" || message?.reason !== "run-timeout") return;',
+      '  process.stdout.write("FIXTURE_CANCEL_ACCEPTED\\n");',
+      '  setTimeout(() => process.stdout.write("FIXTURE_CLEANUP_COMPLETE\\n", () => {',
+      '    if (process.connected) process.disconnect();',
+      '    process.exit(0);',
+      '  }), 10);',
+      '});',
+    ].join("\n");
+
+    const result = await runLive({
+      plan,
+      review: prepared.review,
+      packageDir,
+      cuaSocket: "offline-timeout-ipc-cooperative-fixture",
+      supervised: true,
+    }, {
+      terminalStdout,
+      terminalStderr,
+      spawnChild(executable, _args, options) {
+        assert.deepEqual(options.stdio, ["inherit", "pipe", "pipe", "ipc"]);
+        return spawn(executable, ["-e", childSource], options);
+      },
+    });
+
+    assert.equal(result.timedOut, true);
+    assert.deepEqual(result.timeoutCancellationRequest, {
+      type: "harness.cancel",
+      reason: "run-timeout",
+      sendReturn: true,
+      completion: "sent",
+    });
+    assert.equal(result.timeoutCleanupDeadlineExceeded, false);
+    assert.equal(result.terminationSignalSent, null);
+    assert.equal(result.childCloseObserved, true);
+    assert.match(terminalOutput, /FIXTURE_READY/u);
+    assert.match(terminalOutput, /FIXTURE_CANCEL_ACCEPTED/u);
+    assert.match(terminalOutput, /FIXTURE_CLEANUP_COMPLETE/u);
+    const record = JSON.parse(await readFile(join(packageDir, "live-attempt.json"), "utf8"));
+    assert.equal(record.final.childCloseObserved, true);
+    assert.equal(record.final.terminationSignalSent, null);
+    assert.equal(record.final.timeoutCleanupDeadlineExceeded, false);
+    const stdoutLog = await readFile(record.stdoutLog, "utf8");
+    assert.match(stdoutLog, /FIXTURE_CANCEL_ACCEPTED/u);
+    assert.match(stdoutLog, /FIXTURE_CLEANUP_COMPLETE/u);
   } finally {
     terminalStdout.destroy();
     terminalStderr.destroy();
