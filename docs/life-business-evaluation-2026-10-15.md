@@ -1,6 +1,53 @@
-# 三类九题：真实生活任务评测操作说明
+# 真实生活任务评测：原九题与新增六题对照
 
-独立候选套件（2026-10-16）：[购物售后与通信日程六题](../eval/life-business-shopping-communication-20261016/README.md)已完成公开来源可读性核验，尚未接入此 runner，不属于原九题或八题历史运行范围。
+独立套件（2026-10-16）：[购物售后与通信日程六题](../eval/life-business-shopping-communication-20261016/README.md)沿用本页的准备、冻结、人工预检、授权运行及评分流程；通过显式suite选择，与原九题和历史八题记录隔离。最新接入状态和六题命令见下一节；本页其余旧九题配置与运行结果均按原时点保留，不套用于新六题。
+
+## 新六题：方舟对照准备（2026-10-16接续）
+
+用户要求今晚进行对照，但本轮仅接入和离线验证，不调用API、不打开浏览器或操作桌面、不填写预检通过。完整Goal仍见[任务卡](./life-business-task-cards-2026-10-15.md)，程序唯一题面为新suite manifest，不将来源真值或评分要求注入Goal。
+
+| 题号 | 难度 | 用户要做的事 | 最终成果与起点 |
+| --- | --- | --- | --- |
+| S01 | 简单 | 为iPhone 15确认Apple 20W充电器的价格、功率/接口、兼容性和是否含线 | 商品页开始，中文答复与来源 |
+| S02 | 中等 | 确认大陆Apple实体店购买10天的iPhone退货条件、原店要求和运营商协议影响 | 零售店政策页开始，中文答复与来源 |
+| S03 | 偏难 | 比较iPhone/Mac三包与Apple有限保修，解释法定条件及14日退货区别 | 三包摘要页开始；WPS新建18磅说明DOCX |
+| CM01 | 简单 | 给家人解释Mac群聊静音、名字提及提醒和整个App通知的区别 | 信息App官方手册开始，中文答复与来源 |
+| CM02 | 中等 | 解释四周周三学习日程的重复、结束、提醒和单次取消方法 | 日历官方手册开始，中文答复与来源 |
+| CM03 | 偏难 | 解释家庭iCloud日历的私下共享、只读/编辑与停止共享 | 私人共享官方手册开始；WPS新建18磅说明DOCX |
+
+以上都不登录Apple/iCloud，不读取真实消息、订单或日历，不实际修改通知/日程、发邀请或购物。Mac是手册说明对象，不要求运行Mac应用。S03/CM03只需WPS可编辑保存，目录与文件名已分开；不需要打开记事本或微信。CM02固定2026年11月4日至25日及11月11日取消，是公开说明场景而非建日程任务，本轮不随意改日期。换日期需在成对运行前重新冻结，不能只改一个实验组。
+
+### 固定条件与分组
+
+新suite选择`life-business-shopping-communication-20261016`，模型`deepseek-v4.1-flash`、thinking disabled、实际像素/native tools。使用整个主桌面前台路径，开放已授权跨窗口工具；浏览器按每题manifest的`startUrl`启动，不从空白页搜索，也不由脚本先替模型查答案。既有travel profile只复用本机配置，不要求本批登录；起始页配置不保证网络可达，实际运行遇访问失败需如实保留。
+
+| variant | Planning | Run Memory |
+| --- | --- | --- |
+| B00 | 关闭 | 关闭 |
+| P10 | 开启 | 关闭 |
+| M01 | 关闭 | facts + lexical |
+| PM11 | 开启 | facts + lexical |
+
+建议首批先做B00/PM11成对比较，必要时再用P10/M01区分贡献。简单任务未调用Plan/Memory不是自动失败；记录实际使用、步骤/请求、重复动作、token、耗时、交付质量和人工介入。S03/CM03更适合观察跨界面收集与保留信息的差异。Batch固定关闭（Ark同轮三GUI动作尚未证实）；Context recent/80、Monitor shadow、原Guard及人工审批、模型预算保持一致，不通过放宽安全提高成功率。每题组间交换先后顺序、记录缓存命中和请求时延，避免把服务波动或热缓存算作模块收益。
+
+### 本机密钥与启动方式
+
+本机被忽略的`.tools/life-eval.local.json`已配置`arkApiKeyEnv: "HUOSHAN_API_KEY"`，指向用户新追加的方舟key变量。准备包只冻结变量名和私有env路径，不含key值；prepare/dry-run不读env。正式live在预检和授权后只取指定变量，显式映射到子进程ARK_API_KEY；不回退到旧ARK、不改原env、不影响官方DeepSeek配置。通用机器未配置该字段时按ARK_API_KEY，不能把本机别名当通用密钥默认。
+
+在仓库根目录用可用Node执行（本机具体Node路径见最终交付命令）：
+
+```text
+node scripts/life-eval/start.mjs --suite life-business-shopping-communication-20261016 --task-id S01 --variant B00
+node scripts/life-eval/start.mjs --suite life-business-shopping-communication-20261016 --task-id S01 --variant PM11
+```
+
+更换题号可准备其余五题；P10/M01同理。`start`只创建新的独立准备包，输出Goal、输出目录及下一步dry-run/live命令，**不会开始任务**。先dry-run检查题面/模型/起始URL/开关；今晚明确授权后才核实际CUA daemon/socket、官网可达、WPS初态并填当包`review.json`，首次监督命令还需确认控制桌面。不要把离线检查自动填成GUI通过。
+
+每次尝试独立保存到`runs/<suiteId>/<packageId>/`及指定输出目录的独立子目录；失败与复跑分别保留。代码、manifest、构建、密钥变量选择或实验配置改变后重新prepare，旧包不复用；预检尚未完成的新包仍会拒绝live。评测准备不等于已启动服务，也不意味着Preview已切换版本。
+
+### 本轮离线验收
+
+Luna实施、Sol一轮只读审查GO；根独立执行runner/start Node测试 **33/33通过**，含六题×四variant CLI投影、起始URL、原九题保留、套件路径/冻结、无答案注入、离线不读env、指定key无回退和取消/清理回归。相关MJS语法检查及diff检查通过。新manifest仅更新顶层状态/说明，六题Goal、来源、评分内容保持原样；原九题manifest未改。没有调用真实API、打开浏览器/应用、读真实key、控制桌面或替换Preview。今晚的GUI/网站/daemon实态检查及首题监督运行仍未完成，不把这些离线结果记作业务成功。
 
 更新：2026-10-16。状态：授权的八题已依次真实执行完毕、跳过G03，使用整个桌面前台路径；成功、失败、中止及复跑分别保留，详见[逐题结果](life-business-eight-task-results-2026-10-16.md)。没有足够证据判定完整业务通过，先处理已复现基础问题再开展模块对照。完整指令见[任务卡](life-business-task-cards-2026-10-15.md)，程序题面唯一来源是[tasks.json](../eval/life-business-20261015/tasks.json)。旧准备树及其历史记录保留，不继续使用旧包。
 

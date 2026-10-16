@@ -4,25 +4,27 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   CLI_ENTRY,
-  MANIFEST_PATH,
   MANAGED_BROWSER_LABEL_RE,
   ROOT,
   SUITE_ID,
   VARIANTS,
+  assertApiKeyEnvName,
   builtCliFingerprint,
   gitSummary,
   jsonText,
   limitsFor,
   loadCliParser,
+  manifestPathForSuite,
   parseFlags,
   parseIsoDate,
   sha256,
+  suiteDefinition,
   sourceFingerprint,
   verifyCuaDriverBinary,
   validateCliArgv,
 } from "./common.mjs";
 
-const VALUE_FLAGS = new Set(["--output-dir", "--profile-label", "--travel-date", "--as-of-date", "--task-id", "--variant", "--wechat-chat"]);
+const VALUE_FLAGS = new Set(["--output-dir", "--profile-label", "--travel-date", "--as-of-date", "--task-id", "--variant", "--wechat-chat", "--suite", "--api-key-env", "--env-file"]);
 const BOOLEAN_FLAGS = new Set(["--help"]);
 const CUA_SOCKET_TOKEN = "{{CUA_SOCKET}}";
 const WECHAT_CHAT_TOKEN = "{{WECHAT_CHAT}}";
@@ -55,11 +57,11 @@ export function renderGoal(task, outputAttemptDir, travelDate, wechatChat) {
   return { goal, usesTravelDate, usesWechatChat };
 }
 
-export function buildCliArgvTemplate({ goal, task, variant, limits, profileLabel, runtimeOutputDir, envFilePath }) {
+export function buildCliArgvTemplate({ goal, task, variant, limits, profileLabel, runtimeOutputDir, envFilePath, model = "deepseek-flash", batching = "same-control-input-v1" }) {
   const config = VARIANTS[variant];
   const argv = [
     "--goal", goal,
-    "--model", "deepseek-flash",
+    "--model", model,
     "--computer", "cua",
     "--cua-socket", CUA_SOCKET_TOKEN,
     "--multiline-type-profile", "foreground-caret-v1",
@@ -67,7 +69,7 @@ export function buildCliArgvTemplate({ goal, task, variant, limits, profileLabel
     "--grounding", "off",
     "--managed-browser-profile-mode", "persistent",
     "--managed-browser-profile-label", profileLabel,
-    "--batching", "same-control-input-v1",
+    "--batching", batching,
     "--context-mode", "recent",
     "--context-max-events", "80",
     "--monitor", "shadow",
@@ -94,9 +96,9 @@ export function buildCliArgvTemplate({ goal, task, variant, limits, profileLabel
   return argv;
 }
 
-function validateTask(task, manifest) {
-  if (manifest.schemaVersion !== 1 || manifest.suiteId !== SUITE_ID || !Array.isArray(manifest.tasks)) {
-    throw new Error(`task manifest must be schemaVersion 1 for ${SUITE_ID}`);
+function validateTask(task, manifest, suite) {
+  if (manifest.schemaVersion !== 1 || manifest.suiteId !== suite.suiteId || !Array.isArray(manifest.tasks)) {
+    throw new Error(`task manifest must be schemaVersion 1 for ${suite.suiteId}`);
   }
   if (!task || typeof task.id !== "string" || typeof task.goal !== "string" || task.goal.trim().length === 0) {
     throw new Error("selected task has no usable id/goal");
@@ -155,7 +157,19 @@ export async function freezeActiveInputs(task, manifestPath) {
   return results;
 }
 
-export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST_PATH, now = () => new Date(), candidateDriver, envFilePath } = {}) {
+export async function createPlan(options, { root = ROOT, manifestPath, now = () => new Date(), candidateDriver, envFilePath } = {}) {
+  const suite = suiteDefinition(options["--suite"] ?? SUITE_ID);
+  const selectedManifestPath = manifestPath ?? manifestPathForSuite(suite.suiteId, root);
+  const requestedEnvFilePath = options["--env-file"] ?? envFilePath;
+  if (options["--env-file"] !== undefined && envFilePath !== undefined && resolve(options["--env-file"]) !== resolve(envFilePath)) {
+    throw new Error("--env-file conflicts with configured envFilePath");
+  }
+  let apiKeyEnvName = null;
+  if (suite.provider === "ark") {
+    apiKeyEnvName = assertApiKeyEnvName(options["--api-key-env"] ?? "ARK_API_KEY");
+  } else if (options["--api-key-env"] !== undefined) {
+    throw new Error("--api-key-env is accepted only for the Ark Agent Plan suite");
+  }
   const outputRootInput = options["--output-dir"];
   if (!isAbsolute(outputRootInput)) throw new Error("--output-dir must be an absolute path");
   const outputRoot = resolve(outputRootInput);
@@ -169,19 +183,19 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
   if (!Number.isInteger(deltaDays) || deltaDays < 1 || deltaDays > 7) {
     throw new Error("--travel-date must be 1 to 7 days after --as-of-date (this validates only the requested offset, not service availability)");
   }
-  if (envFilePath !== undefined && (typeof envFilePath !== "string" || !isAbsolute(envFilePath))) {
+  if (requestedEnvFilePath !== undefined && (typeof requestedEnvFilePath !== "string" || !isAbsolute(requestedEnvFilePath))) {
     throw new Error("configured envFilePath must be absolute");
   }
   const cuaDriver = await verifyCuaDriverBinary(candidateDriver);
 
-  const manifestBytes = await readFile(manifestPath);
+  const manifestBytes = await readFile(selectedManifestPath);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
-  if (manifest.suiteId !== SUITE_ID || manifest.schemaVersion !== 1 || !Array.isArray(manifest.tasks)) {
-    throw new Error(`task manifest must be schemaVersion 1 for ${SUITE_ID}`);
+  if (manifest.suiteId !== suite.suiteId || manifest.schemaVersion !== 1 || !Array.isArray(manifest.tasks)) {
+    throw new Error(`task manifest must be schemaVersion 1 for ${suite.suiteId}`);
   }
   const task = manifest.tasks.find((candidate) => candidate.id === options["--task-id"]);
   if (!task) throw new Error(`task id not found: ${options["--task-id"]}`);
-  validateTask(task, manifest);
+  validateTask(task, manifest, suite);
   const requiresWechat = task.requiredApps.includes("WeChat") && task.goal.includes(WECHAT_CHAT_TOKEN);
   const wechatChat = options["--wechat-chat"];
   if (requiresWechat) {
@@ -191,10 +205,10 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
   } else if (wechatChat !== undefined) {
     throw new Error("--wechat-chat is accepted only for tasks that require WeChat and declare the chat target token");
   }
-  const activeInputs = await freezeActiveInputs(task, manifestPath);
+  const activeInputs = await freezeActiveInputs(task, selectedManifestPath);
   const limits = limitsFor(task.difficulty);
   const packageId = `${task.id}-${variant}-${options["--travel-date"].replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
-  const packageDir = join(root, "runs", SUITE_ID, packageId);
+  const packageDir = join(root, "runs", suite.suiteId, packageId);
   const outputAttemptDir = resolve(outputRoot, task.id, variant, packageId);
   const outputRelative = relative(outputRoot, outputAttemptDir);
   if (outputRelative.startsWith(`..${sep}`) || outputRelative === ".." || isAbsolute(outputRelative)) {
@@ -209,7 +223,9 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
     limits,
     profileLabel,
     runtimeOutputDir,
-    envFilePath,
+    envFilePath: requestedEnvFilePath,
+    model: suite.model,
+    batching: suite.batching,
   });
   const parseArgs = await loadCliParser();
   validateCliArgv(parseArgs, argvTemplate.map((value) => value === CUA_SOCKET_TOKEN ? "dry-run-cua-socket-placeholder" : value));
@@ -219,7 +235,7 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
   const builtCli = await builtCliFingerprint(root);
   const plan = {
     schemaVersion: 1,
-    suiteId: SUITE_ID,
+    suiteId: suite.suiteId,
     packageId,
     preparedAt: now().toISOString(),
     packageDir,
@@ -253,7 +269,7 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
       travelDateValidation: "calendar-day offset only; no transport-date/service availability verification",
     },
     configuration: {
-      model: "deepseek-flash",
+      model: suite.model,
       providerEnabledByDefault: false,
       requestTimeoutMs: 90_000,
       maxOutputTokens: 4096,
@@ -267,7 +283,7 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
       planning: VARIANTS[variant].planning,
       memory: VARIANTS[variant].memory,
       memoryRetrieval: VARIANTS[variant].retrieval,
-      batching: "same-control-input-v1",
+      batching: suite.batching,
       multilineTypeProfile: "foreground-caret-v1",
       monitor: "shadow",
       riskProfile: "live-interactive",
@@ -286,26 +302,34 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
       allowedHostsEnforcement: "not enforced by current CLI; informational for human review",
       nativeAppStartup: "manual; runner does not launch or preselect native application windows",
       environment: {
-        readsEnvFile: false,
-        envFilePath: envFilePath ?? null,
-        deepseekVariablesSetOnlyForLiveChild: {
-          DEEPSEEK_REQUEST_TIMEOUT_MS: "90000",
-          DEEPSEEK_MAX_OUTPUT_TOKENS: "4096",
-        },
+        envFilePath: requestedEnvFilePath ?? null,
+        apiKeyEnvName,
+        apiKeyTargetEnvName: suite.apiKeyTargetEnv,
+        ...(suite.provider === "deepseek" ? {
+          deepseekVariablesSetOnlyForLiveChild: {
+            DEEPSEEK_REQUEST_TIMEOUT_MS: "90000",
+            DEEPSEEK_MAX_OUTPUT_TOKENS: "4096",
+          },
+        } : {
+          arkVariablesSetOnlyForLiveChild: {
+            ARK_REQUEST_TIMEOUT_MS: "90000",
+            ARK_MAX_OUTPUT_TOKENS: "4096",
+          },
+        }),
       },
     },
     cli: {
       entry: CLI_ENTRY,
       executable: process.execPath,
       argvTemplate,
-      envFilePath: envFilePath ?? null,
+      envFilePath: requestedEnvFilePath ?? null,
       cuaSocketToken: CUA_SOCKET_TOKEN,
       shell: false,
       stdin: "inherit for CLI approvals and user-input requests",
       stdoutStderr: "tee to terminal and private per-attempt logs",
     },
     frozenState: {
-      manifestPath,
+      manifestPath: selectedManifestPath,
       manifestSha256: sha256(manifestBytes),
       git: gitState,
       sourceFingerprint: source,
@@ -358,7 +382,7 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
     },
   };
 
-  await mkdir(join(root, "runs", SUITE_ID), { recursive: true });
+  await mkdir(join(root, "runs", suite.suiteId), { recursive: true });
   await mkdir(packageDir, { recursive: false });
   try {
     await mkdir(dirname(outputAttemptDir), { recursive: true });
@@ -383,7 +407,7 @@ export async function createPlan(options, { root = ROOT, manifestPath = MANIFEST
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write("Usage: node scripts/life-eval/prepare.mjs --output-dir <absolute> --profile-label <label> --as-of-date YYYY-MM-DD --travel-date YYYY-MM-DD --task-id <G01|...|M03> --variant <B00|P10|M01|PM11> [--wechat-chat <exact recipient name; only when the selected task requires WeChat>]\n");
+    process.stdout.write("Usage: node scripts/life-eval/prepare.mjs [--suite <life-business-20261015|life-business-shopping-communication-20261016>] --output-dir <absolute> --profile-label <label> --as-of-date YYYY-MM-DD --travel-date YYYY-MM-DD --task-id <suite task id> --variant <B00|P10|M01|PM11> [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--env-file <absolute>] [--wechat-chat <exact recipient name; only when the selected task requires WeChat>]\nOmitting --suite preserves the original 2026-10-15 nine-task suite. Prepare never reads API-key values or the env file.\n");
     return;
   }
   const options = parsePrepareArgs(argv);
@@ -395,7 +419,8 @@ export async function main(argv = process.argv.slice(2)) {
     outputAttemptDir: result.outputAttemptDir,
     task: result.plan.task.id,
     variant: result.plan.selection.variant,
-    deepseekEnabled: false,
+    model: result.plan.configuration.model,
+    providerEnabledByDefault: false,
     cliEntry: result.plan.cli.entry,
   }, null, 2)}\n`);
 }

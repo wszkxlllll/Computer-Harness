@@ -10,12 +10,16 @@ import { PassThrough, Writable } from "node:stream";
 import {
   MANIFEST_PATH,
   ROOT,
+  SHOPPING_COMMUNICATION_SUITE_ID,
   SUITE_ID,
   VARIANTS,
+  limitsFor,
   loadCliModule,
+  manifestPathForSuite,
   pathExists,
   parseIsoDate,
   sha256,
+  suiteDefinition,
 } from "./common.mjs";
 import {
   buildCliArgvTemplate,
@@ -27,7 +31,9 @@ import {
   assertFreezeMatches,
   assertLiveAuthorization,
   buildLiveAttemptRecord,
+  buildLiveChildEnvironment,
   concreteArgv,
+  parseSelectedEnvValue,
   parseRunArgs,
   runLive,
   runPackage,
@@ -48,7 +54,22 @@ test("prepare accepts explicit paths/profile/task/variant and rejects missing ch
   assert.equal(options["--task-id"], "T01");
   assert.equal(options["--variant"], "B00");
   assert.equal(options["--wechat-chat"], "LifeEval test chat");
+  const arkOptions = parsePrepareArgs([
+    "--suite", SHOPPING_COMMUNICATION_SUITE_ID,
+    "--api-key-env", "HUOSHAN_API_KEY",
+    "--env-file", "E:\\private\\life-eval.env",
+    "--output-dir", "E:\\life-eval-output",
+    "--profile-label", "LifeEval-Shopping",
+    "--as-of-date", "2026-10-15",
+    "--travel-date", "2026-10-16",
+    "--task-id", "S01",
+    "--variant", "B00",
+  ]);
+  assert.equal(arkOptions["--suite"], SHOPPING_COMMUNICATION_SUITE_ID);
+  assert.equal(arkOptions["--api-key-env"], "HUOSHAN_API_KEY");
+  assert.equal(arkOptions["--env-file"], "E:\\private\\life-eval.env");
   assert.throws(() => parsePrepareArgs(["--task-id", "G01"]), /--output-dir is required/u);
+  assert.throws(() => parsePrepareArgs(["--suite", "unknown-suite"]), /--output-dir is required/u);
   assert.throws(() => parseIsoDate("2026-02-30", "--travel-date"), /calendar date/u);
 });
 
@@ -253,6 +274,11 @@ test("freeze check rejects a changed manifest or source/build fingerprint", () =
     schemaVersion: 1,
     suiteId: "life-business-20261015",
     packageDir: "E:\\repo\\runs\\pkg",
+    configuration: {
+      model: "deepseek-flash",
+      batching: "same-control-input-v1",
+      environment: { apiKeyEnvName: null, apiKeyTargetEnvName: null },
+    },
     frozenState: {
       manifestSha256: sha256("manifest"),
       git: { head: "head" },
@@ -356,6 +382,173 @@ test("manifest fixture contains nine identified tasks and no answer key is proje
   }
 });
 
+test("six-task suite metadata, official start URLs, fixed Goals, Ark model, and disabled batching stay isolated", async () => {
+  const manifestPath = manifestPathForSuite(SHOPPING_COMMUNICATION_SUITE_ID);
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.suiteId, SHOPPING_COMMUNICATION_SUITE_ID);
+  assert.deepEqual(manifest.tasks.map((task) => task.id), ["S01", "S02", "S03", "CM01", "CM02", "CM03"]);
+  const cli = await loadCliModule();
+  const expectedDefaults = {
+    suiteId: SHOPPING_COMMUNICATION_SUITE_ID,
+    model: "deepseek-v4.1-flash",
+    provider: "ark",
+    batching: "off",
+    apiKeyTargetEnv: "ARK_API_KEY",
+  };
+  assert.equal(expectedDefaults.suiteId, manifest.suiteId);
+  assert.equal(suiteDefinition(SHOPPING_COMMUNICATION_SUITE_ID).provider, expectedDefaults.provider);
+  assert.equal(suiteDefinition(SHOPPING_COMMUNICATION_SUITE_ID).apiKeyTargetEnv, expectedDefaults.apiKeyTargetEnv);
+  assert.throws(() => manifestPathForSuite("not-a-life-eval-suite"), /unsupported life-eval suite/u);
+  for (const task of manifest.tasks) {
+    for (const field of ["id", "difficulty", "title", "goal", "startUrl", "allowedHosts", "requiredApps", "requiresLogin", "sourceIds", "outcomeMode", "activeInputs", "deliverables", "checks"]) {
+      assert.ok(Object.hasOwn(task, field), `${task.id} declares ${field}`);
+    }
+    const url = new URL(task.startUrl);
+    assert.ok(["https:", "http:"].includes(url.protocol));
+    assert.ok(task.allowedHosts.includes(url.hostname), `${task.id} start host is allowlisted`);
+    assert.equal(task.checks.length, 5);
+    assert.equal(task.checks.reduce((sum, check) => sum + check.weight, 0), 100);
+    assert.equal(task.activeInputs.length, 0);
+    if (task.outcomeMode === "document") assert.equal(task.goal.includes("\n"), true);
+    if (task.id === "CM02") {
+      const fixedGoal = renderGoal(task, "E:\\output\\CM02\\M01\\attempt", "2026-10-16").goal;
+      assert.match(fixedGoal, /2026年11月4日至11月25日/u);
+      assert.equal(fixedGoal.includes("2026-10-16"), false);
+    }
+    for (const variant of Object.keys(VARIANTS)) {
+      const goal = renderGoal(task, `E:\\output\\${task.id}\\${variant}\\attempt`, "2026-10-16").goal;
+      const argv = buildCliArgvTemplate({
+        goal,
+        task,
+        variant,
+        limits: limitsFor(task.difficulty),
+        profileLabel: "LifeEval-Six",
+        runtimeOutputDir: `E:\\private\\runs\\${task.id}\\${variant}`,
+        envFilePath: "E:\\private\\life-eval.env",
+        model: expectedDefaults.model,
+        batching: expectedDefaults.batching,
+      }).map((value) => value === token ? "offline-cua-placeholder" : value);
+      const parsed = cli.parseArgs(argv);
+      assert.equal(parsed.model, expectedDefaults.model);
+      assert.equal(parsed.batching, "off");
+      assert.equal(argv[argv.indexOf("--managed-browser-url") + 1], task.startUrl);
+      assert.equal(parsed.planning, VARIANTS[variant].planning);
+      assert.equal(parsed.memory, VARIANTS[variant].memory);
+      assert.equal(parsed.memoryRetrieval, VARIANTS[variant].retrieval);
+      assert.equal(JSON.stringify(argv).includes(JSON.stringify(task.sourceIds)), false);
+      assert.equal(JSON.stringify(argv).includes(JSON.stringify(task.checks)), false);
+      assert.equal(JSON.stringify(argv).includes("S-C1"), false);
+    }
+  }
+  assert.equal(manifest.tasks.find((task) => task.id === "S03").goal.includes("\\n"), false);
+  assert.equal(manifest.tasks.find((task) => task.id === "CM03").goal.includes("\\n"), false);
+  assert.notEqual(manifestPathForSuite(SUITE_ID), manifestPath);
+});
+
+test("Ark key selection reads only the frozen allowlisted variable and never falls back to parent env", async () => {
+  const envFilePath = join(tmpdir(), "life-eval-ark-key-fixture.env");
+  const plan = {
+    suiteId: SHOPPING_COMMUNICATION_SUITE_ID,
+    configuration: {
+      environment: {
+        apiKeyEnvName: "HUOSHAN_API_KEY",
+        apiKeyTargetEnvName: "ARK_API_KEY",
+      },
+    },
+    cli: { envFilePath },
+  };
+  const envText = [
+    "# offline fixture only",
+    "UNRELATED_SECRET=fixture-unrelated-secret",
+    "ARK_API_KEY=fixture-decoy-key",
+    "HUOSHAN_API_KEY='fixture-selected-key'",
+    "",
+  ].join("\r\n");
+  assert.equal(parseSelectedEnvValue(envText, "HUOSHAN_API_KEY"), "fixture-selected-key");
+  assert.equal(parseSelectedEnvValue(envText, "ARK_API_KEY"), "fixture-decoy-key");
+
+  const readPaths = [];
+  const childEnv = await buildLiveChildEnvironment(plan, {
+    parentEnv: {
+      PATH: "fixture-path",
+      ARK_API_KEY: "fixture-parent-ark-key",
+      HUOSHAN_API_KEY: "fixture-parent-huoshan-key",
+    },
+    readEnvFile: async (path) => {
+      readPaths.push(path);
+      return Buffer.from(envText, "utf8");
+    },
+  });
+  assert.deepEqual(readPaths, [envFilePath]);
+  assert.equal(childEnv.ARK_API_KEY, "fixture-selected-key");
+  assert.equal(childEnv.HUOSHAN_API_KEY, "");
+  assert.equal(childEnv.PATH, "fixture-path");
+  assert.equal(childEnv.ARK_REQUEST_TIMEOUT_MS, "90000");
+  assert.equal(childEnv.ARK_MAX_OUTPUT_TOKENS, "4096");
+  assert.equal(parseSelectedEnvValue("ARK_API_KEY=fixture-only-key\n", "ARK_API_KEY"), "fixture-only-key");
+
+  assert.throws(() => parseSelectedEnvValue("ARK_API_KEY=fixture-parent-key\n", "HUOSHAN_API_KEY"), /environment variable is missing/u);
+  assert.throws(() => parseSelectedEnvValue("HUOSHAN_API_KEY=fixture-one\nHUOSHAN_API_KEY=fixture-two\n", "HUOSHAN_API_KEY"), /environment variable is duplicated/u);
+  assert.throws(() => parseSelectedEnvValue("HUOSHAN_API_KEY=  \n", "HUOSHAN_API_KEY"), /environment variable is empty/u);
+  assert.throws(() => parseSelectedEnvValue("HUOSHAN_API_KEY=fixture-key\n", "DEEPSEEK_API_KEY"), /one of ARK_API_KEY, HUOSHAN_API_KEY/u);
+
+  let missingKeyError;
+  try {
+    await buildLiveChildEnvironment(plan, {
+      parentEnv: { ARK_API_KEY: "fixture-parent-ark-key", HUOSHAN_API_KEY: "fixture-parent-huoshan-key" },
+      readEnvFile: async () => Buffer.from("ARK_API_KEY=fixture-decoy-key\n", "utf8"),
+    });
+  } catch (error) {
+    missingKeyError = error;
+  }
+  assert.match(missingKeyError?.message ?? "", /environment variable is missing/u);
+  assert.equal(missingKeyError.message.includes("fixture-parent-ark-key"), false);
+  assert.equal(missingKeyError.message.includes("fixture-decoy-key"), false);
+
+  let envReadWithoutFrozenPath = false;
+  await assert.rejects(buildLiveChildEnvironment({ ...plan, cli: { envFilePath: null } }, {
+    readEnvFile: async () => {
+      envReadWithoutFrozenPath = true;
+      return Buffer.from("HUOSHAN_API_KEY=fixture-selected-key", "utf8");
+    },
+  }), /requires a frozen env-file path/u);
+  assert.equal(envReadWithoutFrozenPath, false);
+
+  const canonicalPlan = {
+    ...plan,
+    configuration: { environment: { apiKeyEnvName: "ARK_API_KEY", apiKeyTargetEnvName: "ARK_API_KEY" } },
+  };
+  const canonicalChildEnv = await buildLiveChildEnvironment(canonicalPlan, {
+    parentEnv: { ARK_API_KEY: "fixture-parent-ark-key", HUOSHAN_API_KEY: "fixture-parent-huoshan-key" },
+    readEnvFile: async () => Buffer.from("ARK_API_KEY=fixture-file-ark-key\nHUOSHAN_API_KEY=fixture-decoy-huoshan-key\n", "utf8"),
+  });
+  assert.equal(canonicalChildEnv.ARK_API_KEY, "fixture-file-ark-key");
+  assert.equal(canonicalChildEnv.HUOSHAN_API_KEY, "");
+});
+
+test("legacy DeepSeek key environment path does not read an env file or acquire Ark settings", async () => {
+  let envRead = false;
+  const parentEnv = { PATH: "fixture-path", DEEPSEEK_API_KEY: "fixture-deepseek-key" };
+  const childEnv = await buildLiveChildEnvironment({
+    suiteId: SUITE_ID,
+    configuration: { environment: { apiKeyEnvName: null, apiKeyTargetEnvName: null } },
+    cli: { envFilePath: null },
+  }, {
+    parentEnv,
+    readEnvFile: async () => {
+      envRead = true;
+      throw new Error("must not read env file for the legacy suite");
+    },
+  });
+  assert.equal(envRead, false);
+  assert.equal(childEnv.DEEPSEEK_API_KEY, "fixture-deepseek-key");
+  assert.equal(childEnv.DEEPSEEK_REQUEST_TIMEOUT_MS, "90000");
+  assert.equal(childEnv.DEEPSEEK_MAX_OUTPUT_TOKENS, "4096");
+  assert.equal(Object.hasOwn(childEnv, "ARK_API_KEY"), false);
+  assert.equal(Object.hasOwn(childEnv, "ARK_REQUEST_TIMEOUT_MS"), false);
+});
+
 test("G01, G03, and M02 state only the user-relevant delegation, activation, phone, and SMS boundaries", async () => {
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, "utf8"));
   const task = (id) => manifest.tasks.find((candidate) => candidate.id === id);
@@ -406,6 +599,9 @@ test("actual prepare package produces a default dry-run and cleans only its own 
     });
     packageDir = prepared.packageDir;
     packageId = prepared.packageId;
+    assert.equal(prepared.plan.suiteId, SUITE_ID);
+    assert.equal(prepared.plan.configuration.model, "deepseek-flash");
+    assert.equal(prepared.plan.configuration.batching, "same-control-input-v1");
     assert.equal(prepared.plan.task.id, "G03");
     assert.equal(prepared.plan.task.outcomeMode, "document");
     assert.equal(prepared.plan.configuration.windowSwitch, "opened-windows-v1");
@@ -433,6 +629,9 @@ test("actual prepare package produces a default dry-run and cleans only its own 
     assert.equal(result.report.desktopAccess, false);
     assert.equal(result.report.modelAccess, false);
     assert.equal(result.report.networkAccess, false);
+    assert.equal(result.report.envFileRead, false);
+    assert.equal(result.report.providerEnabled, false);
+    assert.equal(result.report.model, "deepseek-flash");
     assert.equal(result.report.outcomeMode, "document");
     assert.equal(confirmationCalled, false);
     const dryRunFiles = await import("node:fs/promises").then((fs) => fs.readdir(join(packageDir, "dry-runs")));
@@ -454,6 +653,63 @@ test("actual prepare package produces a default dry-run and cleans only its own 
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
+  }
+});
+
+test("six-task package freezes Ark in its own suite path and dry-run does not read the configured key env file", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-six-suite-test-"));
+  const missingEnvFile = join(tempRoot, "not-read.env");
+  let packageDir;
+  let packageId;
+  try {
+    const prepared = await createPlan({
+      "--suite": SHOPPING_COMMUNICATION_SUITE_ID,
+      "--api-key-env": "HUOSHAN_API_KEY",
+      "--env-file": missingEnvFile,
+      "--output-dir": tempRoot,
+      "--profile-label": "LifeEval-Six-Temporary",
+      "--as-of-date": "2026-10-15",
+      "--travel-date": "2026-10-16",
+      "--task-id": "CM02",
+      "--variant": "M01",
+    }, {
+      root: ROOT,
+      manifestPath: manifestPathForSuite(SHOPPING_COMMUNICATION_SUITE_ID),
+      now: () => new Date("2026-10-15T10:00:00.000Z"),
+    });
+    packageDir = prepared.packageDir;
+    packageId = prepared.packageId;
+    assert.equal(packageDir, join(ROOT, "runs", SHOPPING_COMMUNICATION_SUITE_ID, packageId));
+    assert.notEqual(packageDir, join(ROOT, "runs", SUITE_ID, packageId));
+    assert.equal(prepared.plan.suiteId, SHOPPING_COMMUNICATION_SUITE_ID);
+    assert.equal(prepared.plan.task.startUrl, "https://support.apple.com/zh-cn/guide/calendar/icl1018/16.0/mac/26");
+    assert.equal(prepared.plan.configuration.model, "deepseek-v4.1-flash");
+    assert.equal(prepared.plan.configuration.batching, "off");
+    assert.equal(prepared.plan.configuration.environment.apiKeyEnvName, "HUOSHAN_API_KEY");
+    assert.equal(prepared.plan.configuration.environment.apiKeyTargetEnvName, "ARK_API_KEY");
+    assert.equal(prepared.plan.cli.envFilePath, missingEnvFile);
+    assert.equal(prepared.plan.cli.argvTemplate[prepared.plan.cli.argvTemplate.indexOf("--managed-browser-url") + 1], prepared.plan.task.startUrl);
+    assert.equal(prepared.plan.cli.argvTemplate[prepared.plan.cli.argvTemplate.indexOf("--batching") + 1], "off");
+    assert.equal(JSON.stringify(prepared.plan).includes("HUOSHAN_API_KEY="), false);
+    assert.equal(prepared.review.preflight.status, "pending");
+
+    const dryRun = await runPackage({ "--package": packageDir, "--suite": SHOPPING_COMMUNICATION_SUITE_ID }, { root: ROOT });
+    assert.equal(dryRun.mode, "dry-run");
+    assert.equal(dryRun.report.spawned, false);
+    assert.equal(dryRun.report.desktopAccess, false);
+    assert.equal(dryRun.report.modelAccess, false);
+    assert.equal(dryRun.report.networkAccess, false);
+    assert.equal(dryRun.report.envFileRead, false);
+    assert.equal(dryRun.report.providerEnabled, false);
+    assert.equal(dryRun.report.model, "deepseek-v4.1-flash");
+    await assert.rejects(runPackage({ "--package": packageDir, "--suite": SUITE_ID }, { root: ROOT }), /does not match the package's frozen suite/u);
+    await assert.rejects(readFile(missingEnvFile), { code: "ENOENT" });
+  } finally {
+    if (packageDir !== undefined && packageId !== undefined) {
+      assert.equal(packageDir, join(ROOT, "runs", SHOPPING_COMMUNICATION_SUITE_ID, packageId));
+      await rm(packageDir, { recursive: true, force: false });
+    }
+    await rm(tempRoot, { recursive: true, force: true });
   }
 });
 

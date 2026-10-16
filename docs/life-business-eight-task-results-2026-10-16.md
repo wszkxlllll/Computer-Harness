@@ -380,4 +380,6 @@ PR36接续以最新main `e970fea`为基底，将其合入原PR历史，保留原
 
 独立真实API基础验收已通过：3请求、17项检查全真，首轮task_create+memory_write_fact+click，真实Runtime持久化、回执/历史与新图进入后续请求，独立terminate；单请求2.512–3.280秒。仅用非敏感测试PNG与受限Computer fixture，不是业务GUI成功。两个composite尝试均5请求完成但三个GUI动作分轮，严格Batch验收不通过，记P2能力限制，建议Ark先采用单GUI基线；不动GLM/Qwen或放宽Runtime。首轮旧ARK_API_KEY401，实际用户末尾HUOSHAN_API_KEY有效，probe可显式选择且不回退；生产环境仍需正确设置ARK_API_KEY。实际nested缓存字段已在Provider/诊断两处修复并回归，官方直连平级格式保持。
 
-最终构建/spike/Web通过、完整Vitest2480/2480、旧runner27/27、新probe离线11/11；实现及增量Sol最终GO。中途旧缓存fixture失败已修并全量复验，没有隐藏失败或放松安全断言。详细请求时延、脱敏结果位置与通用复验命令见[Ark独立验收末节](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。下一步更新原PR36到main目标，远端CI全过才合入；Preview不变。
+最终构建/spike/Web通过、完整Vitest2480/2480、旧runner27/27、新probe离线11/11；实现及增量Sol最终GO。中途旧缓存fixture失败已修并全量复验，没有隐藏失败或放松安全断言。详细请求时延、脱敏结果位置与通用复验命令见[Ark独立验收末节](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。[PR36](https://github.com/wszkxlllll/Computer-Harness/pull/36)后续已改为main目标，[PR CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38897851567)全过后以`282ac6c`合入，[main CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38898351528)也已独立确认全过；Preview不变。
+
+六题runner后续由用户授权单独接入，最新状态与对照命令见[评测操作说明新六题节](./life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)。这项离线准备不属于上述历史八题或API验收，也不代表新六题已经实机通过。

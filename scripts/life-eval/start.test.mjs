@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MANIFEST_PATH, ROOT, SUITE_ID, sha256 } from "./common.mjs";
+import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SUITE_ID, manifestPathForSuite, sha256 } from "./common.mjs";
 import { renderGoal } from "./prepare.mjs";
 import {
   beijingDate,
@@ -38,6 +38,8 @@ test("start requires task and variant, applies local defaults, and keys chat inj
   assert.throws(() => parseStartArgs(["--task-id", "G03"]), /--variant is required/u);
   const args = parseStartArgs(["--task-id", "G03", "--variant", "PM11"]);
   const standard = buildPrepareOptions(args, { now: new Date("2026-10-14T16:30:00.000Z"), config: fixtureConfig });
+  assert.equal(standard.prepareOptions["--suite"], SUITE_ID);
+  assert.equal(Object.hasOwn(standard.prepareOptions, "--api-key-env"), false);
   assert.equal(standard.prepareOptions["--output-dir"], fixtureConfig.outputDir);
   assert.equal(standard.prepareOptions["--profile-label"], fixtureConfig.profileLabel);
   assert.equal(standard.prepareOptions["--profile-label"], "travel");
@@ -85,6 +87,21 @@ test("start accepts explicit output/date/socket overrides without connecting to 
   assert.equal(built.prepareOptions["--profile-label"], "profile-override");
   assert.equal(built.cuaSocket, "\\\\.\\pipe\\cua-test");
   assert.throws(() => buildPrepareOptions({ ...args, "--cua-socket": "   " }, { config: fixtureConfig }), /must not be empty/u);
+});
+
+test("start selects the six-task suite explicitly and freezes its configured Ark key-variable name", async () => {
+  const manifestPath = manifestPathForSuite(SHOPPING_COMMUNICATION_SUITE_ID);
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const task = manifest.tasks.find((candidate) => candidate.id === "S01");
+  const config = { ...fixtureConfig, arkApiKeyEnv: "HUOSHAN_API_KEY" };
+  const args = parseStartArgs(["--suite", SHOPPING_COMMUNICATION_SUITE_ID, "--task-id", "S01", "--variant", "B00"]);
+  const built = buildPrepareOptions(args, { config, task, now: new Date("2026-10-14T16:30:00.000Z") });
+  assert.equal(built.prepareOptions["--suite"], SHOPPING_COMMUNICATION_SUITE_ID);
+  assert.equal(built.prepareOptions["--api-key-env"], "HUOSHAN_API_KEY");
+  assert.equal(task.startUrl, "https://www.apple.com.cn/shop/product/mwvw3ch/a");
+  assert.throws(() => buildPrepareOptions({ ...args, "--api-key-env": "DEEPSEEK_API_KEY" }, { config, task }), /one of ARK_API_KEY, HUOSHAN_API_KEY/u);
+  assert.throws(() => buildPrepareOptions({ "--task-id": "G01", "--variant": "B00", "--api-key-env": "ARK_API_KEY" }, { config, task: { ...task, id: "G01" } }), /only for the Ark Agent Plan suite/u);
+  assert.throws(() => buildPrepareOptions({ ...args, "--suite": "unknown-suite" }, { config, task }), /unsupported life-eval suite/u);
 });
 
 test("printed commands use the current Node executable and keep dry-run separate from pending live", () => {
@@ -205,6 +222,59 @@ test("start freezes T03's configured WeChat recipient but never authorizes or se
       const ownedPackage = join(ROOT, "runs", SUITE_ID, packageId);
       assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
       await rm(ownedPackage, { recursive: true, force: false });
+    }
+    await rm(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test("start prepares the shopping suite under its own runs path without reading the env file", async () => {
+  const outputRoot = await mkdtemp(join(tmpdir(), "life-eval-start-shopping-test-"));
+  const candidateDriverPath = join(outputRoot, "candidate-cua-driver.exe");
+  const candidateDriverBytes = "fixture-only-shopping-cua-driver-bytes";
+  await writeFile(candidateDriverPath, candidateDriverBytes, { encoding: "utf8", flag: "wx" });
+  let packageId;
+  let packageDir;
+  try {
+    const args = parseStartArgs(["--suite", SHOPPING_COMMUNICATION_SUITE_ID, "--task-id", "CM02", "--variant", "M01", "--output-dir", outputRoot]);
+    const prepared = await prepareFromStartArgs(args, {
+      root: ROOT,
+      manifestPath: manifestPathForSuite(SHOPPING_COMMUNICATION_SUITE_ID),
+      now: () => new Date("2026-10-14T16:30:00.000Z"),
+      config: {
+        ...fixtureConfig,
+        arkApiKeyEnv: "HUOSHAN_API_KEY",
+        candidateDriverPath,
+        candidateDriverSha256: sha256(candidateDriverBytes),
+        envFilePath: join(outputRoot, "not-read.env"),
+      },
+    });
+    packageId = prepared.packageId;
+    packageDir = prepared.packageDir;
+    assert.equal(packageDir, join(ROOT, "runs", SHOPPING_COMMUNICATION_SUITE_ID, packageId));
+    assert.equal(prepared.plan.suiteId, SHOPPING_COMMUNICATION_SUITE_ID);
+    assert.equal(prepared.plan.task.id, "CM02");
+    assert.equal(prepared.plan.task.startUrl, "https://support.apple.com/zh-cn/guide/calendar/icl1018/16.0/mac/26");
+    assert.match(prepared.plan.task.goal, /2026年11月4日至11月25日/u);
+    assert.equal(prepared.plan.configuration.model, "deepseek-v4.1-flash");
+    assert.equal(prepared.plan.configuration.batching, "off");
+    assert.equal(prepared.plan.configuration.planning, false);
+    assert.equal(prepared.plan.configuration.memory, "facts");
+    assert.equal(prepared.plan.configuration.environment.apiKeyEnvName, "HUOSHAN_API_KEY");
+    assert.equal(prepared.plan.configuration.environment.apiKeyTargetEnvName, "ARK_API_KEY");
+    assert.equal(Object.hasOwn(prepared.plan.configuration.environment, "apiKey"), false);
+    assert.equal(Object.hasOwn(prepared.plan.configuration.environment, "apiKeyValue"), false);
+    assert.equal(prepared.plan.cli.envFilePath, join(outputRoot, "not-read.env"));
+    assert.equal(prepared.plan.cli.argvTemplate[prepared.plan.cli.argvTemplate.indexOf("--managed-browser-url") + 1], prepared.plan.task.startUrl);
+    assert.equal(prepared.plan.cli.argvTemplate[prepared.plan.cli.argvTemplate.indexOf("--batching") + 1], "off");
+    assert.equal(prepared.plan.cli.argvTemplate[prepared.plan.cli.argvTemplate.indexOf("--model") + 1], "deepseek-v4.1-flash");
+    assert.equal(prepared.plan.cli.argvTemplate.some((arg) => arg.includes("S-C")), false);
+    assert.equal(JSON.stringify(prepared.plan).includes("HUOSHAN_API_KEY="), false);
+    assert.equal(prepared.review.preflight.status, "pending");
+    await assert.rejects(readFile(prepared.plan.cli.envFilePath), { code: "ENOENT" });
+  } finally {
+    if (packageId !== undefined && packageDir !== undefined) {
+      assert.equal(packageDir, join(ROOT, "runs", SHOPPING_COMMUNICATION_SUITE_ID, packageId));
+      await rm(packageDir, { recursive: true, force: false });
     }
     await rm(outputRoot, { recursive: true, force: true });
   }

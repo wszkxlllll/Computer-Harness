@@ -6,6 +6,24 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const SUITE_ID = "life-business-20261015";
+export const SHOPPING_COMMUNICATION_SUITE_ID = "life-business-shopping-communication-20261016";
+export const SUITE_DEFINITIONS = Object.freeze({
+  [SUITE_ID]: Object.freeze({
+    suiteId: SUITE_ID,
+    model: "deepseek-flash",
+    provider: "deepseek",
+    batching: "same-control-input-v1",
+    apiKeyTargetEnv: null,
+  }),
+  [SHOPPING_COMMUNICATION_SUITE_ID]: Object.freeze({
+    suiteId: SHOPPING_COMMUNICATION_SUITE_ID,
+    model: "deepseek-v4.1-flash",
+    provider: "ark",
+    batching: "off",
+    apiKeyTargetEnv: "ARK_API_KEY",
+  }),
+});
+export const API_KEY_ENV_NAMES = Object.freeze(["ARK_API_KEY", "HUOSHAN_API_KEY"]);
 export const MANIFEST_PATH = join(ROOT, "eval", SUITE_ID, "tasks.json");
 export const CLI_ENTRY = join(ROOT, "apps", "cli", "dist", "index.js");
 export const MANAGED_BROWSER_LABEL_RE = /^[A-Za-z0-9._-]{1,64}$/u;
@@ -20,6 +38,25 @@ export const LIMITS = Object.freeze({
   medium: Object.freeze({ modelRequests: 120, riskRequests: 24, actions: 100, timeoutMs: 20 * 60_000 }),
   hard: Object.freeze({ modelRequests: 180, riskRequests: 36, actions: 150, timeoutMs: 30 * 60_000 }),
 });
+
+export function suiteDefinition(suiteId = SUITE_ID) {
+  if (typeof suiteId !== "string" || !Object.hasOwn(SUITE_DEFINITIONS, suiteId)) {
+    throw new Error(`unsupported life-eval suite; expected one of ${Object.keys(SUITE_DEFINITIONS).join(", ")}`);
+  }
+  return SUITE_DEFINITIONS[suiteId];
+}
+
+export function manifestPathForSuite(suiteId = SUITE_ID, root = ROOT) {
+  const suite = suiteDefinition(suiteId);
+  return join(root, "eval", suite.suiteId, "tasks.json");
+}
+
+export function assertApiKeyEnvName(value) {
+  if (!API_KEY_ENV_NAMES.includes(value)) {
+    throw new Error(`--api-key-env must be one of ${API_KEY_ENV_NAMES.join(", ")}`);
+  }
+  return value;
+}
 
 export function sha256(data) {
   return createHash("sha256").update(data).digest("hex");

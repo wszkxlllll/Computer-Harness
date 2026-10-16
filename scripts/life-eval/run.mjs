@@ -5,22 +5,23 @@ import { spawn } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  MANIFEST_PATH,
   ROOT,
-  SUITE_ID,
+  assertApiKeyEnvName,
   builtCliFingerprint,
   gitSummary,
   jsonText,
   loadCliParser,
+  manifestPathForSuite,
   parseFlags,
   pathExists,
   sha256,
+  suiteDefinition,
   sourceFingerprint,
   verifyCuaDriverBinary,
   validateCliArgv,
 } from "./common.mjs";
 
-const VALUE_FLAGS = new Set(["--package", "--cua-socket"]);
+const VALUE_FLAGS = new Set(["--package", "--cua-socket", "--suite"]);
 const BOOLEAN_FLAGS = new Set(["--live", "--confirm-desktop-control", "--supervised", "--help"]);
 const CUA_SOCKET_TOKEN = "{{CUA_SOCKET}}";
 
@@ -33,7 +34,20 @@ export function parseRunArgs(argv) {
 }
 
 export function assertFreezeMatches(plan, packageDir, manifestBytes, currentSource, currentBuiltCli, currentGit) {
-  if (plan.schemaVersion !== 1 || plan.suiteId !== SUITE_ID) throw new Error("unsupported plan schema/suite");
+  if (plan.schemaVersion !== 1) throw new Error("unsupported plan schema/suite");
+  const suite = suiteDefinition(plan.suiteId);
+  if (plan.configuration?.model !== suite.model || plan.configuration?.batching !== suite.batching) {
+    throw new Error("frozen model/batching does not match the selected suite");
+  }
+  const frozenKeyEnvName = plan.configuration?.environment?.apiKeyEnvName;
+  const frozenKeyTargetEnvName = plan.configuration?.environment?.apiKeyTargetEnvName;
+  if (suite.provider === "ark") {
+    assertApiKeyEnvName(frozenKeyEnvName);
+    if (frozenKeyTargetEnvName !== suite.apiKeyTargetEnv) throw new Error("frozen API-key target does not match the selected suite");
+  } else if ((frozenKeyEnvName !== undefined && frozenKeyEnvName !== null) ||
+      (frozenKeyTargetEnvName !== undefined && frozenKeyTargetEnvName !== null)) {
+    throw new Error("provider API-key mapping does not match the selected suite");
+  }
   if (typeof plan.frozenState?.git?.head !== "string") throw new Error("plan is missing its frozen git source version");
   if (resolve(plan.packageDir) !== resolve(packageDir)) throw new Error("package path does not match frozen plan");
   if (sha256(manifestBytes) !== plan.frozenState.manifestSha256) throw new Error("task manifest changed; prepare a new package");
@@ -60,7 +74,7 @@ export async function verifyActiveInputs(activeInputs, manifestPath) {
   }
 }
 
-export async function loadAndVerifyPackage(packageDir, { manifestPath = MANIFEST_PATH, root = ROOT } = {}) {
+export async function loadAndVerifyPackage(packageDir, { manifestPath, root = ROOT } = {}) {
   const absolutePackage = resolve(packageDir);
   const planPath = join(absolutePackage, "plan.json");
   const reviewPath = join(absolutePackage, "review.json");
@@ -72,13 +86,71 @@ export async function loadAndVerifyPackage(packageDir, { manifestPath = MANIFEST
     throw new Error("review.json package/profile does not match frozen plan");
   }
   if (review.planSha256 !== sha256(planBytes)) throw new Error("plan.json changed after prepare; prepare a new package");
-  const manifestBytes = await readFile(manifestPath);
+  const selectedManifestPath = manifestPath ?? manifestPathForSuite(plan.suiteId, root);
+  const manifestBytes = await readFile(selectedManifestPath);
+  const manifest = JSON.parse(manifestBytes.toString("utf8"));
+  if (manifest.suiteId !== plan.suiteId) throw new Error("task manifest does not match the frozen suite");
   const [currentSource, currentBuiltCli] = await Promise.all([sourceFingerprint(root), builtCliFingerprint(root)]);
   const currentGit = gitSummary(root);
   assertFreezeMatches(plan, absolutePackage, manifestBytes, currentSource, currentBuiltCli, currentGit);
   await verifyCuaDriverBinary(plan.configuration?.cuaDriver);
-  await verifyActiveInputs(plan.task.activeInputs, manifestPath);
+  await verifyActiveInputs(plan.task.activeInputs, selectedManifestPath);
   return { absolutePackage, plan, review };
+}
+
+export function parseSelectedEnvValue(envFileText, variableName) {
+  const selectedName = assertApiKeyEnvName(variableName);
+  if (typeof envFileText !== "string") throw new Error("configured Ark API-key env file is not valid UTF-8 text");
+  let matchCount = 0;
+  let selectedValue;
+  for (const line of envFileText.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0 || trimmed.slice(0, separator).trim() !== selectedName) continue;
+    matchCount += 1;
+    if (matchCount > 1) throw new Error("configured Ark API-key environment variable is duplicated");
+    selectedValue = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/gu, "");
+  }
+  if (matchCount === 0) throw new Error("configured Ark API-key environment variable is missing");
+  if (typeof selectedValue !== "string" || selectedValue.trim().length === 0) {
+    throw new Error("configured Ark API-key environment variable is empty");
+  }
+  return selectedValue;
+}
+
+export async function buildLiveChildEnvironment(plan, { parentEnv = process.env, readEnvFile = readFile } = {}) {
+  const suite = suiteDefinition(plan.suiteId);
+  const childEnv = { ...parentEnv };
+  if (suite.provider === "deepseek") {
+    childEnv.DEEPSEEK_REQUEST_TIMEOUT_MS = "90000";
+    childEnv.DEEPSEEK_MAX_OUTPUT_TOKENS = "4096";
+    return childEnv;
+  }
+
+  const envFilePath = plan.cli?.envFilePath;
+  if (typeof envFilePath !== "string" || envFilePath.trim().length === 0 || !isAbsolute(envFilePath)) {
+    throw new Error("Ark live execution requires a frozen env-file path");
+  }
+  const variableName = assertApiKeyEnvName(plan.configuration?.environment?.apiKeyEnvName);
+  if (plan.configuration?.environment?.apiKeyTargetEnvName !== suite.apiKeyTargetEnv) {
+    throw new Error("frozen API-key target does not match the selected suite");
+  }
+  let envFileText;
+  try {
+    const bytes = await readEnvFile(envFilePath);
+    envFileText = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("configured Ark API-key env file could not be read as UTF-8");
+  }
+  const selectedValue = parseSelectedEnvValue(envFileText, variableName);
+  childEnv[suite.apiKeyTargetEnv] = selectedValue;
+  // The CLI later loads the env file itself. A defined empty local alias keeps
+  // that loader from re-populating the source key after the runner maps it.
+  childEnv.HUOSHAN_API_KEY = "";
+  childEnv.ARK_REQUEST_TIMEOUT_MS = "90000";
+  childEnv.ARK_MAX_OUTPUT_TOKENS = "4096";
+  return childEnv;
 }
 
 export function concreteArgv(plan, cuaSocket) {
@@ -152,6 +224,8 @@ function printDryRun(plan, argv, socketPlaceholder) {
     variant: plan.selection.variant,
     model: plan.configuration.model,
     deepseekEnabled: false,
+    arkEnabled: false,
+    providerEnabled: false,
     cuaDriver: plan.configuration.cuaDriver,
     runningCuaDaemonIdentity: "not verified by candidate binary hash; human socket preflight required",
     cuaSocket: socketPlaceholder ? "placeholder (supply --cua-socket for live)" : "provided; not contacted",
@@ -207,6 +281,7 @@ function consumerEvidence(plan, stdoutLog, stderrLog) {
 }
 
 export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, supervised, startedAt, argv }) {
+  const suite = suiteDefinition(plan.suiteId);
   const stdoutLog = join(attemptDir, "stdout.log");
   const stderrLog = join(attemptDir, "stderr.log");
   return {
@@ -226,9 +301,11 @@ export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, su
     envFilePath: plan.cli.envFilePath ?? null,
     cuaDriver: plan.configuration.cuaDriver,
     cuaDaemonPreflight: review.preflight.cuaDaemon ?? null,
-    envPolicy: plan.cli.envFilePath === null || plan.cli.envFilePath === undefined
-      ? "runner does not read .env; inherit current environment and override only DeepSeek timeout/output-token caps in this child"
-      : "runner does not read envFilePath; the live child CLI reads it via --env-file and receives only the bounded DeepSeek timeout/output-token overrides",
+    envPolicy: suite.provider === "ark"
+      ? `after live authorization, runner reads only frozen ${plan.configuration.environment.apiKeyEnvName} from the frozen env-file, maps it to ARK_API_KEY, and records no value or fallback; child CLI receives env-file for its existing settings`
+      : plan.cli.envFilePath === null || plan.cli.envFilePath === undefined
+        ? "runner does not read .env; inherit current environment and override only DeepSeek timeout/output-token caps in this child"
+        : "runner does not read envFilePath; the live child CLI reads it via --env-file and receives only the bounded DeepSeek timeout/output-token overrides",
     stdoutLog,
     stderrLog,
     consumerEvidence: consumerEvidence(plan, stdoutLog, stderrLog),
@@ -241,7 +318,7 @@ async function promptExactConfirmation(plan) {
     throw new Error("live execution requires an interactive terminal for typed per-Run confirmation");
   }
   const expected = `${plan.packageId} ${plan.task.id}:${plan.selection.variant}`;
-  process.stdout.write(`\nThis single Run can control the desktop and call DeepSeek. Type exactly:\n${expected}\n> `);
+  process.stdout.write(`\nThis single Run can control the desktop and call ${plan.configuration.model}. Type exactly:\n${expected}\n> `);
   const answer = await new Promise((resolveAnswer, reject) => {
     let text = "";
     const onData = (chunk) => {
@@ -314,6 +391,7 @@ export async function runLive(
     timeoutForceKillDelayMs = 5_000,
   } = {},
 ) {
+  const childEnv = await buildLiveChildEnvironment(plan);
   const attemptDir = join(packageDir, "attempts", `live-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   await mkdir(join(packageDir, "attempts"), { recursive: true });
   await mkdir(attemptDir, { recursive: false });
@@ -393,11 +471,6 @@ export async function runLive(
         }, plan.configuration.cleanupDeadlineMs);
       }
     }
-  };
-  const childEnv = {
-    ...process.env,
-    DEEPSEEK_REQUEST_TIMEOUT_MS: "90000",
-    DEEPSEEK_MAX_OUTPUT_TOKENS: "4096",
   };
   try {
     signalSource.on("SIGINT", onSigint);
@@ -563,9 +636,13 @@ export async function runLive(
   }
 }
 
-export async function runPackage(options, { root = ROOT, manifestPath = MANIFEST_PATH, confirm = promptExactConfirmation } = {}) {
+export async function runPackage(options, { root = ROOT, manifestPath, confirm = promptExactConfirmation } = {}) {
   if (!isAbsolute(options["--package"])) throw new Error("--package must be an absolute prepared package path");
+  if (options["--suite"] !== undefined) suiteDefinition(options["--suite"]);
   const { absolutePackage, plan, review } = await loadAndVerifyPackage(options["--package"], { root, manifestPath });
+  if (options["--suite"] !== undefined && options["--suite"] !== plan.suiteId) {
+    throw new Error("--suite does not match the package's frozen suite");
+  }
   const live = options["--live"] === true;
   if (!live && (options["--confirm-desktop-control"] === true || options["--supervised"] === true)) {
     throw new Error("--confirm-desktop-control and --supervised require --live");
@@ -586,6 +663,8 @@ export async function runPackage(options, { root = ROOT, manifestPath = MANIFEST
       modelAccess: false,
       networkAccess: false,
       envFileRead: false,
+      providerEnabled: false,
+      model: plan.configuration.model,
       cuaSocketPlaceholder: options["--cua-socket"] === undefined,
       argv,
     };
@@ -614,7 +693,7 @@ export async function runPackage(options, { root = ROOT, manifestPath = MANIFEST
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write("Usage: node scripts/life-eval/run.mjs --package <absolute-package> [--cua-socket <existing-socket>] [--live --confirm-desktop-control [--supervised]]\nDefault is dry-run; live runs one task only and require a human review.json preflight receipt plus typed terminal confirmation.\n");
+    process.stdout.write("Usage: node scripts/life-eval/run.mjs --package <absolute-package> [--suite <expected frozen suite>] [--cua-socket <existing-socket>] [--live --confirm-desktop-control [--supervised]]\nDefault is dry-run; suite and model are frozen by prepare. Ark live requires the frozen env-file and selected key-variable name; dry-run never reads either value. Live runs one task only and requires human preflight plus typed terminal confirmation.\n");
     return;
   }
   const options = parseRunArgs(argv);

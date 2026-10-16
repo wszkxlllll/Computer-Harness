@@ -1,6 +1,8 @@
 # Computer Harness 文档索引
 
-2026-10-16最新接续：PR35六张候选任务按现有Goal可在Windows执行（Mac操作说明查询不等于操作Mac应用），新增suite仍待runner接入。PR36已同步最新main、保留近期修复，真实Ark基础API17项检查通过；三GUI动作同轮Batch两次未过并保留原记录，不能冒充Batch通过。完整2480项Vitest通过，远端CI/合入状态见[总报告末节](./life-business-eight-task-results-2026-10-16.md)及[Ark独立验收](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。不替换Preview。
+2026-10-16新六题启动准备：购物售后/家庭通信日程通过同一life-eval脚本显式选择独立suite，默认方舟`deepseek-v4.1-flash`、Batch关闭，B00/P10/M01/PM11控制Plan/Memory。各题从manifest指定官网开始，四题答复、两题WPS；不需登录Apple/iCloud。新key仅live读取指定私有变量，离线不读env，原九题及历史记录不改。见[六题与对照操作说明](./life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)。当前不调用API/GUI、不启动评测，实机预检及首次监督留今晚授权后完成。
+
+2026-10-16 PR36接续完成：已合main `282ac6c`，[PR CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38897851567)与[main CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38898351528)均全绿，真实Ark基础API17项及完整2480项Vitest通过。三GUI动作同轮Batch两次未过并保留原记录；不替换Preview。PR35六题Windows适用性见[总报告末节](./life-business-eight-task-results-2026-10-16.md)，新suite脚本接入状态以上一段本轮记录为准；[Ark独立验收](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)保留协议通过与业务未测的区别。
 
 ## 火山方舟 Agent Plan 接入与 Windows 运行记录（2026-10-16）
 
@@ -186,7 +188,7 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 
 ## 当前操作、评测与验证专题
 
-- 购物售后与通信日程候选（2026-10-16）：[六题任务卡与独立来源预检](./life-business-shopping-communication-preflight-2026-10-16.md)；独立manifest及runner未整合状态见[套件说明](../eval/life-business-shopping-communication-20261016/README.md)。不属于原八题运行记录。
+- 购物售后与通信日程（2026-10-16）：[六题任务卡与独立来源预检](./life-business-shopping-communication-preflight-2026-10-16.md)；独立manifest、runner选择及待GUI验收边界见[套件说明](../eval/life-business-shopping-communication-20261016/README.md)。不属于原八题运行记录。
 
 - 入门与本机启动：[开发者上手](./getting-started.md)、[本地启动器](./local-launcher.md)。
 - SDK 与模块装配：[Run SDK 示例](./sdk-run-composition.md)、[Planning / Run Memory 组合](./pi-module-composition-2026-09-23.md)。
