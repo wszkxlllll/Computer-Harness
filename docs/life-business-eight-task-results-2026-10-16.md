@@ -311,7 +311,7 @@ runner先等待原cleanupDeadline；逾期再强制终止，并保留发送返�
 
 用户授权继续排查、通过后以中文PR合入main；不替换Preview。两项实际失败分别为Windows F045的`missing empty stays stopped`等待轮询耗尽，以及Relay真实协议集成测试监听时`EADDRINUSE`，不是此前CRLF问题复发。
 
-- Runtime：`commitEvent`先append、更新snapshot，随后调用`onEventCommitted`。F045三参数场景改为等待匹配事件已存入历史且`waiting_window/sourceActionId`已投影，再继续断言；与提前终态和5秒watchdog竞争，消除固定100次`setImmediate`调度竞态。未修改生产Runtime，保留单次模型请求、单次动作、不重放与取消结果断言。Luna定向三场景六轮18/18、整文件193/193通过。
+- Runtime：`commitEvent`先append、更新snapshot，随后调用`onEventCommitted`。F045三参数场景改为等待匹配事件已存入历史且`waiting_window/sourceActionId`已投影，再继续断言；与提前终态和5秒watchdog竞争，消除固定次数`setImmediate`调度竞态。未修改生产Runtime，保留单次模型请求、单次动作、不重放与取消结果断言。Luna定向三场景六轮18/18、整文件193/193通过。
 - Relay集成测试：原先探测空闲端口后释放，再启动真实服务，期间存在端口被占用的竞争。测试专用启动helper仅在实际listen明确抛`EADDRINUSE`且失败fixture已关闭后重新申请端口，至多三次；其他错误、清理失败以及业务执行/断言不重试。Host失败不重启已成功Relay。真实占用端口回归覆盖两端、失败资源关闭及恶意Origin仍403；没有为测试改生产Origin接口或伪造Host头。
 
 两处Luna实施、Sol最终只读GO，无新增P1/P2。根构建、spike类型检查和Web生产打包通过，仓库统一`scripts/test.mjs`的Vitest阶段2442项通过（按实际CI日志复核计数，新增Relay测试为两项）；后续Node自测阶段因本机缺少创建symlink权限，main已有的评测器别名防覆盖fixture报EPERM，因此整个本机统一命令退出1，不能写成全量通过。没有为此修改系统设置、跳过安全测试或放宽评测器；其余本轮定向测试通过。远端既有矩阵具备不同权限环境，新head仍须完整CI成功才合入。
@@ -321,3 +321,13 @@ runner先等待原cleanupDeadline；逾期再强制终止，并保留发送返�
 macOS新增失败已定位到测试混用时钟：生产`FetchChatCompletionsHttpClient`用`performance.now()`检查逻辑deadline，Vitest默认fake timers不模拟performance；测试设10ms时，CI真实耗时可在fetch前达到deadline，合法超时但不满足该测试“已经进入headers/body”的前提。仅该测试显式模拟performance及timer，等待fetch/json阶段屏障后再推进11ms；继续严格断言1次fetch、timeout、nonretry及对应phase，并增加推进前已进入阶段的证据检查。Luna两场景重复测试及全35项通过，根独立三个相关文件232项与构建通过；Sol增量GO，新head CI另行接续，不改生产Provider或GLM/Qwen行为。
 
 最终修复head `88c21bc`的[完整CI 38874655299](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38874655299)全部通过，包含Windows、macOS、两个Node兼容矩阵和ci-required，未跳过评测器安全测试。按用户授权创建中文[PR #33](https://github.com/wszkxlllll/Computer-Harness/pull/33)，说明本批窗口合同、Monitor、Guard提示、启动清单、取消清理与评测/CI修复；PR自身检查与最终合入状态以该链接为准，不把创建PR当作已合并。Preview未替换，真实业务取消释放与全桌面UIA/DOM的边界保持不变。
+
+### PR合入后共同测试等待机制
+
+PR #33最终head `191a527`的[PR检查38875193625](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38875193625)全部通过，按授权以`8362360`合入main。合入后[main CI38878486310](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38878486310)Windows又有三项恢复用例在同一`waitUntil`辅助函数失败（恢复policy期间pause+correction、暂停纠正隔离及F045匹配marker）；其他矩阵通过。源码核对辅助函数上限实际为5000次`setImmediate`，不是此前简述的100次；固定循环次数不构成真实IO等待deadline。
+
+为避免继续逐用例堆屏障，从最新main另开`codex/ci-runtime-waits-20261016`集中修测试辅助等待，不改生产Runtime或放松业务/不重放断言。原PR与main运行分别记录，不以PR已绿冒充合入后main全绿；后续审查、验证及小PR结果接续，Preview不变。
+
+集中修复已完成：共同waitUntil采用单调时钟的5秒deadline与最多10ms真实timer yield，未改变任何消费者predicate/安全断言；唯一fake timer用例不调用该helper且正常还原。新增false predicate的25ms有界失败回归，不使用依赖机器调度的耗时上界。Runtime整文件194项、原失败组重复验证通过。同类检查将GLM四处普通fake timers纳入performance统一时钟，不动其自定义monotonic spy用例、取消先后及late promise断言，64项通过。
+
+根首轮完整Vitest仍有新增Relay端口fixture超出默认5秒，其余2442项通过；未省略该失败。补全两项HTTP响应体读取并各设5秒deadline，fixture总预算15秒与原roundtrip一致；不改生产服务。未读body为实际资源处理遗漏，但没有单点计时证据证明它是首轮超时唯一原因。Sol对以上各增量最终GO。根独立相关三文件262项、构建及最终完整Vitest **134文件2443/2443通过**（本机最终全量使用`--maxWorkers 4 --minWorkers 1`控制并发，远端仍按原CI配置验证，不修改CI或跳过测试）。最后补充PR仍须实际四矩阵通过后再合main，入口由PR #33的关联补充说明进入；没有替换Preview。
