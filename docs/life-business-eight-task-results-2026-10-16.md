@@ -319,3 +319,5 @@ runner先等待原cleanupDeadline；逾期再强制终止，并保留发送返�
 接续运行`38873622691`：Windows及两组兼容矩阵通过；Windows完整Vitest2442项、Node261项通过，确认本机symlink权限限制没有被跳过后伪装解决。macOS另暴露既有DeepSeek deadline测试`fetchStub`预期1次、实际0次，继续定位，不以其他矩阵通过代替macOS验收。
 
 macOS新增失败已定位到测试混用时钟：生产`FetchChatCompletionsHttpClient`用`performance.now()`检查逻辑deadline，Vitest默认fake timers不模拟performance；测试设10ms时，CI真实耗时可在fetch前达到deadline，合法超时但不满足该测试“已经进入headers/body”的前提。仅该测试显式模拟performance及timer，等待fetch/json阶段屏障后再推进11ms；继续严格断言1次fetch、timeout、nonretry及对应phase，并增加推进前已进入阶段的证据检查。Luna两场景重复测试及全35项通过，根独立三个相关文件232项与构建通过；Sol增量GO，新head CI另行接续，不改生产Provider或GLM/Qwen行为。
+
+最终修复head `88c21bc`的[完整CI 38874655299](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38874655299)全部通过，包含Windows、macOS、两个Node兼容矩阵和ci-required，未跳过评测器安全测试。按用户授权创建中文[PR #33](https://github.com/wszkxlllll/Computer-Harness/pull/33)，说明本批窗口合同、Monitor、Guard提示、启动清单、取消清理与评测/CI修复；PR自身检查与最终合入状态以该链接为准，不把创建PR当作已合并。Preview未替换，真实业务取消释放与全桌面UIA/DOM的边界保持不变。
