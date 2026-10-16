@@ -3,10 +3,115 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRun } from "@computer-harness/app-runtime";
-import type { Computer } from "@computer-harness/runtime";
+import type { ComputerFactoryDependencies } from "@computer-harness/app-runtime";
+import type { Computer, ModelInput } from "@computer-harness/runtime";
+import type { ComputerSessionDescriptor, SurfaceRef, Viewport } from "@computer-harness/protocol";
 import { parseArgs, toResolvedRunConfig } from "./index.js";
 
+type CuaComputerModule = Awaited<ReturnType<NonNullable<ComputerFactoryDependencies["importCuaComputer"]>>>;
+type CuaDriverComputerOptions = ConstructorParameters<CuaComputerModule["CuaDriverComputer"]>[0];
+
 afterEach(() => vi.unstubAllEnvs());
+
+function multilineProfileFixtureComputer(): Computer {
+  const viewport: Viewport = { width: 1, height: 1, coordinateSpace: "physical" };
+  const session: ComputerSessionDescriptor = {
+    id: "cli-multiline-profile-session" as ComputerSessionDescriptor["id"],
+    backend: "fixture",
+    viewport,
+    capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+    openedAt: "2026-10-15T00:00:00.000Z",
+  };
+  const surfaceRef: SurfaceRef = { surfaceId: "cli-multiline-profile-surface" as SurfaceRef["surfaceId"], generation: 1, kind: "desktop" };
+  return {
+    async open() { return session; },
+    async observe() {
+      return {
+        capturedAt: "2026-10-15T00:00:00.000Z",
+        viewport,
+        surfaceRef,
+        screenshot: { mediaType: "image/png", data: new Uint8Array([1, 2, 3]) },
+      };
+    },
+    async execute(_session, action) { return { actionId: action.actionId, status: "completed" }; },
+    async close() {},
+  };
+}
+
+describe("CLI multiline type profile configuration", () => {
+  const baseArgs = ["--goal", "Inspect the fixture", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock"];
+
+  it("defaults off, validates explicit profiles, and rejects CUA-only configuration for OSWorld", () => {
+    const defaults = parseArgs(baseArgs);
+    const explicitOff = parseArgs([...baseArgs, "--multiline-type-profile", "off"]);
+    const foregroundCaret = parseArgs([...baseArgs, "--multiline-type-profile", "foreground-caret-v1"]);
+    expect(defaults.multilineTypeProfile).toBe("off");
+    expect(explicitOff.multilineTypeProfile).toBe("off");
+    expect(foregroundCaret.multilineTypeProfile).toBe("foreground-caret-v1");
+    expect(toResolvedRunConfig(defaults, defaults.goal!).computer).not.toHaveProperty("multilineTypeProfile");
+    expect(toResolvedRunConfig(explicitOff, explicitOff.goal!).computer).not.toHaveProperty("multilineTypeProfile");
+    expect(toResolvedRunConfig(foregroundCaret, foregroundCaret.goal!).computer).toMatchObject({
+      kind: "cua",
+      multilineTypeProfile: "foreground-caret-v1",
+    });
+    expect(() => parseArgs([...baseArgs, "--multiline-type-profile", "unknown"])).toThrow(/must be off or foreground-caret-v1/u);
+    expect(() => parseArgs([
+      "--goal", "Inspect the fixture", "--model", "glm-5.3-flash", "--computer", "osworld", "--osworld-bridge", "http://fixture.invalid",
+      "--multiline-type-profile", "foreground-caret-v1",
+    ])).toThrow(/only with --computer cua/u);
+    expect(() => parseArgs(["--doctor", "--computer", "cua", "--cua-socket", "fixture.sock", "--multiline-type-profile", "off"]))
+      .toThrow(/only for a Run or TUI session/u);
+  });
+
+  it("carries the CLI opt-in through createRun to its Computer factory and Provider type description", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-multiline-profile-"));
+    const options = parseArgs([...baseArgs, "--output", outputDir, "--multiline-type-profile", "foreground-caret-v1"]);
+    const config = toResolvedRunConfig(options, options.goal!);
+    const modelInputs: ModelInput[] = [];
+    const provider = {
+      id: "cli-multiline-profile-provider",
+      async generate(input: ModelInput) {
+        modelInputs.push(input);
+        return { type: "finish" as const, summary: "fixture complete" };
+      },
+    };
+    let receivedAdapterOptions: CuaDriverComputerOptions | undefined;
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    if (platformDescriptor === undefined || platformDescriptor.configurable !== true) {
+      await rm(outputDir, { recursive: true, force: true });
+      throw new Error("test runtime does not allow restoring a temporary process.platform override");
+    }
+
+    try {
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+      const fixtureComputer = multilineProfileFixtureComputer();
+      class CapturingCuaDriverComputer implements Computer {
+        public constructor(options: CuaDriverComputerOptions) { receivedAdapterOptions = options; }
+        public open(...args: Parameters<Computer["open"]>) { return fixtureComputer.open(...args); }
+        public observe(...args: Parameters<Computer["observe"]>) { return fixtureComputer.observe(...args); }
+        public execute(...args: Parameters<Computer["execute"]>) { return fixtureComputer.execute(...args); }
+        public close(...args: Parameters<Computer["close"]>) { return fixtureComputer.close(...args); }
+      }
+      const handle = await createRun(config, {
+        createProvider: () => provider,
+        computerFactoryDependencies: {
+          windowRelationshipProbe: null,
+          importCuaComputer: async () => ({ CuaDriverComputer: CapturingCuaDriverComputer }),
+        },
+      });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(receivedAdapterOptions).toMatchObject({ socketPath: "fixture.sock", multilineTypeProfile: "foreground-caret-v1" });
+      const typeTool = modelInputs[0]?.tools.find((tool) => tool.name === "type");
+      expect(typeTool?.description).toContain("foreground-caret-v1");
+      expect(typeTool?.description).toContain("intended to insert at the current caret or replace the current selection");
+      await handle.close();
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+      expect(process.platform).toBe(platformDescriptor.value);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("CLI window-switch configuration", () => {
   it("keeps the source-linked contract opt-in and validates an explicit bounded JSON contract", () => {

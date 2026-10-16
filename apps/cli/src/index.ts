@@ -29,6 +29,7 @@ export interface CliOptions {
   goal?: string;
   model: ModelName;
   computer: "cua" | "osworld";
+  multilineTypeProfile: "off" | "foreground-caret-v1";
   cuaSocket?: string;
   cuaWindowTarget?: { pid: number; windowId: number };
   cuaRecoveryWindowTarget?: { pid: number; windowId: number };
@@ -100,6 +101,17 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     throw new Error("--grounding must be off, auto, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
   }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
+  const rawMultilineTypeProfile = value("--multiline-type-profile");
+  const multilineTypeProfile = rawMultilineTypeProfile ?? "off";
+  if (multilineTypeProfile !== "off" && multilineTypeProfile !== "foreground-caret-v1") {
+    throw new Error("--multiline-type-profile must be off or foreground-caret-v1");
+  }
+  if (rawMultilineTypeProfile !== undefined && computer !== "cua") {
+    throw new Error("--multiline-type-profile is available only with --computer cua");
+  }
+  if (rawMultilineTypeProfile !== undefined && (doctor || prepareManagedBrowserProfileValue)) {
+    throw new Error("--multiline-type-profile is available only for a Run or TUI session");
+  }
   if (windowSwitch && (doctor || prepareManagedBrowserProfileValue)) throw new Error("--window-switch is available only for a Run or TUI session");
   const windowSelectionValue = value("--window-selection") ?? "local";
   if (windowSelectionValue !== "local" && windowSelectionValue !== "jev") throw new Error("--window-selection must be local or jev");
@@ -262,6 +274,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     ...(goal === undefined ? {} : { goal }),
     model,
     computer,
+    multilineTypeProfile,
     ...(cuaSocket === undefined ? {} : { cuaSocket }),
     ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
     ...(cuaRecoveryWindowTarget === undefined ? {} : { cuaRecoveryWindowTarget }),
@@ -330,9 +343,10 @@ async function main(): Promise<void> {
     process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
     process.stdout.write("Experimental direct Run only: --recover-bound-window-missing plus exact --cua-window-* and --cua-recovery-window-* targets can use --reopen-saved-document <absolute-path>; hybrid browser recovery additionally requires --grounding hybrid-catalog-v1, an explicit --managed-browser-url, and the ephemeral profile. Not available in TUI or the phone API.\n");
     process.stdout.write("Run option: --source-linked-finish-contract <json> explicitly requires a bounded source-linked-finish-v1 field contract for this Run.\n");
+    process.stdout.write("Run option: --multiline-type-profile off|foreground-caret-v1 (default off). The foreground-caret-v1 profile is a Windows-only opt-in for an independently validated CUA driver; it does not change Host defaults.\n");
     process.stdout.write("Model selection: --model glm-5.3-flash|qwen3.8-flash|deepseek-flash is fixed for each Run and TUI session; restart with another model to switch. No automatic fallback or action replay. --risk-model also accepts deepseek-flash.\n");
     process.stdout.write("DeepSeek private env: DEEPSEEK_API_KEY; optional DEEPSEEK_BASE_URL, DEEPSEEK_REQUEST_TIMEOUT_MS (default 90000), DEEPSEEK_MAX_OUTPUT_TOKENS (default 4096). Native tools, thinking disabled, actual-pixel coordinates; no Qwen coordinate flag needed.\n");
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash|deepseek-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--multiline-type-profile <off|foreground-caret-v1>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash|deepseek-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
   }
@@ -535,6 +549,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
           kind: "cua",
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
+          ...(options.multilineTypeProfile === "foreground-caret-v1" ? { multilineTypeProfile: options.multilineTypeProfile } : {}),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
           ...(options.cuaRecoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: options.cuaRecoveryWindowTarget }),
           ...(options.recoverBoundWindowMissing && options.cuaWindowTarget !== undefined && options.cuaRecoveryWindowTarget !== undefined
