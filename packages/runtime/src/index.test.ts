@@ -942,6 +942,31 @@ function committedApprovalSignal(occurrence = 1) {
   };
 }
 
+function committedBoundWindowHandoffSignal(controller: () => RunController) {
+  let resolve!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+  let reject!: (error: Error) => void;
+  const requested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((complete, fail) => {
+    resolve = complete;
+    reject = fail;
+  });
+  return {
+    requested,
+    onEventCommitted(event: RuntimeEvent): void {
+      if (event.type !== "computer.window.handoff.requested" || event.reasonCode !== "bound_window_missing") return;
+      const activeController = controller();
+      const persisted = activeController.getEvents().some((candidate) =>
+        candidate.eventId === event.eventId && candidate.sequence === event.sequence);
+      const snapshot = activeController.getSnapshot();
+      if (!persisted || snapshot.status !== "waiting_window" ||
+          snapshot.pendingWindowHandoff?.sourceActionId !== event.sourceActionId) {
+        reject(new Error("bound-window handoff event was not both appended and projected into the waiting_window snapshot"));
+        return;
+      }
+      resolve(event);
+    },
+  };
+}
+
 describe("RunController ExecutionSegment lifecycle", () => {
   it("marks a semantically matching main-provider click attempted before evidence advances", async () => {
     const provider = new ScriptedProvider([
@@ -1952,10 +1977,31 @@ describe("RunController confirmed window handoff", () => {
       public async handoffWindow() { throw new Error("must not activate"); }
     }
     const computer = new WaitingMissing();
-    const { controller, directory } = await makeController(new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("waiting-missing")] }, { type: "finish", summary: "must not request" }]), computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let controller!: RunController;
+    const waitingWindow = committedBoundWindowHandoffSignal(() => controller);
+    const created = await makeController(
+      new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("waiting-missing")] }, { type: "finish", summary: "must not request" }]),
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { windowHandoff: "confirm-v1", onEventCommitted: waitingWindow.onEventCommitted },
+    );
+    controller = created.controller;
+    const { directory } = created;
     const running = controller.start("owned task");
     try {
-      await waitUntil(() => ["waiting_window", "finished"].includes(controller.getSnapshot().status));
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          waitingWindow.requested,
+          running.then((outcome) => {
+            throw new Error(`run reached ${outcome} before the completed missing-window event was committed`);
+          }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("completed missing-window event was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
       expect(controller.getSnapshot().pendingWindowHandoff?.reasonCode).toBe("bound_window_missing");
       if (mode === "list_failure") await expect(controller.listWindowHandoffCandidates(new AbortController().signal)).rejects.toThrow("synthetic inventory failure");
