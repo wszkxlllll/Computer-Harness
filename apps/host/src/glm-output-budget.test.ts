@@ -11,7 +11,7 @@ import type { ProviderHttpClient, ResolvedRunConfig } from "../../../packages/ap
 import { parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 describe("Host GLM output budget", () => {
-  it("wires the CLI parser result to config and the safe startup audit (source contract)", () => {
+  it("wires GLM settings, env load order, startup audit, and Windows caret opt-in (source contract)", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const configSource = readFileSync(new URL("./session-config.ts", import.meta.url), "utf8");
     expect(source).toContain('parseGlmOutputBudget(one("--glm-max-output-tokens"))');

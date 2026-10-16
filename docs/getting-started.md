@@ -104,10 +104,14 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 | Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
 | Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
 | Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |
-| DeepSeek key | `DEEPSEEK_API_KEY` | `deepseek-flash`；仅从本机环境注入，不放在命令行或公共响应里 |
-| DeepSeek endpoint | `DEEPSEEK_BASE_URL` | 可选；默认 `https://api.deepseek.com/chat/completions` |
-| DeepSeek request timeout | `DEEPSEEK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`，可设置为 `1000`–`240000` 毫秒 |
-| DeepSeek output budget | `DEEPSEEK_MAX_OUTPUT_TOKENS` | 默认 `4096`，可设置为 `1`–`131072` token；服务端也可能施加更低限制 |
+| DeepSeek key | `DEEPSEEK_API_KEY` | 官方 `deepseek-flash`；只从本机环境注入，不放在命令行、配置或公共响应里 |
+| DeepSeek endpoint | `DEEPSEEK_BASE_URL` | 可选；默认 `https://api.deepseek.com/chat/completions`，接受 API base URL 或完整 chat completions URL |
+| DeepSeek request timeout | `DEEPSEEK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`；可覆盖为 `1000`–`240000` 整数毫秒 |
+| DeepSeek output budget | `DEEPSEEK_MAX_OUTPUT_TOKENS` | 默认 `4096`；可覆盖为 `1`–`131072` 整数 token（服务端也可能施加更低限制） |
+| 火山方舟 Agent Plan key | `ARK_API_KEY` | 独立渠道 `deepseek-v4.1-flash`；不复用或回退到官方 `DEEPSEEK_API_KEY`，只从本机环境注入 |
+| 方舟 Agent Plan endpoint | `ARK_BASE_URL` | 可选；默认 `https://ark.cn-beijing.volces.com/api/plan/v3`，接受 base URL 或完整 `/chat/completions` URL |
+| 方舟 request timeout | `ARK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`；可覆盖为 `1000`–`240000` 整数毫秒，与官方 DeepSeek 配置独立 |
+| 方舟 output budget | `ARK_MAX_OUTPUT_TOKENS` | 默认 `4096`；可覆盖为 `1`–`131072` 整数 token，服务端仍可能施加更低限制 |
 | Memory embedding key | `MEMORY_EMBEDDING_API_KEY` | Hybrid Memory 专用 key；不要复用聊天模型 key |
 | Jev window selector | `TYPESAFE_API_KEY` | 仅显式启用 CUA TUI Jev 选窗时需要；还需允许分享窗口标题，见[配置步骤](./local-launcher.md#jev-辅助选窗可选) |
 | OSWorld Bridge | `OSWORLD_BRIDGE_TOKEN` | 可选 loopback Bridge token，不进轨迹 |
@@ -118,13 +122,33 @@ pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-
 node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
 ```
 
-需要单独选择 DeepSeek 时，可从仓库根目录启动新 Run：
+### 模型选择与切换范围
+
+CLI Run 必须显式选择 `--model glm-5.3-flash`、`qwen3.8-flash`、`deepseek-flash`（DeepSeek 官方）或 `deepseek-v4.1-flash`（火山方舟 Agent Plan）。切换模型就是结束当前 Run / 退出 TUI 后，以不同 `--model` 启动新 Run / TUI 会话；模型在每个 Run 内固定，TUI 没有模型选择器。CLI 的 `--risk-model` 接受 `off`、`same` 和以上四个模型名；`same` 跟随本 Run 的主模型。
+
+Host 启动参数 `--model` 接受以上四个模型，省略时仍默认 GLM。Host 进程内的新 Run 使用启动时的模型；要切换须停止旧 Host、确保其 Run 完成清理后，以另一个 `--model` 重启。Web / 手机界面没有每 Run 的模型选择器，也不能修改 Host 的模型。没有运行中热切换、自动 Provider fallback 或动作重放。
+
+DeepSeek 官方和方舟 Agent Plan 均使用截图 `image_url` 和原生 tools，默认发送 `thinking: { type: "disabled" }`，坐标为 `actual_pixels`；两者使用独立模型标识、端点、凭据和请求设置，方舟诊断记录为 `provider: "ark"`。它们不是 GLM 的别名，也不接受 Qwen 专用参数。只有 CLI 的 Qwen Run 必须额外指定 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`（Host 的 Qwen 配置现为 `normalized_1000`）。
+
+这两条 DeepSeek 渠道的临时网络错误、429/5xx由Runtime按原请求有限重试；完整响应中的工具协议错误可在零执行前带反馈重新生成。两者共用请求次数、时间窗和预算，不是Provider内部无限循环。鉴权/参数HTTP错误、主动截止、用户取消、完整body无法解码及截断响应不会盲目重试；未知工具仍整组拒绝，结果未知的GUI动作绝不自动重放。本地响应校验不等于启用了服务端strict。
+
+如果环境需要代理，已有 `HTTPS_PROXY` 不一定表示 Node fetch 已启用它。使用可信且已授权的代理时，Node 24.5+（或22.21+）可在启动进程时加 `--use-env-proxy`，例如 `node --use-env-proxy apps/cli/dist/index.js ...`；其他参数保持原命令。该开关只作用于本次进程，不修改系统代理，也不默认改变其他Provider的网络路径。不要关闭TLS校验。若Node版本不支持该开关，先按部署环境选择兼容的代理方案，不把这个参数直接加到所有版本的启动脚本。参见[Node官方说明](https://nodejs.org/api/cli.html#--use-env-proxy)。
+
+从仓库根目录启动新模型的示例（先把 key 放进私有 `.env`，不要把 key 写进命令）：
 
 ```text
 node apps/cli/dist/index.js --goal "describe the current screen" --model deepseek-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-deepseek" --env-file ".env"
+node apps/cli/dist/index.js --goal "describe the current screen" --model deepseek-v4.1-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-ark" --env-file ".env"
+node apps/cli/dist/index.js --goal "describe the current screen" --model qwen3.8-flash --qwen-coordinate-mode normalized_1000 --computer cua --cua-socket "<private-socket>" --output "runs/live-qwen" --env-file ".env"
+node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --model deepseek-flash --output "runs/host-deepseek"
+node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --model deepseek-v4.1-flash --output "runs/host-ark"
 ```
 
-DeepSeek key 留在本机环境；模型在 Run 内固定，不会自动切换 Provider 或重放动作。Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
+Host 示例里的 `--model` 可换为以上任一模型名。凭据仍留在 Host 私有环境，Web 不接收 key；同一私有 env 文件可分别设置 `ARK_API_KEY` 与 `DEEPSEEK_API_KEY`，选择渠道不会覆盖另一条渠道的配置。
+
+火山方舟渠道的完整配置、Run 级 low 与产品默认值的区别，以及 Windows 接入 smoke、两轮 disabled／两轮 low 的脱敏运行结果，见[火山方舟 Agent Plan 接入与运行记录](./volcengine-ark-agent-plan-2026-10-16.md)。历史样本使用既有 Windows 修复候选，不是对本提交树重新部署或实跑；不要把 Runtime 成功或启用开关当作业务成功。
+
+Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 官方/方舟请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
 
 路径提示：直接从仓库根目录执行 `node apps/cli/dist/index.js` 时，`--env-file ".env"` 指向根目录；通过 `pnpm --filter @computer-harness/cli start` 启动时，工作目录是 `apps/cli`，请传根目录 `.env` 的绝对路径或 `..\..\.env`。
 

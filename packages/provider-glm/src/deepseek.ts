@@ -40,11 +40,13 @@ function isRetryableDeepseekResponseCode(code: string): boolean {
 
 const deepseekBoundary: ChatCompletionsBoundary = {
   label: "DeepSeek",
+  errorCodePrefix: "DEEPSEEK",
   endpoint: "https://api.deepseek.com/chat/completions",
   requestTimeoutMs: 90_000,
   maxOutputTokens: 4096,
   userImagesOnly: true,
   strictResponse: true,
+  cacheUsageFormat: "flat-prompt-cache",
   strictResponseRetryable: true,
   error: (message, code, retryable) => new DeepseekProviderError(message, code, retryable),
   isProviderError: (error) => error instanceof DeepseekProviderError,

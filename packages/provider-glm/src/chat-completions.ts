@@ -122,11 +122,14 @@ export class GlmProviderError extends Error {
 /** Internal shared OpenAI-compatible projection and transport boundary. */
 export interface ChatCompletionsBoundary {
   readonly label: string;
+  readonly errorCodePrefix: string;
   readonly endpoint: string;
   readonly requestTimeoutMs: number;
   readonly maxOutputTokens: number;
   readonly userImagesOnly?: boolean;
   readonly strictResponse?: boolean;
+  /** Provider-specific wire shape for cache-read usage; unrelated to strict response parsing. */
+  readonly cacheUsageFormat?: "flat-prompt-cache" | "nested-prompt-details";
   /** Whether protocol-shape errors from a complete strict Provider response may use Runtime feedback retry. */
   readonly strictResponseRetryable?: boolean;
   readonly error: (message: string, code?: string, retryable?: boolean, retryMode?: GlmRetryMode) => Error;
@@ -135,6 +138,7 @@ export interface ChatCompletionsBoundary {
 
 const glmBoundary: ChatCompletionsBoundary = {
   label: "GLM",
+  errorCodePrefix: "GLM",
   endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
   requestTimeoutMs: 240_000,
   maxOutputTokens: 8192,
@@ -143,7 +147,7 @@ const glmBoundary: ChatCompletionsBoundary = {
 };
 
 function providerError(boundary: ChatCompletionsBoundary, message: string, code?: string, retryable?: boolean, retryMode?: GlmRetryMode): Error {
-  return boundary.error(message.replace(/\bGLM\b/gu, boundary.label), code?.replace(/^GLM_/u, boundary.label === "GLM" ? "GLM_" : "DEEPSEEK_"), retryable, retryMode);
+  return boundary.error(message.replace(/\bGLM\b/gu, boundary.label), code?.replace(/^GLM_/u, `${boundary.errorCodePrefix}_`), retryable, retryMode);
 }
 
 export class ChatCompletionsAdapter implements ProviderAdapter {
@@ -735,7 +739,12 @@ function readUsage(value: unknown, boundary: ChatCompletionsBoundary): ModelUsag
   const inputTokens = usage.prompt_tokens;
   const outputTokens = usage.completion_tokens;
   const totalTokens = usage.total_tokens;
-  const cachedTokens = boundary.strictResponse ? usage.prompt_cache_hit_tokens : undefined;
+  const promptDetails = boundary.cacheUsageFormat === "nested-prompt-details" && isRecord(usage.prompt_tokens_details)
+    ? usage.prompt_tokens_details
+    : undefined;
+  const cachedTokens = boundary.cacheUsageFormat === "flat-prompt-cache"
+    ? usage.prompt_cache_hit_tokens
+    : promptDetails?.cached_tokens;
   const parsed = {
     ...(typeof inputTokens === "number" && Number.isSafeInteger(inputTokens) && inputTokens >= 0 ? { inputTokens } : {}),
     ...(typeof outputTokens === "number" && Number.isSafeInteger(outputTokens) && outputTokens >= 0 ? { outputTokens } : {}),

@@ -1,5 +1,12 @@
 # Computer Harness 文档索引
 
+2026-10-16最新接续：PR35六张候选任务按现有Goal可在Windows执行（Mac操作说明查询不等于操作Mac应用），新增suite仍待runner接入。PR36已同步最新main、保留近期修复，真实Ark基础API17项检查通过；三GUI动作同轮Batch两次未过并保留原记录，不能冒充Batch通过。完整2480项Vitest通过，远端CI/合入状态见[总报告末节](./life-business-eight-task-results-2026-10-16.md)及[Ark独立验收](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。不替换Preview。
+
+## 火山方舟 Agent Plan 接入与 Windows 运行记录（2026-10-16）
+
+[接入、使用说明与运行边界](./volcengine-ark-agent-plan-2026-10-16.md)、[脱敏结果 JSON](./volcengine-ark-agent-plan-2026-10-16.json)：新增独立 `deepseek-v4.1-flash`／`ARK_API_KEY` 渠道，保留官方 DeepSeek。记录接入 smoke、disabled 两轮未完整通过和 Run 级 low 两轮业务通过，保留失败、有限恢复和截图／DOM时序限制。产品默认仍 disabled；low 是样本 Run 级配置，不修改团队默认。新 PR 只集成适配及材料，未把既有 Windows 修复候选的实跑冒充新分支验收。
+2026-10-16同伴更新复审：[原报告末节](./life-business-eight-task-results-2026-10-16.md)核对已合PR35的六张候选任务卡及PR36方舟渠道。当前五类15题，新增suite未接runner；Ark是独立API渠道不是Planning模块，目标仍为旧Preview，需在最新main集成、保留GLM回归覆盖后验证。低思考实跑为历史注入样本，不代表产品默认或当前main放行；本轮只读审查/写意见，未修改或合并同伴PR。
+
 本批修复最新入口：[中文PR #33](https://github.com/wszkxlllll/Computer-Harness/pull/33)；修复head的[完整CI已通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38874655299)，PR自身检查与合入状态以PR实时结果为准。[详细报告](./life-business-eight-task-results-2026-10-16.md)已记录profile保存重开实机确认、三类CI根因及本机symlink权限限制。Preview未替换；本条优先于下方按时点保留的等待状态。
 
 PR #33检查通过并已合main；合入后Windows又暴露共同测试等待器的固定次数轮询问题，补充分支`codex/ci-runtime-waits-20261016`集中修等待机制、同类GLM测试时钟及Relay fixture响应释放。Luna实施、Sol GO，根构建及2443项完整Vitest通过（本机限制并发4），不改生产Runtime/Provider/安全接口。补充PR及实际CI/合入结果通过PR #33关联说明查阅；不将原main失败隐去，Preview不变。

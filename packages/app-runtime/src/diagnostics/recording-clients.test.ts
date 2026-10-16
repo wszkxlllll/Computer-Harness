@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { GlmHttpClient, GlmHttpDiagnostics, GlmTransportEvidence } from "@computer-harness/provider-glm";
 import type { QwenHttpClient } from "@computer-harness/provider-qwen";
-import { RecordingGlmHttpClient, RecordingQwenHttpClient } from "./recording-clients.js";
+import { RecordingArkHttpClient, RecordingDeepseekHttpClient, RecordingGlmHttpClient, RecordingQwenHttpClient } from "./recording-clients.js";
 
 interface ForwardedRequest {
   url: string;
@@ -305,6 +305,99 @@ describe("recording client diagnostic paths", () => {
     expect(serialized).not.toContain("private/file.txt");
     expect(serialized).not.toContain("example.invalid");
     expect(serialized).not.toContain("header-secret");
+  });
+
+  it("projects Ark nested cached tokens and redacts unsupported usage fields through its recorder", async () => {
+    const response = {
+      model: "deepseek-v4.1-flash",
+      choices: [{ finish_reason: "stop", message: { content: "private response content" } }],
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 3,
+        total_tokens: 15,
+        prompt_tokens_details: { cached_tokens: 9, private_nested: "NESTED_USAGE_SECRET" },
+        prompt_cache_hit_tokens: 999,
+        prompt_cache_miss_tokens: 888,
+        private_usage_field: "UNKNOWN_USAGE_SECRET",
+      },
+    };
+    const fake = new FakeGlmHttpClient(response);
+    const directory = await mkdtemp(join(tmpdir(), "harness-ark-diagnostic-"));
+    const path = join(directory, "provider-exchanges.jsonl");
+    const recorder = new RecordingArkHttpClient(path, fake);
+    const body = { model: "deepseek-v4.1-flash", tools: [] };
+    const signal = new AbortController().signal;
+
+    await expect(recorder.post("https://example.invalid/ark", body, {}, signal)).resolves.toBe(response);
+
+    const record = await readRecord(path);
+    const serialized = JSON.stringify(record);
+    const usage = (record.response as Record<string, unknown>).usage as Record<string, unknown>;
+    expect(fake.calls).toBe(1);
+    expect(record).toMatchObject({ provider: "ark", requestedModel: "deepseek-v4.1-flash" });
+    expect(usage).toMatchObject({ promptTokens: 12, completionTokens: 3, totalTokens: 15, cachedReadTokens: 9, unknownFieldCount: 3 });
+    expect(usage.diagnosticCodes).toEqual(["usage_unknown_fields_omitted"]);
+    expect(usage).not.toHaveProperty("cacheMissTokens");
+    expect(usage).not.toHaveProperty("prompt_cache_hit_tokens");
+    expect(serialized).not.toContain("NESTED_USAGE_SECRET");
+    expect(serialized).not.toContain("UNKNOWN_USAGE_SECRET");
+    expect(serialized).not.toContain("example.invalid");
+  });
+
+  it("omits invalid Ark nested cache counts without exposing unknown payloads", async () => {
+    const response = {
+      model: "deepseek-v4.1-flash",
+      choices: [{ finish_reason: "stop", message: { content: "done" } }],
+      usage: {
+        prompt_tokens: 10,
+        prompt_tokens_details: { cached_tokens: "10240", private_nested: "INVALID_USAGE_SECRET" },
+        prompt_cache_miss_tokens: 123,
+        private_usage_field: "UNKNOWN_USAGE_SECRET",
+      },
+    };
+    const directory = await mkdtemp(join(tmpdir(), "harness-ark-invalid-usage-diagnostic-"));
+    const path = join(directory, "provider-exchanges.jsonl");
+    const recorder = new RecordingArkHttpClient(path, new FakeGlmHttpClient(response));
+
+    await recorder.post("https://example.invalid/ark", { model: "deepseek-v4.1-flash", tools: [] }, {}, new AbortController().signal);
+
+    const record = await readRecord(path);
+    const serialized = JSON.stringify(record);
+    const usage = (record.response as Record<string, unknown>).usage as Record<string, unknown>;
+    expect(usage).not.toHaveProperty("cachedReadTokens");
+    expect(usage).not.toHaveProperty("cacheMissTokens");
+    expect(usage.diagnosticCodes).toEqual(["usage_invalid_fields_omitted", "usage_unknown_fields_omitted"]);
+    expect(serialized).not.toContain("INVALID_USAGE_SECRET");
+    expect(serialized).not.toContain("UNKNOWN_USAGE_SECRET");
+    expect(serialized).not.toContain("example.invalid");
+  });
+
+  it("keeps official DeepSeek flat cache fields separate from Ark nested usage", async () => {
+    const response = {
+      model: "deepseek-flash",
+      choices: [{ finish_reason: "stop", message: { content: "done" } }],
+      usage: {
+        prompt_tokens: 20,
+        prompt_cache_hit_tokens: 6,
+        prompt_cache_miss_tokens: 14,
+        prompt_tokens_details: { cached_tokens: 999 },
+        private_usage_field: "OFFICIAL_USAGE_SECRET",
+      },
+    };
+    const directory = await mkdtemp(join(tmpdir(), "harness-deepseek-flat-usage-diagnostic-"));
+    const path = join(directory, "provider-exchanges.jsonl");
+    const recorder = new RecordingDeepseekHttpClient(path, new FakeGlmHttpClient(response));
+
+    await recorder.post("https://example.invalid/deepseek", { model: "deepseek-flash", tools: [] }, {}, new AbortController().signal);
+
+    const record = await readRecord(path);
+    const serialized = JSON.stringify(record);
+    const usage = (record.response as Record<string, unknown>).usage as Record<string, unknown>;
+    expect(record).toMatchObject({ provider: "deepseek", requestedModel: "deepseek-flash" });
+    expect(usage).toMatchObject({ promptTokens: 20, cachedReadTokens: 6, cacheMissTokens: 14, unknownFieldCount: 2 });
+    expect(usage).not.toHaveProperty("prompt_tokens_details");
+    expect(serialized).not.toContain("OFFICIAL_USAGE_SECRET");
+    expect(serialized).not.toContain("example.invalid");
   });
 
   it("reports malformed assistant content for a Qwen request that actually requires strict JSON", async () => {

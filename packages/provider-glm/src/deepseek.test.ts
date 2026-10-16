@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type ModelInput } from "@computer-harness/runtime";
-import { DeepseekFlashAdapter, DeepseekProviderError, FetchDeepseekHttpClient, type DeepseekHttpClient, type DeepseekTransportEvidence } from "./index.js";
+import { ArkDeepseekFlashAdapter, FetchArkHttpClient, DeepseekFlashAdapter, DeepseekProviderError, FetchDeepseekHttpClient, type ArkTransportEvidence, type DeepseekHttpClient, type DeepseekTransportEvidence } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "image" as AssetId, relativePath: "screenshots/image.png", mediaType: "image/png", byteLength: 3 };
@@ -89,7 +89,7 @@ describe("official DeepSeek flash boundary", () => {
   it("uses explicit terminate results and maps prompt cache hits without treating misses as writes", async () => {
     const resultEvidence = { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "unknown", reason: "not_observed" }] };
     const value = response("terminate", { status: "failure", text: "The requested source could not be opened.", resultEvidence }) as Record<string, unknown>;
-    value.usage = { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_cache_hit_tokens: 15, prompt_cache_miss_tokens: 5 };
+    value.usage = { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_cache_hit_tokens: 15, prompt_cache_miss_tokens: 5, prompt_tokens_details: { cached_tokens: 999 } };
     const client = new Client(value);
     const controls: ModelInput = { ...input(), tools: [{ name: "terminate", description: "Finish", category: "control", control: "finish", inputSchema: { type: "object" } }] };
     await expect(new DeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: client }).generate(controls, { signal })).resolves.toEqual({ type: "finish", reportedStatus: "failure", summary: "The requested source could not be opened.", resultEvidence, usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30, cacheReadTokens: 15 } });
@@ -284,5 +284,88 @@ describe("DeepSeek transport deadlines and privacy", () => {
       message: status === 200 ? "DeepSeek response body is not valid JSON" : "DeepSeek HTTP 401",
       retryable: false,
     });
+  });
+});
+
+describe("Ark Agent Plan transport boundary", () => {
+  it("maps nested cached prompt tokens without accepting official flat cache fields", async () => {
+    const resultEvidence = { version: "source-linked-finish-v1", fields: [{ fieldId: "cpu", disposition: "unknown", reason: "not_observed" }] };
+    const value = response("terminate", { status: "failure", text: "The requested source could not be opened.", resultEvidence }) as Record<string, unknown>;
+    value.model = "deepseek-v4.1-flash";
+    value.usage = {
+      prompt_tokens: 20,
+      completion_tokens: 10,
+      total_tokens: 30,
+      prompt_tokens_details: { cached_tokens: 15 },
+      prompt_cache_hit_tokens: 999,
+      prompt_cache_miss_tokens: 5,
+    };
+    const controls: ModelInput = { ...input(), tools: [{ name: "terminate", description: "Finish", category: "control", control: "finish", inputSchema: { type: "object" } }] };
+    const turn = await new ArkDeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: new Client(value) }).generate(controls, { signal });
+
+    expect(turn).toMatchObject({ type: "finish", usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30, cacheReadTokens: 15 } });
+    expect(turn.usage).not.toHaveProperty("cacheMissTokens");
+  });
+
+  it.each(["headers", "body"])("preserves the non-retryable %s deadline boundary", async (phase) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
+    const never = new Promise<never>(() => {});
+    let resolveFetchEntered!: () => void;
+    let resolveBodyEntered!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => { resolveFetchEntered = resolve; });
+    const bodyEntered = new Promise<void>((resolve) => { resolveBodyEntered = resolve; });
+    const fetchStub = vi.fn(async () => {
+      resolveFetchEntered();
+      return phase === "headers"
+        ? never
+        : {
+            ok: true,
+            status: 200,
+            json: () => {
+              resolveBodyEntered();
+              return never;
+            },
+          };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    const evidence: ArkTransportEvidence[] = [];
+    const pending = new FetchArkHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, signal, { payloadHash: "fixture", onTransportEvidence: (item) => evidence.push(item) });
+    const rejected = expect(pending).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_REQUEST_TIMEOUT", retryable: false });
+    await fetchEntered;
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    if (phase === "body") {
+      await bodyEntered;
+      expect(evidence).toContainEqual(expect.objectContaining({ stage: "headers_received", phase: "reading_body" }));
+    } else {
+      expect(evidence).toContainEqual(expect.objectContaining({ stage: "fetch_invoked", phase: "awaiting_headers" }));
+    }
+    await vi.advanceTimersByTimeAsync(11);
+    await rejected;
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(evidence.at(-1)).toMatchObject({ outcome: "timeout", abortSource: "local_request_timeout", phase: phase === "headers" ? "awaiting_headers" : "reading_body" });
+  });
+
+  it("preserves cancellation without converting it to an Ark failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<never>(() => {})));
+    const controller = new AbortController();
+    const reason = new Error("Run cancelled");
+    const pending = new FetchArkHttpClient().post("https://fixture.invalid", {}, {}, controller.signal);
+    const rejected = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+    await rejected;
+  });
+
+  it.each([[401, false], [429, true], [503, true]] as const)("keeps HTTP %s failures private and independently named", async (status, retryable) => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status, json: async () => ({ error: { message: "private credential and payload" } }) })));
+    await expect(new FetchArkHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({
+      name: "ArkProviderError", message: `Ark HTTP ${status}`, code: `ARK_HTTP_${status}`, retryable, retryMode: retryable ? "same_input" : "feedback",
+    });
+  });
+
+  it("retains finite response feedback and rejects interrupted responses", async () => {
+    const invalid = new ArkDeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: new Client({ choices: [] }) });
+    await expect(invalid.generate(input(), { signal })).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_INVALID_RESPONSE", retryable: true, retryMode: "feedback" });
+    const interrupted = new ArkDeepseekFlashAdapter({ apiKey: "fixture", assetReader: reader, httpClient: new Client(response("click", { x: 1, y: 2 }, "length")) });
+    await expect(interrupted.generate(input(), { signal })).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_INCOMPLETE_RESPONSE", retryable: false });
   });
 });
