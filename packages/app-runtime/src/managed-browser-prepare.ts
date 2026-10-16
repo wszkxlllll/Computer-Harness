@@ -119,6 +119,11 @@ export async function prepareManagedBrowserProfile(
     await host.start(signal);
     dependencies.onReady?.({ profileLabel: options.profileLabel, urlHost: new URL(options.managedBrowserUrl).host });
     outcome = await (dependencies.waitForContinue ?? ((waitSignal) => waitForManagedBrowserPreparationContinue(waitSignal)))(signal);
+    if (outcome === "enter") {
+      // Only explicit preparation completion refreshes the saved page list.
+      // This is best-effort so a read-only CDP snapshot cannot invalidate login.
+      try { await host.syncStartupUrlsFromCurrentPages(signal); } catch { /* keep the prior startup list */ }
+    }
   } catch (error) {
     operationFailed = true;
     operationError = error;
