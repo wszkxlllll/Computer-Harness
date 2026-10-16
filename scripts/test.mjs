@@ -29,6 +29,8 @@ run(process.execPath, [
   "scripts/cross-window/provider-description-probe.selftest.mjs",
   "scripts/cross-window/sdk-managed-browser-probe.selftest.mjs",
   "scripts/cua-window-handoff-probe.test.mjs",
+  "scripts/life-eval/life-eval-runner.test.mjs",
+  "scripts/life-eval/start.test.mjs",
   "scripts/autonomous/batch-host.test.mjs",
   "scripts/execution-segment-api-conformance-metrics.test.mjs",
   "scripts/travel/metrics.test.mjs",

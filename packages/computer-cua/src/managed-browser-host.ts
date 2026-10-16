@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { access, mkdir, mkdtemp, open, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
+import { access, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -28,6 +28,7 @@ const execFile = promisify(execFileCallback);
 const MANAGED_BROWSER_STARTUP_METADATA_FILE = "managed-browser-startup.json";
 const MAX_MANAGED_BROWSER_STDERR_CAPTURE_BYTES = 4_096;
 const MAX_MANAGED_BROWSER_STDERR_EXCERPT_CHARS = 768;
+const MANAGED_BROWSER_STARTUP_URL_SYNC_TIMEOUT_MS = 1_000;
 export const MAX_MANAGED_BROWSER_STARTUP_URLS = 8;
 
 export type ManagedBrowserProfileMode = "ephemeral" | "persistent";
@@ -193,13 +194,36 @@ export async function registerManagedBrowserStartupUrl(profileRoot: string, valu
     throw new DomGroundingUnavailableError(`managed browser startup URL limit is ${MAX_MANAGED_BROWSER_STARTUP_URLS}`);
   }
   existing.push(normalized);
-  const metadata: ManagedBrowserStartupMetadata = { schemaVersion: 1, urls: existing };
+  await writeManagedBrowserStartupUrls(profileRoot, existing);
+  return existing;
+}
+
+/** Replace the bounded startup set after an explicit managed-browser preparation. */
+async function replaceManagedBrowserStartupUrls(profileRoot: string, values: readonly string[]): Promise<readonly string[]> {
+  const urls: string[] = [];
+  for (const value of values) {
+    const normalized = normalizeManagedBrowserStartupUrl(value);
+    if (!urls.includes(normalized)) urls.push(normalized);
+    if (urls.length > MAX_MANAGED_BROWSER_STARTUP_URLS) {
+      throw new DomGroundingUnavailableError(`managed browser startup URL limit is ${MAX_MANAGED_BROWSER_STARTUP_URLS}`);
+    }
+  }
+  await writeManagedBrowserStartupUrls(profileRoot, urls);
+  return urls;
+}
+
+async function writeManagedBrowserStartupUrls(profileRoot: string, urls: readonly string[]): Promise<void> {
+  const filePath = join(profileRoot, MANAGED_BROWSER_STARTUP_METADATA_FILE);
+  const temporaryPath = join(profileRoot, `${MANAGED_BROWSER_STARTUP_METADATA_FILE}.${randomBytes(8).toString("hex")}.tmp`);
+  const metadata: ManagedBrowserStartupMetadata = { schemaVersion: 1, urls };
   try {
-    await writeFile(join(profileRoot, MANAGED_BROWSER_STARTUP_METADATA_FILE), `${JSON.stringify(metadata)}\n`, "utf8");
+    await writeFile(temporaryPath, `${JSON.stringify(metadata)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await rename(temporaryPath, filePath);
   } catch {
     throw new DomGroundingUnavailableError("managed browser startup metadata could not be written");
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
-  return existing;
 }
 
 export interface ManagedBrowserProfileLease {
@@ -1275,6 +1299,49 @@ export class ManagedBrowserHost {
     if (this.state === undefined) return undefined;
     const { target, processId, profileId, tabId, generation, profileMode } = this.state;
     return { target, processId, profileId, tabId, generation, profileMode };
+  }
+
+  /**
+   * Refresh the saved startup list from this Host-owned CDP endpoint. Callers
+   * use this only after explicit browser-profile preparation, never at Run end.
+   */
+  public async syncStartupUrlsFromCurrentPages(signal: AbortSignal): Promise<boolean> {
+    const state = this.state;
+    if (state === undefined || state.profileMode !== "persistent") return false;
+    try {
+      const querySignal = AbortSignal.any([signal, AbortSignal.timeout(MANAGED_BROWSER_STARTUP_URL_SYNC_TIMEOUT_MS)]);
+      const pages = await listDevToolsPages(state.debuggerPort, querySignal);
+      const pageTargets = pages.filter((page) => page.type === "page");
+      // An empty list (including worker-only responses) cannot prove the user
+      // intentionally cleared their saved pages. An explicit blank page can.
+      if (pageTargets.length === 0) return false;
+
+      const urls: string[] = [];
+      let sawExplicitBlankPage = false;
+      for (const page of pageTargets) {
+        if (typeof page.url !== "string") return false;
+        let parsed: URL;
+        try {
+          parsed = new URL(page.url);
+        } catch {
+          if (/^https?:/iu.test(page.url)) return false;
+          continue;
+        }
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          const normalized = normalizeManagedBrowserStartupUrl(page.url);
+          if (!urls.includes(normalized)) urls.push(normalized);
+          if (urls.length > MAX_MANAGED_BROWSER_STARTUP_URLS) return false;
+        } else if (page.url === "about:blank") {
+          sawExplicitBlankPage = true;
+        }
+      }
+      if (urls.length === 0 && !sawExplicitBlankPage) return false;
+      await replaceManagedBrowserStartupUrls(state.profileRoot, urls);
+      return true;
+    } catch {
+      // Keep the previous list on query, validation, capacity, or write errors.
+      return false;
+    }
   }
 
   public async collect(request: DomGroundingCollectRequest, signal: AbortSignal): Promise<DomGroundingTransportResult> {

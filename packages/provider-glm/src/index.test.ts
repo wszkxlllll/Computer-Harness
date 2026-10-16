@@ -803,7 +803,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   const flush = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
   it.each(["headers", "body"] as const)("settles the total deadline when %s never cooperates", async (phase) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const evidence: GlmTransportEvidence[] = [];
     const fetchMock = vi.fn(async () => phase === "headers" ? new Promise<never>(() => {})
       : { ok: true, status: 200, json: () => new Promise<never>(() => {}) });
@@ -819,7 +819,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   });
 
   it.each(["headers", "body"] as const)("rejects delayed %s success after expiry and consumes late rejection", async (phase) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const evidence: GlmTransportEvidence[] = [];
     let resolveLate: (value: unknown) => void = () => {};
     let rejectLate: (reason: unknown) => void = () => {};
@@ -840,7 +840,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   });
 
   it("preserves the exact first Run reason while a body ignores Abort forever", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const controller = new AbortController();
     const reason = { type: "user_cancelled_fixture" };
     const evidence: GlmTransportEvidence[] = [];
@@ -889,7 +889,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   });
 
   it("consumes a promise that rejects only after the request has timed out", async () => {
-    vi.useFakeTimers(); let rejectLate: (reason: unknown) => void = () => {};
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] }); let rejectLate: (reason: unknown) => void = () => {};
     vi.stubGlobal("fetch", vi.fn(() => new Promise((_resolve, reject) => { rejectLate = reject; })));
     try {
       const result = new FetchGlmHttpClient({ requestTimeoutMs: 5 }).post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((error: unknown) => error);

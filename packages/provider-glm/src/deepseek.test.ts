@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type ModelInput } from "@computer-harness/runtime";
-import { ArkDeepseekFlashAdapter, FetchArkHttpClient, DeepseekFlashAdapter, DeepseekProviderError, FetchDeepseekHttpClient, type DeepseekHttpClient, type DeepseekTransportEvidence } from "./index.js";
+import { ArkDeepseekFlashAdapter, FetchArkHttpClient, DeepseekFlashAdapter, DeepseekProviderError, FetchDeepseekHttpClient, type ArkTransportEvidence, type DeepseekHttpClient, type DeepseekTransportEvidence } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "image" as AssetId, relativePath: "screenshots/image.png", mediaType: "image/png", byteLength: 3 };
@@ -194,13 +194,40 @@ describe("official DeepSeek flash boundary", () => {
 
 describe("DeepSeek transport deadlines and privacy", () => {
   it.each(["headers", "body"])("settles non-cooperative %s at the request deadline without retry", async (phase) => {
-    vi.useFakeTimers();
+    // The transport checks performance.now() as well as its setTimeout. Vitest's
+    // default fake timer set omits performance, so include it to keep the
+    // request deadline on one deterministic clock.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const never = new Promise<never>(() => {});
-    const fetchStub = vi.fn(async () => phase === "headers" ? never : { ok: true, status: 200, json: () => never });
+    let resolveFetchEntered!: () => void;
+    let resolveBodyEntered!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => { resolveFetchEntered = resolve; });
+    const bodyEntered = new Promise<void>((resolve) => { resolveBodyEntered = resolve; });
+    const fetchStub = vi.fn(async () => {
+      resolveFetchEntered();
+      return phase === "headers"
+        ? never
+        : {
+            ok: true,
+            status: 200,
+            json: () => {
+              resolveBodyEntered();
+              return never;
+            },
+          };
+    });
     vi.stubGlobal("fetch", fetchStub);
     const evidence: DeepseekTransportEvidence[] = [];
     const pending = new FetchDeepseekHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, signal, { payloadHash: "fixture", onTransportEvidence: (item) => evidence.push(item) });
-    const rejected = expect(pending).rejects.toMatchObject({ name: "DeepseekProviderError", code: "DEEPSEEK_REQUEST_TIMEOUT", retryable: false });
+    const rejected = expect(pending).rejects.toMatchObject({ name: "DeepseekProviderError", code: "DEEPSEEK_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback" });
+    await fetchEntered;
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    if (phase === "body") {
+      await bodyEntered;
+      expect(evidence).toContainEqual(expect.objectContaining({ stage: "headers_received", phase: "reading_body" }));
+    } else {
+      expect(evidence).toContainEqual(expect.objectContaining({ stage: "fetch_invoked", phase: "awaiting_headers" }));
+    }
     await vi.advanceTimersByTimeAsync(11);
     await rejected;
     expect(fetchStub).toHaveBeenCalledTimes(1);
@@ -262,13 +289,41 @@ describe("DeepSeek transport deadlines and privacy", () => {
 
 describe("Ark Agent Plan transport boundary", () => {
   it.each(["headers", "body"])("preserves the non-retryable %s deadline boundary", async (phase) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const never = new Promise<never>(() => {});
-    vi.stubGlobal("fetch", vi.fn(async () => phase === "headers" ? never : { ok: true, status: 200, json: () => never }));
-    const pending = new FetchArkHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, signal);
+    let resolveFetchEntered!: () => void;
+    let resolveBodyEntered!: () => void;
+    const fetchEntered = new Promise<void>((resolve) => { resolveFetchEntered = resolve; });
+    const bodyEntered = new Promise<void>((resolve) => { resolveBodyEntered = resolve; });
+    const fetchStub = vi.fn(async () => {
+      resolveFetchEntered();
+      return phase === "headers"
+        ? never
+        : {
+            ok: true,
+            status: 200,
+            json: () => {
+              resolveBodyEntered();
+              return never;
+            },
+          };
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    const evidence: ArkTransportEvidence[] = [];
+    const pending = new FetchArkHttpClient({ requestTimeoutMs: 10 }).post("https://fixture.invalid", {}, {}, signal, { payloadHash: "fixture", onTransportEvidence: (item) => evidence.push(item) });
     const rejected = expect(pending).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_REQUEST_TIMEOUT", retryable: false });
+    await fetchEntered;
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    if (phase === "body") {
+      await bodyEntered;
+      expect(evidence).toContainEqual(expect.objectContaining({ stage: "headers_received", phase: "reading_body" }));
+    } else {
+      expect(evidence).toContainEqual(expect.objectContaining({ stage: "fetch_invoked", phase: "awaiting_headers" }));
+    }
     await vi.advanceTimersByTimeAsync(11);
     await rejected;
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(evidence.at(-1)).toMatchObject({ outcome: "timeout", abortSource: "local_request_timeout", phase: phase === "headers" ? "awaiting_headers" : "reading_body" });
   });
 
   it("preserves cancellation without converting it to an Ark failure", async () => {

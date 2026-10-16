@@ -71,11 +71,12 @@ import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
 import type { CommittedEventListener } from "./committed-events.js";
-import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange, type ProgressMonitorState } from "./progress-monitor.js";
+import { createProgressMonitorState, reduceProgressMonitor, type ProgressMonitorState } from "./progress-monitor.js";
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 import { DeterministicGroundingSelector, type GroundingSelector, type GroundingSelectionQuery, type GroundingStructuredToolHint } from "./grounding-selector.js";
 import { finishSummaryRejectionReason } from "./finish-summary.js";
 import { currentObservationAssessmentBinding, parseObservationAssessment } from "./observation-assessment.js";
+import { boundedRecoveryIntent, projectCurrentMonitorGuidance, projectMonitorCandidateGuidance, type MonitorGuidanceProjection } from "./monitor-guidance.js";
 import { canonicalizeSourceLinkedFinish, isWellFormedSourceLinkedFinishReport, validateSourceLinkedFinishContract } from "./source-linked-finish.js";
 
 const MAX_PROVIDER_RETRIES = 1;
@@ -404,7 +405,6 @@ export class RunController {
   private monitorPolicyState: MonitorPolicyState | undefined;
   private monitorWorkClock: MonitorWorkClock = { modelDecisionCount: 0, guiActionCount: 0 };
   private monitorPendingGuidance: MonitorGuidance | undefined;
-  private monitorPendingHelp: Extract<MonitorPolicyProposal, { kind: "help_requested" }> | undefined;
   /** Short-lived local recall for the next GroundingCatalog projection. */
   private groundingRecoveryHint: GroundingRecoveryHint | undefined;
   private monitorProcessing = false;
@@ -823,6 +823,7 @@ export class RunController {
                 ...(this.latestWindowListStatus === undefined ? {} : this.latestWindowListStatus),
               }
             : undefined;
+          const monitorGuidance = this.monitorGuidanceForCurrentObservation();
           const requestBudget = this.requestBudget();
           localRequestPreparation = true;
           const context = await this.contextCompiler.compile(
@@ -843,7 +844,7 @@ export class RunController {
               features: this.isBoundWindowRecoveryActive() ? { planning: "off", memory: "off", batching: "off" } : this.features,
               ...(!this.isBoundWindowRecoveryActive() && this.assistantPreferences !== undefined ? { assistantPreferences: this.assistantPreferences } : {}),
               ...(!this.isBoundWindowRecoveryActive() && this.sourceLinkedFinish !== undefined ? { sourceLinkedFinish: this.sourceLinkedFinish } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.monitorPendingGuidance !== undefined ? { monitorGuidance: this.monitorPendingGuidance } : {}),
+              ...(!this.isBoundWindowRecoveryActive() && monitorGuidance !== undefined ? { monitorGuidance } : {}),
               ...(!this.isBoundWindowRecoveryActive() && this.latestObservation !== undefined ? { latestObservation: this.observationForContext(this.latestObservation) } : {}),
             },
             this.abortController.signal,
@@ -1806,7 +1807,6 @@ export class RunController {
     } else {
       await this.executeNonComputerCall(pending.call, pending.definition, context);
     }
-    await this.flushDeferredMonitorHelp();
   }
 
   private isToolEnabled(name: string): boolean {
@@ -2465,19 +2465,14 @@ export class RunController {
         );
         // A completed action that opened the private recovery phase is a hard
         // source-turn boundary even though the reducer remains `running`.
-        // Its suffix was rejected by the handoff callback; do not flush old
-        // target monitor help or continue dispatching remaining entries.
+        // Its suffix was rejected by the handoff callback; do not continue
+        // dispatching entries for the old target.
         if (this.recoveryControlInFlight) return { correction: false };
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
         await this.executeNonComputerCall(entry.call, entry.definition, context);
       }
-      // Monitor help is deferred until the complete tool/action boundary has
-      // settled.  In particular, an action receipt is followed by its
-      // terminal ToolResult and post-action observation before status changes
-      // to waiting_user.
-      await this.flushDeferredMonitorHelp();
       if (this.snapshot.status === "waiting_window") {
         return { correction: false };
       }
@@ -2655,13 +2650,6 @@ export class RunController {
       // after action preparation/validation: rejected malformed calls do not
       // erase a still-valid local demand before they can execute anything.
       await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: activeSegment.id, reason: "main_provider_replanned" } });
-    }
-    if (this.monitorMode === "guidance" && this.monitorState !== undefined && shouldRejectRepeatedNoChange(this.monitorState, action)) {
-      await this.rejectToolCall(
-        call.id,
-        "Monitor blocked a repeated GUI action after an unchanged observation; re-observe and re-localize the target before trying a different action",
-      );
-      return;
     }
     if (this.callStates.get(call.id) !== "received") {
       throw new Error(`ToolCall ${call.id} is not available for action proposal`);
@@ -3552,6 +3540,13 @@ export class RunController {
       const progress = reduceProgressMonitor(this.monitorState, event);
       this.monitorState = progress.state;
       this.updateGroundingRecoveryHint(event, progress.output);
+      if ((event.type === "monitor.transition" && event.transition !== "unchanged")
+        || event.type === "computer.window.handoff.requested"
+        || event.type === "computer.window.handoff.completed"
+        || event.type === "computer.window.handoff.ignored"
+        || event.type === "model.response.received" && event.turn.observationAssessment !== undefined && progress.output.assessmentOutcome === "uncertain") {
+        this.monitorPendingGuidance = undefined;
+      }
       const executionBarrier = this.monitorExecutionBarrier();
       if (this.monitorBarrierClearsPendingRecommendations() || this.snapshot.status === "finished") {
         this.clearMonitorPendingRecommendations();
@@ -3562,19 +3557,24 @@ export class RunController {
         this.clearMonitorPendingRecommendations();
       }
       this.monitorLastPartitionKey = partitionKey;
+      const previousCandidateFingerprint = this.monitorPolicyState.candidateFingerprint;
+      const candidateGuidance = progress.output.candidate
+        ? this.monitorGuidanceForCandidate(event, progress.output)
+        : undefined;
       const policy = reduceMonitorPolicy(this.monitorPolicyState, {
         runId: this.runId,
         partitionKey,
         sequence: event.sequence,
         clock: this.monitorWorkClock,
         monitor: progress.output,
+        ...(candidateGuidance === undefined ? {} : { guidanceText: candidateGuidance.text }),
         ...(executionBarrier === undefined ? {} : { executionBarrier }),
         ...(this.snapshot.status === "finished" ? { terminal: true } : {}),
       });
       this.monitorPolicyState = policy.state;
-      if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
-      const proposalEvent = this.monitorProposalEvent(policy.proposal, progress.output, event.eventId);
-      if (proposalEvent === undefined || this.monitorProposalCount >= 64) return;
+      if (previousCandidateFingerprint !== undefined && policy.state.candidateFingerprint === undefined) {
+        this.monitorLastPersistedKey = undefined;
+      }
       // The monitor still consumes control events to keep its in-memory state
       // and policy lifecycle coherent, but trajectory proposals are legal only
       // while the Run reducer is in `running`. In particular, approval and
@@ -3584,36 +3584,23 @@ export class RunController {
         this.clearMonitorPendingRecommendations();
         return;
       }
+      if (policy.proposal.kind === "guidance") {
+        this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
+      }
+      if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
+      const proposalEvent = this.monitorProposalEvent(
+        policy.proposal,
+        progress.output,
+        event.eventId,
+        candidateGuidance?.text,
+        candidateGuidance?.sourceEventIds,
+      );
+      if (proposalEvent === undefined || this.monitorProposalCount >= 64) return;
       this.monitorProposalCount += 1;
       this.monitorLastPersistedKey = this.monitorProposalKey(policy.proposal, progress.output);
       await this.commitEvent(proposalEvent);
-      if (policy.proposal.kind === "guidance") {
-        this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
-      } else if (policy.proposal.kind === "help_requested" && this.snapshot.status === "running" && this.monitorExecutionBarrier() === undefined) {
-        // Do not transition status from inside action.execution.completed or
-        // before the matching ToolResult/post-observation has been committed.
-        // The owning tool-turn loop flushes this deferred request at its
-        // atomic boundary.
-        this.monitorPendingHelp = policy.proposal;
-      }
     } finally {
       this.monitorProcessing = false;
-    }
-  }
-
-  private async flushDeferredMonitorHelp(): Promise<void> {
-    const pending = this.monitorPendingHelp;
-    if (pending === undefined || this.snapshot.status !== "running" || this.monitorExecutionBarrier() !== undefined) return;
-    this.monitorPendingHelp = undefined;
-    try {
-      await this.commitEvent({
-        type: "user.input.requested",
-        question: "页面连续多次操作后没有出现可确认的变化，任务已暂停。请检查电脑当前画面后再补充下一步；不要重复输入网址或重复点击同一入口。若页面仍无变化，请说明“停止任务”。",
-      });
-    } catch (error) {
-      // A diagnostic request is best effort.  If its own event cannot be
-      // committed, leave the already-completed action outcome untouched.
-      await this.recordMonitorDiagnosticFailure(error);
     }
   }
 
@@ -3632,7 +3619,46 @@ export class RunController {
 
   private clearMonitorPendingRecommendations(): void {
     this.monitorPendingGuidance = undefined;
-    this.monitorPendingHelp = undefined;
+  }
+
+  private monitorGuidanceForCandidate(
+    event: RuntimeEvent,
+    output: import("./progress-monitor.js").ProgressMonitorOutput,
+  ): MonitorGuidanceProjection {
+    return projectMonitorCandidateGuidance({
+      event,
+      output,
+      events: this.events,
+      runId: this.runId,
+      ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
+    });
+  }
+
+  private monitorGuidanceForCurrentObservation(): MonitorGuidance | undefined {
+    const pending = this.monitorPendingGuidance;
+    const latestObservation = this.latestObservation;
+    if (pending === undefined) return undefined;
+    if (latestObservation === undefined || this.monitorState?.lastObservationId !== String(latestObservation.id)) {
+      this.monitorPendingGuidance = undefined;
+      return undefined;
+    }
+
+    const projection = projectCurrentMonitorGuidance(this.events, this.runId, latestObservation);
+    if (projection !== undefined) return { ...pending, text: projection.text };
+
+    const transition = this.monitorState.lastTransition;
+    if (transition?.postObservationId === String(latestObservation.id)
+      && (transition.transition === "changed" || transition.transition === "unknown")) {
+      this.monitorPendingGuidance = undefined;
+      return undefined;
+    }
+    // A generic note never describes an old action as a current fact. It is
+    // still bounded to this request and asks the model to inspect the current
+    // image before deciding what to do.
+    return {
+      ...pending,
+      text: "Monitor evidence is incomplete for this action. Inspect the newest image before choosing the next step; do not assume the requested result is present.",
+    };
   }
 
   /**
@@ -3794,34 +3820,44 @@ export class RunController {
 
   private monitorPartitionKey(): string {
     const session = this.snapshot.computerSession;
-    const viewport = this.latestObservation?.viewport ?? session?.viewport;
+    const observation = this.latestObservation;
+    const viewport = observation?.viewport ?? session?.viewport;
     return session === undefined || viewport === undefined
       ? `run:${String(this.runId)}`
-      : `session:${String(session.id)}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
+      : `session:${String(session.id)}|surface:${JSON.stringify(observation?.surfaceRef ?? "unbound")}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
   }
 
-  private monitorExecutionBarrier(): "unknown_outcome" | "pending_side_effect" | undefined {
+  private monitorExecutionBarrier(): "unknown_outcome" | "pending_side_effect" | "action_in_flight" | undefined {
     if (this.snapshot.outcome === "outcome_unknown") return "unknown_outcome";
-    if (this.isAborted() || this.snapshot.pendingApproval !== undefined || this.snapshot.pendingUserQuestion !== undefined || this.snapshot.unresolvedActionId !== undefined) return "pending_side_effect";
+    if (this.isAborted() || this.snapshot.pendingApproval !== undefined || this.snapshot.pendingUserQuestion !== undefined) return "pending_side_effect";
+    // Routine execution suppresses Monitor output but must not reset its
+    // candidate episode. The policy preserves the candidate and spent budget
+    // while this Run-owned action is in flight; approval/input/abort and
+    // unknown-outcome barriers above retain their original clearing behavior.
+    if (this.snapshot.unresolvedActionId !== undefined) return "action_in_flight";
     return undefined;
   }
 
   private shouldPersistMonitorProposal(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): boolean {
-    if (proposal.kind === "guidance" || proposal.kind === "help_requested") return true;
-    if (!output.candidate) return proposal.reason === "suppressed_by_execution_barrier";
-    return proposal.reason === "candidate_observed" || proposal.reason === "shadow" || proposal.reason === "suppressed_by_execution_barrier";
+    if (proposal.kind === "guidance") return true;
+    return output.candidate && (proposal.reason === "candidate_observed" || proposal.reason === "shadow");
   }
 
   private monitorProposalKey(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): string {
     const fingerprint = proposal.kind === "none" ? this.monitorPolicyState?.candidateFingerprint ?? output.eventIds.join(",") : proposal.fingerprint;
-    const reason = proposal.kind === "none" ? proposal.reason : proposal.kind === "guidance" ? "guidance" : proposal.reason;
-    return `${proposal.kind}:${reason}:${fingerprint}`;
+    const reason = proposal.kind === "none"
+      ? proposal.reason
+      : `guidance-${this.monitorPolicyState?.guidanceCount ?? 0}`;
+    const evidenceTier = output.evidence.some((item) => item.kind === "semantic_assessment") ? "assessed" : "candidate";
+    return `${proposal.kind}:${reason}:${fingerprint}:${evidenceTier}`;
   }
 
   private monitorProposalEvent(
     proposal: MonitorPolicyProposal,
     output: import("./progress-monitor.js").ProgressMonitorOutput,
     sourceEventId: EventId,
+    candidateText?: string,
+    candidateSourceEventIds: readonly EventId[] = [],
   ): Extract<RuntimeEventData, { type: "monitor.proposal" }> | undefined {
     const key = this.monitorProposalKey(proposal, output);
     if (key === this.monitorLastPersistedKey) return undefined;
@@ -3830,15 +3866,20 @@ export class RunController {
       type: "monitor.proposal",
       mode: this.monitorMode === "guidance" ? "guidance" : "shadow",
       proposal: proposal.kind === "none"
-        ? proposal.reason === "suppressed_by_execution_barrier" ? "suppressed_by_execution_barrier" : output.candidate ? "candidate" : "suppressed_by_execution_barrier"
+        ? output.candidate ? "candidate" : "suppressed_by_execution_barrier"
         : proposal.kind,
       fingerprint,
-      sourceEventIds: [...new Set([sourceEventId, ...output.eventIds])].slice(-12),
+      // Projections order their bounded provenance with source response/action/
+      // receipt and current observation/transition first. Do not append the
+      // current event and then tail-slice away the assessment that grounds it.
+      sourceEventIds: [...new Set(candidateSourceEventIds.length > 0
+        ? candidateSourceEventIds
+        : [sourceEventId, ...output.eventIds, ...output.reasons.flatMap((reason) => reason.eventIds), ...output.evidence.flatMap((item) => item.eventIds)])].slice(0, 12),
       reasonCodes: output.reasons.map((reason) => reason.code).slice(-8),
       evidenceKinds: output.evidence.map((item) => item.kind).slice(-8),
       modelDecisionCount: this.monitorWorkClock.modelDecisionCount,
       guiActionCount: this.monitorWorkClock.guiActionCount,
-      ...(proposal.kind === "guidance" ? { guidanceText: proposal.text } : {}),
+      ...(proposal.kind === "guidance" ? { guidanceText: proposal.text } : output.candidate && candidateText !== undefined ? { guidanceText: candidateText } : {}),
     };
   }
 
@@ -4147,7 +4188,7 @@ function validateComputerWindowList(value: ComputerWindowList): ComputerWindowLi
     throw new Error("Computer window candidate projection must contain at most 128 options");
   }
   if (typeof value.truncated !== "boolean" || !Number.isSafeInteger(value.omittedCount) || value.omittedCount < 0 ||
-      value.truncated !== (value.omittedCount > 0)) {
+      (!value.truncated && value.omittedCount > 0)) {
     throw new Error("Computer window candidate projection has invalid truncation metadata");
   }
   const refs = new Set<string>();
@@ -4252,16 +4293,6 @@ function pointDistance(point: { x: number; y: number }, box: GroundingBoundingBo
   const centerX = box.x + box.width / 2;
   const centerY = box.y + box.height / 2;
   return Math.hypot(point.x - centerX, point.y - centerY);
-}
-
-function boundedRecoveryIntent(value: string): string | undefined {
-  const normalized = value
-    .replace(/[\u0000-\u001F\u007F]/gu, " ")
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
-    .replace(/\b1\d{10}\b/gu, "[redacted-phone]")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return normalized.length === 0 ? undefined : normalized.slice(0, 160);
 }
 
 function boundedUIEvidence(value: string, limit: number): string {

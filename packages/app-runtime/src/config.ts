@@ -36,7 +36,6 @@ export function validateGlmRequestTimeoutMs(value: number | undefined): void {
 export const DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS = 90_000;
 export const DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS = 4096;
 export const DEFAULT_ARK_REQUEST_TIMEOUT_MS = 90_000;
-export const DEFAULT_ARK_MAX_OUTPUT_TOKENS = 4096;
 
 export function validateDeepseekRequestTimeoutMs(value: number | undefined): void {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < 1_000 || value > 240_000)) {

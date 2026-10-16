@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,19 @@ import type { ProviderHttpClient, ResolvedRunConfig } from "../../../packages/ap
 import { parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 describe("Host GLM output budget", () => {
+  it("wires GLM settings, env load order, startup audit, and Windows caret opt-in (source contract)", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const configSource = readFileSync(new URL("./session-config.ts", import.meta.url), "utf8");
+    expect(source).toContain('parseGlmOutputBudget(one("--glm-max-output-tokens"))');
+    expect(source).toContain("HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1");
+    expect(source).toContain("not a general stock CUA 0.22 compatibility claim");
+    expect(configSource).toContain("glmMaxOutputTokens: args.glmMaxOutputTokens");
+    expect(configSource).toContain("parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)");
+    expect(source).toContain("max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs}");
+    expect(source).toContain('requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}');
+    expect(source).toContain("HARNESS_SOURCE_LINKED_FINISH_CONTRACT");
+    expect(source.indexOf("await loadEnvFile(args.envFile)")).toBeLessThan(source.indexOf("createHostSessionConfig(args, outputDir, managedBrowserProfile, process.env)"));
+  });
   it("uses bounded independent text and wire input defaults and rejects inconsistent values", () => {
     expect(parseGlmInputBudgets()).toEqual({ contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 });
     expect(parseGlmInputBudgets("24576", "32768")).toEqual({ contextMaxInputTokens: 24_576, contextMaxWireInputTokens: 32_768 });
