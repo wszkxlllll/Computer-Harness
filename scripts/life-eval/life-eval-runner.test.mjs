@@ -299,9 +299,17 @@ test("manifest fixture contains nine identified tasks and no answer key is proje
   assert.match(t03.checks.find((item) => item.id === "constraints").description, /只向指定微信会话发送这一个DOCX/u);
   assert.doesNotMatch(`${t03.title} ${t03.sourceLineage}`, /银行|电话预约/u);
   const taskCards = await readFile(join(ROOT, "docs", "life-business-task-cards-2026-10-15.md"), "utf8");
-  const t03Section = taskCards.match(/## T03 ·[\s\S]*?(?=\n## |$)/u)?.[0];
-  const taskCardGoal = t03Section?.match(/### 给Agent的完整需求\n\n```text\n([\s\S]*?)\n```/u)?.[1];
-  assert.equal(taskCardGoal, t03.goal, "T03 task card Goal must match the manifest exactly");
+  const extractT03TaskCardGoal = (markdown) => {
+    const lfMarkdown = markdown.replace(/\r\n?/gu, "\n");
+    const t03Section = lfMarkdown.match(/## T03 ·[\s\S]*?(?=\n## |$)/u)?.[0];
+    return t03Section?.match(/### 给Agent的完整需求\n\n```text\n([\s\S]*?)\n```/u)?.[1];
+  };
+  const normalizedTaskCards = taskCards.replace(/\r\n?/gu, "\n");
+  const taskCardGoalFromLf = extractT03TaskCardGoal(normalizedTaskCards);
+  const taskCardGoalFromCrlf = extractT03TaskCardGoal(normalizedTaskCards.replace(/\n/gu, "\r\n"));
+  assert.equal(taskCardGoalFromLf, t03.goal, "LF T03 task card Goal must match the manifest exactly");
+  assert.equal(taskCardGoalFromCrlf, t03.goal, "CRLF T03 task card Goal must match the manifest exactly");
+  assert.equal(taskCardGoalFromCrlf, taskCardGoalFromLf, "T03 task card Goal extraction must be newline-invariant");
   for (const taskId of ["T02", "M02"]) {
     const task = manifest.tasks.find((candidate) => candidate.id === taskId);
     assert.deepEqual(task.requiredApps, ["managed-browser"]);
