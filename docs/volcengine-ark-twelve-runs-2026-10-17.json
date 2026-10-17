@@ -1,0 +1,820 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-17",
+  "title": "火山方舟Flash low：CP01／CP02／M02十二轮Windows实跑",
+  "scope": {
+    "tasks": [
+      "CP01",
+      "CP02",
+      "M02"
+    ],
+    "roundsPerTask": 4,
+    "batches": 2,
+    "publicSampleNumbering": "每题按真实模型样本顺序编号1—4，前两轮为首批、后两轮为追加批",
+    "onlyPublicResultsAndOfficialCrops": true,
+    "rawEvidencePrivate": true
+  },
+  "provenance": {
+    "publicationBase": "main",
+    "publicationBaseCommit": "282ac6c",
+    "runtimePlatform": "Windows in WinBoat",
+    "runtimeCandidate": "既有156baad系Windows候选，包含此前网页／Context／Monitor及Ark接入的本地改动；不是本PR的main提交树实机验收",
+    "runLevelProviderOverride": true,
+    "productSourceChangedForTheseRuns": false,
+    "productDefaultChanged": false,
+    "officialOracleNotSentToModel": true,
+    "formalEvaluation": "not_run",
+    "controlledAB": false
+  },
+  "configuration": {
+    "provider": "ark",
+    "endpoint": "https://ark.cn-beijing.volces.com/api/plan/v3",
+    "model": "deepseek-v4.1-flash",
+    "adapter": "Existing production shared ChatCompletionsAdapter via host Run-level createProvider override",
+    "thinking": "enabled",
+    "reasoningEffort": "low",
+    "productDefaultChanged": false,
+    "summaryThinkingLabel": "Hardcoded disabled; not effective-mode evidence",
+    "effectiveModeEvidence": "Real FetchArkHttpClient requestConfiguration in provider-exchanges",
+    "maxSteps": 200,
+    "maxModelRequests": 200,
+    "maxOutputTokens": 16384,
+    "requestTimeoutMs": 180000,
+    "wallTimeoutMs": 1800000,
+    "contextTextBudget": 48000,
+    "contextWireBudget": 64000,
+    "planning": true,
+    "memory": "facts",
+    "batching": "same-control-input-v1",
+    "monitor": "guidance",
+    "grounding": "hybrid-catalog-v1",
+    "windowDelivery": "foreground",
+    "windowSwitch": "off",
+    "windowHandoff": "off",
+    "independentEphemeralBrowserAndStores": true,
+    "scopeLimitedAutomaticApproval": true,
+    "goals": "既有CP01／CP02／M02 v1开发Goal；M02目标2026-10-21周三上午，当前周表10.17—23",
+    "externalOracleNotSentToModel": true
+  },
+  "totals": {
+    "samples": 12,
+    "realHttpRequests": 521,
+    "http200": 520,
+    "noHttpStatus": 1,
+    "effectiveEnabledLowRequests": 521,
+    "outputLimit16384Requests": 521,
+    "runtimeOutcomes": {
+      "succeeded": 8,
+      "cancelled": 1,
+      "failed": 3
+    },
+    "usageAcceptedByRuntime": {
+      "inputTokens": 16332349,
+      "outputTokens": 870534,
+      "totalTokens": 17202883
+    },
+    "durationSumSeconds": 6460.292,
+    "multiGuiBatches": 0,
+    "cost": null
+  },
+  "batches": [
+    {
+      "batch": 1,
+      "totals": {
+        "samples": 6,
+        "realHttpRequests": 274,
+        "http200": 273,
+        "noHttpStatus": 1,
+        "effectiveEnabledLowRequests": 274,
+        "outputLimit16384Requests": 274,
+        "runtimeOutcomes": {
+          "succeeded": 3,
+          "cancelled": 1,
+          "failed": 2
+        },
+        "usageAcceptedByRuntime": {
+          "inputTokens": 8657707,
+          "outputTokens": 461322,
+          "totalTokens": 9119029
+        },
+        "durationSumSeconds": 3575.635,
+        "multiGuiBatches": 0,
+        "cost": null
+      }
+    },
+    {
+      "batch": 2,
+      "totals": {
+        "samples": 6,
+        "realHttpRequests": 247,
+        "http200": 247,
+        "noHttpStatus": 0,
+        "effectiveEnabledLowRequests": 247,
+        "outputLimit16384Requests": 247,
+        "runtimeOutcomes": {
+          "succeeded": 5,
+          "failed": 1
+        },
+        "usageAcceptedByRuntime": {
+          "inputTokens": 7674642,
+          "outputTokens": 409212,
+          "totalTokens": 8083854
+        },
+        "durationSumSeconds": 2884.657,
+        "multiGuiBatches": 0,
+        "cost": null
+      }
+    }
+  ],
+  "businessSummary": {
+    "requiredChecklistPassed": 5,
+    "deliveredWithFactualErrorOrCompletenessCaveat": 4,
+    "notDelivered": 3,
+    "method": "本轮独立事实复核，不是正式评分；Runtime终态、模型自报、必需内容及附带错误分列"
+  },
+  "officialTruth": {
+    "CP01": {
+      "source": "https://95598.csg.cn/ucs/sr/wt/priceInfoImg/1030600.jpg",
+      "page": "https://95598.csg.cn/#/gd/serviceInquire/LRLayer/elePriceInquire",
+      "operator": "中国南方电网；图注适用于广东电网佛山供电局",
+      "region": "广东省佛山市",
+      "table": "广东省佛山市居民、农业电价价目表",
+      "effectiveFrom": "2021-12-01",
+      "unit": "分/千瓦时（含税）",
+      "deliveredTierPrices": [
+        "59.886875",
+        "64.886875",
+        "89.886875"
+      ],
+      "boundary": "公开价目图，非当前账单；未核后续调价，不保证2026最新适用"
+    },
+    "CP02": {
+      "source": "https://www.bjgas.com/tag/86.html",
+      "annualThresholdsM3": [
+        350,
+        500
+      ],
+      "pricesYuanPerM3": [
+        "2.61",
+        "2.83",
+        "4.23"
+      ],
+      "nonResidentialAtResidentialPrice": "2.63",
+      "periodM3": 25,
+      "tier1M3": 10,
+      "tier2M3": 15,
+      "computedChargeYuan": "68.55",
+      "syntheticBillYuan": "69.00",
+      "billMinusComputedYuan": "0.45",
+      "boundary": "待人工核对、不建议支付；本地合成账单非官方真实账单"
+    },
+    "M02": {
+      "source": "https://www.pumch.cn/expert_chuzhen_week/%E5%86%85%E5%88%86%E6%B3%8C%E7%A7%91%E9%97%A8%E8%AF%8A/3/1.html?linkage=990478",
+      "dateRange": [
+        "2026-10-17",
+        "2026-10-23"
+      ],
+      "targetDate": "2026-10-21",
+      "weekday": "星期三",
+      "timeSlot": "上午",
+      "categoryPath": "普通门诊(东院)→内分泌科→内分泌科门诊",
+      "doctors": [
+        "王鸥",
+        "赵维纲",
+        "周頔",
+        "肖新华",
+        "陈适",
+        "张化冰",
+        "夏维波",
+        "卢琳",
+        "柴晓峰"
+      ],
+      "boundary": "公开出诊安排，不是实时余号／可约状态"
+    }
+  },
+  "rounds": [
+    {
+      "sampleId": "CP01-1",
+      "batch": 1,
+      "task": "CP01",
+      "round": 1,
+      "runId": "cp01-ark-low-1792178054583-dff4d154-c5ca-42ac-9e45-cff9f50ada0b",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "required_tariff_fields_verified_with_extra_completeness_caveat",
+      "businessNotes": [
+        "三档到户电价、表名、2021-12-01及单位正确；给出公开页路径与URL、账单账号/用户编号前提、非当期账单及未核后续调价限制。",
+        "额外声称未找到具体供电局；独立官网价目图注8实际上写广东电网佛山供电局。保留此完整性瑕疵，不包装所有附带说法均正确。"
+      ],
+      "durationSeconds": 949.124,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 96,
+      "httpStatuses": {
+        "200": 96
+      },
+      "effectiveEnabledLowRequests": 96,
+      "outputLimit16384Requests": 96,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 2721028,
+        "outputTokens": 114588,
+        "totalTokens": 2835616
+      },
+      "guiReceipts": {
+        "completed": 87,
+        "refused": 2
+      },
+      "waitActions": 2,
+      "multiGuiBatches": 0,
+      "argumentRejections": [
+        {
+          "sequence": 362,
+          "reason": "invalid arguments: scroll.y must be a finite number"
+        },
+        {
+          "sequence": 449,
+          "reason": "invalid arguments: scroll.y must be a finite number"
+        }
+      ],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/cp01-1-tariff.png"
+      ],
+      "cost": null
+    },
+    {
+      "sampleId": "CP01-2",
+      "batch": 1,
+      "task": "CP01",
+      "round": 2,
+      "runId": "cp01-ark-low-1792179011670-d34adc5c-b2d6-4eee-999a-de82a2f694b0",
+      "runtimeOutcome": "cancelled",
+      "businessAcceptance": "not_delivered_host_wall_deadline",
+      "businessNotes": [
+        "30分钟期限取消，无最终清单；模型走营商环境信息公开支路且记录无数据，未完成Goal所需的公开电价查询表。",
+        "第127请求已发起，宿主取消发生于等待响应头阶段；126次HTTP200＋1次run_cancelled，不能记127次全HTTP200或供应商180秒超时。"
+      ],
+      "durationSeconds": 1801.394,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 127,
+      "httpStatuses": {
+        "200": 126,
+        "null": 1
+      },
+      "effectiveEnabledLowRequests": 127,
+      "outputLimit16384Requests": 127,
+      "modelReportedStatus": null,
+      "usageAcceptedByRuntime": {
+        "inputTokens": 4650910,
+        "outputTokens": 256660,
+        "totalTokens": 4907570
+      },
+      "guiReceipts": {
+        "completed": 122,
+        "refused": 2
+      },
+      "waitActions": 0,
+      "multiGuiBatches": 0,
+      "argumentRejections": [
+        {
+          "sequence": 984,
+          "reason": "invalid arguments: scroll.direction must be up, down, left, or right"
+        }
+      ],
+      "providerErrors": [
+        {
+          "sequence": 1381,
+          "category": "cancelled",
+          "code": null,
+          "message": "host 30-minute deadline reached",
+          "retryable": null,
+          "retryMode": null
+        }
+      ],
+      "approvalsRequested": 1,
+      "approvalsResolved": 1,
+      "stopReason": "host 30-minute deadline reached",
+      "runCloseConfirmed": true,
+      "evidence": [],
+      "cost": null
+    },
+    {
+      "sampleId": "CP01-3",
+      "batch": 2,
+      "task": "CP01",
+      "round": 3,
+      "runId": "cp01-ark-low-1792194733417-cb764865-07f2-46a2-9250-539c4ba3eea6",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "passed_required_tariff_checklist",
+      "businessNotes": [
+        "三档到户价59.886875／64.886875／89.886875、表名、执行起点、单位、实际来源路径、查真实账单的前提及非当前账单／未核后续调价边界均已交付。",
+        "保留7次本地调用拒收（含风险审批边界与参数错误）、1次GUI拒绝及1次范围审批；Runtime成功不代表动作过程无错误。"
+      ],
+      "durationSeconds": 1627.376,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 112,
+      "httpStatuses": {
+        "200": 112
+      },
+      "effectiveEnabledLowRequests": 112,
+      "outputLimit16384Requests": 112,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 4080134,
+        "outputTokens": 229146,
+        "totalTokens": 4309280
+      },
+      "guiReceipts": {
+        "completed": 102,
+        "refused": 1
+      },
+      "waitActions": 1,
+      "multiGuiBatches": 0,
+      "argumentRejections": [
+        {
+          "sequence": 277,
+          "reason": "risk approval boundary: Risk semantics are unclear and no reviewer is configured. Trigger: The declared target or summary contains an undeclared high-impact signal.; return the protected Computer action as the only call in the next turn"
+        },
+        {
+          "sequence": 278,
+          "reason": "risk approval boundary: Risk semantics are unclear and no reviewer is configured. Trigger: The declared target or summary contains an undeclared high-impact signal.; return the protected Computer action as the only call in the next turn"
+        },
+        {
+          "sequence": 431,
+          "reason": "invalid arguments: scroll.y must be a finite number"
+        },
+        {
+          "sequence": 470,
+          "reason": "invalid arguments: scroll.y must be a finite number"
+        },
+        {
+          "sequence": 509,
+          "reason": "invalid arguments: memory_search contains unknown field observationId"
+        },
+        {
+          "sequence": 559,
+          "reason": "invalid GUI action: type.elementRef is only valid for multiline input; omit it for single-line typing"
+        },
+        {
+          "sequence": 912,
+          "reason": "invalid arguments: scroll.y must be a finite number"
+        }
+      ],
+      "providerErrors": [],
+      "approvalsRequested": 1,
+      "approvalsResolved": 1,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/cp01-3-tariff.png"
+      ],
+      "cost": null
+    },
+    {
+      "sampleId": "CP01-4",
+      "batch": 2,
+      "task": "CP01",
+      "round": 4,
+      "runId": "cp01-ark-low-1792196846150-181db52a-520e-47d7-81c7-8330d069367d",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "passed_required_tariff_checklist",
+      "businessNotes": [
+        "三档到户价、价目表要素、实际来源URL、账号／用户编号条件和非当前账单／未核后续调价限制已交付；不把电价列当到户电价。",
+        "保留1次task_create参数拒收、3次GUI拒绝，未放宽Guard或重放未知动作。"
+      ],
+      "durationSeconds": 457.464,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 74,
+      "httpStatuses": {
+        "200": 74
+      },
+      "effectiveEnabledLowRequests": 74,
+      "outputLimit16384Requests": 74,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 1789789,
+        "outputTokens": 54500,
+        "totalTokens": 1844289
+      },
+      "guiReceipts": {
+        "completed": 66,
+        "refused": 3
+      },
+      "waitActions": 3,
+      "multiGuiBatches": 0,
+      "argumentRejections": [
+        {
+          "sequence": 9,
+          "reason": "invalid arguments: task_create does not allow unknown field _harnessEffect"
+        }
+      ],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [],
+      "cost": null
+    },
+    {
+      "sampleId": "CP02-1",
+      "batch": 1,
+      "task": "CP02",
+      "round": 1,
+      "runId": "cp02-ark-low-1792180816219-fd08b078-ccb6-4979-83fa-508352c3f86f",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "passed_required_synthetic_bill_checks",
+      "businessNotes": [
+        "25立方米分10/15，应计68.55，账面高0.45，地址仅格式差异，待人工核对且不建议支付；附带非居民价2.63正确。"
+      ],
+      "durationSeconds": 66.503,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 5,
+      "httpStatuses": {
+        "200": 5
+      },
+      "effectiveEnabledLowRequests": 5,
+      "outputLimit16384Requests": 5,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 89844,
+        "outputTokens": 4145,
+        "totalTokens": 93989
+      },
+      "guiReceipts": {
+        "completed": 2
+      },
+      "waitActions": 0,
+      "multiGuiBatches": 0,
+      "argumentRejections": [],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [],
+      "cost": null
+    },
+    {
+      "sampleId": "CP02-2",
+      "batch": 1,
+      "task": "CP02",
+      "round": 2,
+      "runId": "cp02-ark-low-1792180883576-ae3244aa-9040-48a5-acd8-a03e1f34820f",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "core_passed_with_extra_fact_error",
+      "businessNotes": [
+        "核心金额、差额、地址和停止边界正确。",
+        "额外摘录执行居民价格的非居民户为2.83，真实官网和本轮实图为2.63；保留模型原答，不作为内容全对。"
+      ],
+      "durationSeconds": 31.602,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 2,
+      "httpStatuses": {
+        "200": 2
+      },
+      "effectiveEnabledLowRequests": 2,
+      "outputLimit16384Requests": 2,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 33310,
+        "outputTokens": 2616,
+        "totalTokens": 35926
+      },
+      "guiReceipts": {
+        "completed": 1
+      },
+      "waitActions": 0,
+      "multiGuiBatches": 0,
+      "argumentRejections": [],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/cp02-2-gas-rules.png"
+      ],
+      "cost": null
+    },
+    {
+      "sampleId": "CP02-3",
+      "batch": 2,
+      "task": "CP02",
+      "round": 3,
+      "runId": "cp02-ark-low-1792196752008-ed23de9a-6f46-46d7-9b3a-5fca54ae4728",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "passed_required_synthetic_bill_checks",
+      "businessNotes": [
+        "地址仅格式差异；25立方米分10／15，2.61／2.83，金额68.55元，账面多0.45元，待人工核对且不建议支付，合成声明完整；附带非居民价2.63正确。"
+      ],
+      "durationSeconds": 40.666,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 2,
+      "httpStatuses": {
+        "200": 2
+      },
+      "effectiveEnabledLowRequests": 2,
+      "outputLimit16384Requests": 2,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 33185,
+        "outputTokens": 3576,
+        "totalTokens": 36761
+      },
+      "guiReceipts": {
+        "completed": 1
+      },
+      "waitActions": 0,
+      "multiGuiBatches": 0,
+      "argumentRejections": [],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [],
+      "cost": null
+    },
+    {
+      "sampleId": "CP02-4",
+      "batch": 2,
+      "task": "CP02",
+      "round": 4,
+      "runId": "cp02-ark-low-1792196793008-4118b5d1-4f7f-4e41-8cb5-53366cde3987",
+      "runtimeOutcome": "failed",
+      "businessAcceptance": "passed_required_synthetic_bill_checks_runtime_failure_status",
+      "businessNotes": [
+        "必需核对清单完整正确；模型因金额不一致将terminate.status设failure，Runtime failed，不按运行终态否定已交付的业务核对。",
+        "一次普通文本非终态响应被拒收，经既有限反馈恢复后交付；非居民价2.63正确。"
+      ],
+      "durationSeconds": 37.783,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 3,
+      "httpStatuses": {
+        "200": 3
+      },
+      "effectiveEnabledLowRequests": 3,
+      "outputLimit16384Requests": 3,
+      "modelReportedStatus": "failure",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 33415,
+        "outputTokens": 3501,
+        "totalTokens": 36916
+      },
+      "guiReceipts": {
+        "completed": 1
+      },
+      "waitActions": 0,
+      "multiGuiBatches": 0,
+      "argumentRejections": [],
+      "providerErrors": [
+        {
+          "sequence": 18,
+          "category": "provider",
+          "code": "ARK_INVALID_TOOL_CALL",
+          "message": "Ark must use the exposed terminate control with explicit status success or failure and complete result text; plain text is not a terminal decision; no tool was executed; retrying model request 1/1",
+          "retryable": true,
+          "retryMode": "feedback"
+        }
+      ],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/cp02-4-gas-rules.png"
+      ],
+      "cost": null
+    },
+    {
+      "sampleId": "M02-1",
+      "batch": 1,
+      "task": "M02",
+      "round": 1,
+      "runId": "m02-ark-low-1792180993472-30f276a0-1d86-4bca-bc34-f4f2c082ce91",
+      "runtimeOutcome": "failed",
+      "businessAcceptance": "not_delivered_control_call_mixed_batch_rejected",
+      "businessNotes": [
+        "真实到达expert_chuzhen_week具体门诊表；seq216能看到目标周三上午9名医生、seq272有10.17—23表头。",
+        "第24次HTTP200响应同时返回task_update和terminate，ARK_INVALID_TOOL_CALL整组拒收；无已接纳的最终排班清单，Runtime通用恢复提示不当作模型交付。",
+        "24请求均enabled＋low／16384，不是HTTP失败、模型请求/动作预算或30分钟期限耗尽。"
+      ],
+      "durationSeconds": 360.232,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 24,
+      "httpStatuses": {
+        "200": 24
+      },
+      "effectiveEnabledLowRequests": 24,
+      "outputLimit16384Requests": 24,
+      "modelReportedStatus": null,
+      "usageAcceptedByRuntime": {
+        "inputTokens": 614418,
+        "outputTokens": 42403,
+        "totalTokens": 656821
+      },
+      "guiReceipts": {
+        "completed": 21,
+        "refused": 1
+      },
+      "waitActions": 1,
+      "multiGuiBatches": 0,
+      "argumentRejections": [],
+      "providerErrors": [
+        {
+          "sequence": 275,
+          "category": "provider",
+          "code": "ARK_INVALID_TOOL_CALL",
+          "message": "Ark control calls cannot be mixed with other tool calls",
+          "retryable": true,
+          "retryMode": "feedback"
+        }
+      ],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/m02-1-table-header.png",
+        "volcengine-ark-twelve-evidence-2026-10-17/m02-1-morning-cells.png"
+      ],
+      "cost": null
+    },
+    {
+      "sampleId": "M02-2",
+      "batch": 1,
+      "task": "M02",
+      "round": 2,
+      "runId": "m02-ark-low-1792181354502-a08973d6-b4b8-4cbb-8a40-cb6e3e7ebbb9",
+      "runtimeOutcome": "failed",
+      "businessAcceptance": "not_delivered_output_length_incomplete_response",
+      "businessNotes": [
+        "到达new_subject_week科室总表，seq216能看到内分泌科门诊行，但没有最终清单。",
+        "第20次HTTP200以finish_reason=length结束，completion_tokens=16384、reasoning_tokens=15980；hotkey参数JSON未完整，ARK_INCOMPLETE_RESPONSE，整条未执行。",
+        "保留1次Monitor重复动作拒收、1次范围审批；未提高额度、换模型或追加第三轮。"
+      ],
+      "durationSeconds": 366.78,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 20,
+      "httpStatuses": {
+        "200": 20
+      },
+      "effectiveEnabledLowRequests": 20,
+      "outputLimit16384Requests": 20,
+      "modelReportedStatus": null,
+      "usageAcceptedByRuntime": {
+        "inputTokens": 548197,
+        "outputTokens": 40910,
+        "totalTokens": 589107
+      },
+      "guiReceipts": {
+        "completed": 17
+      },
+      "waitActions": 1,
+      "multiGuiBatches": 0,
+      "argumentRejections": [
+        {
+          "sequence": 26,
+          "reason": "Monitor blocked a repeated GUI action after an unchanged observation; re-observe and re-localize the target before trying a different action"
+        }
+      ],
+      "providerErrors": [
+        {
+          "sequence": 219,
+          "category": "provider",
+          "code": "ARK_INCOMPLETE_RESPONSE",
+          "message": "Ark response ended with incomplete finish_reason: length; diagnostic={\"finish_reason\":\"length\",\"max_tokens\":16384,\"thinking\":\"low\",\"prompt_tokens\":44789,\"completion_tokens\":16384,\"total_tokens\":61173,\"reasoning_tokens\":15980}",
+          "retryable": false,
+          "retryMode": "feedback"
+        }
+      ],
+      "approvalsRequested": 1,
+      "approvalsResolved": 1,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [],
+      "cost": null
+    },
+    {
+      "sampleId": "M02-3",
+      "batch": 2,
+      "task": "M02",
+      "round": 3,
+      "runId": "m02-ark-low-1792197304518-3193e219-ed1a-46da-9d32-00453328c9c8",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "delivered_schedule_with_required_name_error",
+      "businessNotes": [
+        "已交付9人清单、日期范围10.17—23、10.21周三上午、普通门诊东院路径、来源URL与访问时间；不是实时余号／可约状态。",
+        "将官网目标格的“周頔”误写成“周颢”，其余8名匹配；医生姓名是必需字段，完整业务验收不通过。"
+      ],
+      "durationSeconds": 423.201,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 41,
+      "httpStatuses": {
+        "200": 41
+      },
+      "effectiveEnabledLowRequests": 41,
+      "outputLimit16384Requests": 41,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 1258819,
+        "outputTokens": 65049,
+        "totalTokens": 1323868
+      },
+      "guiReceipts": {
+        "completed": 37,
+        "refused": 2
+      },
+      "waitActions": 1,
+      "multiGuiBatches": 0,
+      "argumentRejections": [],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/m02-3-schedule.png"
+      ],
+      "cost": null
+    },
+    {
+      "sampleId": "M02-4",
+      "batch": 2,
+      "task": "M02",
+      "round": 4,
+      "runId": "m02-ark-low-1792197728231-524723bb-7063-4dc8-b6ab-df73d5132221",
+      "runtimeOutcome": "succeeded",
+      "businessAcceptance": "delivered_schedule_with_required_name_error",
+      "businessNotes": [
+        "已交付9人清单与所需日期、时段、路径、URL／访问时间及非实时余号边界。",
+        "将官网“周頔”误写成“周颉”，其余8名匹配；完整业务验收不通过，不能因Runtime succeeded当作全对。"
+      ],
+      "durationSeconds": 298.167,
+      "durationIncludesStartup": true,
+      "realHttpRequests": 15,
+      "httpStatuses": {
+        "200": 15
+      },
+      "effectiveEnabledLowRequests": 15,
+      "outputLimit16384Requests": 15,
+      "modelReportedStatus": "success",
+      "usageAcceptedByRuntime": {
+        "inputTokens": 479300,
+        "outputTokens": 53440,
+        "totalTokens": 532740
+      },
+      "guiReceipts": {
+        "completed": 13
+      },
+      "waitActions": 1,
+      "multiGuiBatches": 0,
+      "argumentRejections": [
+        {
+          "sequence": 159,
+          "reason": "invalid arguments: scroll.direction must be up, down, left, or right"
+        }
+      ],
+      "providerErrors": [],
+      "approvalsRequested": 0,
+      "approvalsResolved": 0,
+      "stopReason": null,
+      "runCloseConfirmed": true,
+      "evidence": [
+        "volcengine-ark-twelve-evidence-2026-10-17/m02-4-schedule.png"
+      ],
+      "cost": null
+    }
+  ],
+  "cleanup": {
+    "all12RunCloseConfirmed": true,
+    "batch1DedicatedDaemonStopExitCode": 0,
+    "batch2DedicatedDaemonStopExitCode": 0,
+    "batch2DaemonExited": true,
+    "windowsAndPowerShellKept": true,
+    "chromeConsoleKept": true
+  },
+  "privacy": {
+    "excluded": [
+      "API keys and private env",
+      "absolute local paths and window identifiers",
+      "raw trajectory and Provider exchanges",
+      "hidden reasoning and original request bodies",
+      "private desktop and terminal captures",
+      "local runner and memory files"
+    ],
+    "attachments": "Only cropped official web content; no browser chrome or local desktop markers"
+  },
+  "limitations": [
+    "HTTP200 only proves transport response, not valid tool use or business success.",
+    "8 succeeded Runtime outcomes are not 8 complete business passes.",
+    "Runtime accepted usage excludes rejected or truncated terminal response usage, so it is not a billing total.",
+    "All 12 have no multi-GUI Batch; no batching speedup claim.",
+    "Unknown cost is null, never zero.",
+    "No new product fixes, build/regression checks, installation, deployment or byte-level checks are part of this results publication."
+  ]
+}

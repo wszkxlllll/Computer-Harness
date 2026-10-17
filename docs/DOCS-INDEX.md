@@ -1,5 +1,9 @@
 # Computer Harness 文档索引
 
+## 火山方舟 CP01／CP02／M02 十二轮实跑（2026-10-17）
+
+[十二轮脱敏报告与官网裁图](./volcengine-ark-twelve-runs-2026-10-17.md)、[机器摘要](./volcengine-ark-twelve-runs-2026-10-17.json)：每题四轮，两批共12个Windows真实模型样本，显式low；5轮必需清单通过、4轮交付有事实错误／完整性瑕疵、3轮未交付，Runtime终态另列。521请求中520 HTTP200、1次随宿主期限取消；无多GUI Batch，不宣称稳定性或main新树实机验收。本次只提交结果、摘要及8份官网内容裁图，不更改产品源码／默认，不公开私有配置、原轨迹或隐藏推理。
+
 2026-10-16最新接续：PR35六张候选任务按现有Goal可在Windows执行（Mac操作说明查询不等于操作Mac应用），新增suite仍待runner接入。PR36已同步最新main、保留近期修复，真实Ark基础API17项检查通过；三GUI动作同轮Batch两次未过并保留原记录，不能冒充Batch通过。完整2480项Vitest通过，远端CI/合入状态见[总报告末节](./life-business-eight-task-results-2026-10-16.md)及[Ark独立验收](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。不替换Preview。
 
 ## 火山方舟 Agent Plan 接入与 Windows 运行记录（2026-10-16）
