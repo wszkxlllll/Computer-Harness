@@ -1,7 +1,8 @@
-# 六类生活业务任务：四组离线评测准备
+# 六类生活业务任务：四组评测入口
 
-Suite ID：`life-business-six-domain-20261018`  
-状态：离线准备候选；真实 GUI 预检待完成；尚未获准 live。  
+Suite ID：`life-business-six-domain-20261018`
+
+状态：首轮已授权实跑 16 次，另 8 组未运行，原记录保留。结果与本轮离线修复见[评测报告](../../docs/life-business-evaluation-2026-10-15.md)。新版本复测仍须用户明确授权，并重新冻结和预检，不能复用旧包。
 程序题面：[`tasks.json`](./tasks.json)。旧九题和 2026-10-16 新六题保持原样。
 
 本批包含 G01、T03、M02、S02、CM02、CP02。前 3 题的题面和评分标准沿用旧九题；S02、CM02 来自 2026-10-16 新六题；CP02 固定采用 `member-c-public-local-d01-20261011` 的 CP02 v1 开发候选及对应合成输入，不混用 v2。来源记录、任务检查项和独立评分答案都不写入 Goal。完整来源出处及原始文件 SHA-256 见 manifest 的 `provenance`；CP02 的独立预期值见 [`operator-only-answer-key.json`](./operator-only-answer-key.json)。
