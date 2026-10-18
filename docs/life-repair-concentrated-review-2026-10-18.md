@@ -4,9 +4,9 @@
 
 ## 发布 CI 追加：测试路径别名
 
-**GO（测试路径别名修正的增量审查）**，已有业务代码审查 GO 保持；发布 CI 最终验收仍待修正后的跨平台实际结果。根协调器报告 CI run 39105278735 四矩阵 Vitest 2563 项均通过，但 macOS/Windows 的 scripts/life-eval/supervision.test.mjs 第 167 行将生产 realpath 结果与词法路径直接比较，分别受 `/private/var`／`/var` 和 `runneradmin`／`RUNNER~1` 别名影响。
+**GO（测试路径别名修正的增量审查）**，已有业务代码审查 GO 保持。根协调器随后核验 [修正后 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105768682)，head `a38a815` 的四矩阵和 ci-required 全部通过；不是审查者本机执行数。首轮 CI run 39105278735 四矩阵 Vitest 2563 项均通过，但 macOS/Windows 的 scripts/life-eval/supervision.test.mjs 第 167 行将生产 realpath 结果与词法路径直接比较，分别受 `/private/var`／`/var` 和 `runneradmin`／`RUNNER~1` 别名影响。
 
-本次只审该测试文件的最小 diff，最终三项期望均已核对：trajectoryPath 期望 await realpath、latestScreenshotPath 期望 await realpath(fixture.screenshotPath)，以及“不是文档交付目录”的 negative 期望 await realpath(fixture.outputAttemptDir)。保留严格相等及不等比较，比较双方使用相同路径语义；生产代码及 containment 未变。本审查曾指出最初只修 trajectory 会遗漏下一截图断言，现已补齐。本机独立 supervision 测试此前 **8 passed、0 failed**；作者报告最终三项修正后重跑同样 8/8 通过。本机路径未复现 CI 别名，不能替代修正后的 macOS/Windows CI 验收。
+本次只审该测试文件的最小 diff，最终三项期望均已核对：trajectoryPath 期望 await realpath、latestScreenshotPath 期望 await realpath(fixture.screenshotPath)，以及“不是文档交付目录”的 negative 期望 await realpath(fixture.outputAttemptDir)。保留严格相等及不等比较，比较双方使用相同路径语义；生产代码及 containment 未变。本审查曾指出最初只修 trajectory 会遗漏下一截图断言，现已补齐。本机独立 supervision 测试此前 **8 passed、0 failed**；作者报告最终三项修正后重跑同样 8/8 通过。本机路径未复现 CI 别名，最终 Mac/Windows 收口依据为顶部实际 CI 结果，不用本机结果冒充。
 
 ## 最终追加：审批朗读已有计划
 

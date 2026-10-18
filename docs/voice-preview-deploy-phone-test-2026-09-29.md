@@ -24,7 +24,7 @@
 - 公网 HTML SHA-256：`6FCA0E30C561D83CA2C8AF13ACAB69C974BC96BA5F9C0E39BF7CFAB65E07C724`。
 - 新 JS：`index-DJu8rd0w.js`，SHA-256 `D21296B691137737FFE8F2A20C27AB9D7547BE9974687C22276975C1B0A1F7E3`；本地、服务器和公网一致。
 - 新版 health、主页、JS 均 HTTP 200；匿名任务 API 401。本机 `/connect` 200，Host 到 8443 的连接 established；旧正式入口 health 仍为 200。
-- [首轮 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105278735)四矩阵应用测试 2563 项均通过，但 Mac/Windows 一条评测脚本路径断言失败：realpath 与同文件词法别名比较不一致。仅修测试的轨迹、截图及交付目录规范路径预期，没有改生产 containment；补齐截图断言前的一次 CI 已主动取消。[修正后 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105768682)验证代码 head `a38a815`，当前等待结果，不预写全绿。部署功能源码仍为 `480126a`；后续只有测试和说明变更，不需要重复切换服务。
+- [首轮 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105278735)四矩阵应用测试 2563 项均通过，但 Mac/Windows 一条评测脚本路径断言失败：realpath 与同文件词法别名比较不一致。仅修测试的轨迹、截图及交付目录规范路径预期，没有改生产 containment；补齐截图断言前的一次 CI 已主动取消。[修正后 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105768682)验证代码 head `a38a815`，四矩阵及 `ci-required` **全部通过**。部署功能源码仍为 `480126a`；后续只有测试和说明变更，不需要重复切换服务。CI 不代替真实桌面任务或手机听感验收。
 
 本机 Host 已从本轮修复工作区运行，不是旧 Preview 工作区。复用已运行并核验的 Windows CUA 0.22.2 候选：源码 `7852ab1983b60c0ce581b8736c9da13eaf04640a`、二进制 SHA-256 `400AB8670980ECD461F304FDC7E7A9D8A27F53585EA629B81EE1B7C260BC3095`，配套 `foreground-caret-v1` 输入策略。未重新编译或替换系统级 CUA，未修改系统环境变量。当前 Preview 与评测使用同一物理桌面及候选 daemon，不得同时运行任务。
 
