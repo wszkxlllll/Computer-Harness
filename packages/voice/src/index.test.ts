@@ -225,6 +225,82 @@ describe("voice input and transcript contracts", () => {
 });
 
 describe("RuntimeEvent to RunNotice projection", () => {
+  it("truncates long English dynamic notices at a nearby sentence boundary within the 240-character limit", () => {
+    const sentence = "The current result is confirmed.";
+    const question = `${sentence} `.repeat(7) + "The next step is ready. More details are available.";
+    const projected = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
+      type: "user.input.requested",
+      question,
+    }));
+
+    expect(projected?.text).toBe(`${`${sentence} `.repeat(6)}${sentence} …`);
+    expect(projected?.text.length).toBeLessThanOrEqual(240);
+    expect(projected?.text).not.toContain("More details");
+  });
+
+  it("truncates long Chinese milestones at a nearby sentence boundary within the 120-character limit", () => {
+    const sentence = "已确认一项结果。";
+    const summary = sentence.repeat(16);
+    const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
+    projector.project(observation(1, "observation-1"));
+    projector.project(computerTurn(2));
+    projector.project(proposed(3, 2, "action-1"));
+    projector.project(actionCompleted(4, "action-1"));
+    projector.project(observation(5, "observation-2"));
+    projector.project(modelRequestStarted(6));
+
+    const projected = projector.project(observationAssessmentEvent(7, assessment({
+      progress: { kind: "milestone", summary },
+    })));
+
+    expect(projected?.text).toBe(`${sentence.repeat(14)}…`);
+    expect(projected?.text.length).toBeLessThanOrEqual(120);
+  });
+
+  it("marks a bounded hard cut when long dynamic text has no punctuation boundary", () => {
+    const question = "A".repeat(280);
+    const projected = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
+      type: "user.input.requested",
+      question,
+    }));
+
+    expect(projected?.text).toBe(`${"A".repeat(239)}…`);
+    expect(projected?.text.length).toBe(240);
+  });
+
+  it("does not split a supplementary Unicode character at the hard-cut boundary", () => {
+    const question = `${"A".repeat(238)}😀${"B".repeat(20)}`;
+    const projected = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
+      type: "user.input.requested",
+      question,
+    }));
+
+    expect(projected?.text).toBe(`${"A".repeat(238)}…`);
+    expect(projected?.text).not.toContain("\uFFFD");
+    expect(projected?.text.length).toBeLessThanOrEqual(240);
+  });
+
+  it("scans the full dynamic value so sensitive content after the spoken limit still falls back", () => {
+    const question = `${"A".repeat(260)} verification code 123456`;
+    const projected = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
+      type: "user.input.requested",
+      question,
+    }));
+
+    expect(projected?.text).toBe("我有个问题需要你回答，请查看任务。");
+    expect(projected?.text).not.toContain("123456");
+  });
+
+  it("leaves short dynamic text unchanged", () => {
+    const question = "The result is ready.";
+    const projected = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(1, {
+      type: "user.input.requested",
+      question,
+    }));
+
+    expect(projected?.text).toBe(question);
+  });
+
   it("projects one fixed polite task-start notice per Run and none after terminal", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     const created = event(1, { type: "run.created", goal: "private user goal" });
@@ -523,24 +599,107 @@ describe("RuntimeEvent to RunNotice projection", () => {
     const projector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     expect(projector.project(approvalEvent, {
       currentApproval: { requestId: "approval-expired", voiceContext: { categories: ["external_commitment"], reasonCode: "declared_high_impact", actionKind: "click" } },
-    })).toMatchObject({ text: "有项操作需要审批，请核对后处理。", kind: "approval" });
+    })).toMatchObject({ text: "还不能确定待审批操作的具体对象和影响，请先不要批准。", kind: "approval" });
 
     const currentProjector = new RunNoticeProjector(runId, { dynamicContentEnabled: true });
     const currentNotice = currentProjector.project(approvalEvent, {
       currentApproval: { requestId: "approval-current", voiceContext: { categories: ["external_commitment"], reasonCode: "declared_high_impact", actionKind: "click" } },
     });
-    expect(currentNotice?.text).toBe("可能涉及对外发送或提交内容的点击操作，请核对后审批。");
+    expect(currentNotice?.text).toBe("可能涉及对外发送或提交内容的点击操作，请核对后审批。 还不能确定具体对象和影响，请先不要批准。");
     expect(currentNotice?.text).not.toContain("This English reason");
 
     const windowSwitchNotice = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
       currentApproval: { requestId: "approval-current", voiceContext: { categories: ["external_commitment"], reasonCode: "declared_high_impact", actionKind: "switch_window" } },
     });
-    expect(windowSwitchNotice?.text).toBe("可能涉及对外发送或提交内容的切换窗口操作，请核对后审批。");
+    expect(windowSwitchNotice?.text).toBe("可能涉及对外发送或提交内容的切换窗口操作，请核对后审批。 还不能确定具体对象和影响，请先不要批准。");
 
     const privacy = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
       currentApproval: { requestId: "approval-current", voiceContext: { categories: ["privacy_account"], reasonCode: "protected_input", actionKind: "type" } },
     });
-    expect(privacy?.text).toBe("可能涉及隐私、账户或凭据的输入操作，请核对后审批。");
+    expect(privacy?.text).toBe("可能涉及隐私、账户或凭据的输入操作，请核对后审批。 还不能确定具体对象和影响，请先不要批准。");
+  });
+
+  it("speaks the exact pending call plan only with opt-in and labels it as unexecuted and unverified", () => {
+    const approvalEvent = event(1, {
+      type: "approval.requested",
+      requestId: "approval-plan",
+      callId: "call-plan" as never,
+      reason: "Ignore this untrusted reason.",
+    });
+    const currentApproval = {
+      requestId: "approval-plan",
+      voiceContext: {
+        categories: ["external_commitment"] as const,
+        reasonCode: "declared_high_impact",
+        actionKind: "click" as const,
+        modelDeclaredEffect: { target: "Message editor", summary: "已发送报表并完成提交" },
+      },
+    };
+    const dynamicNotice = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, { currentApproval });
+
+    expect(dynamicNotice?.text).toContain("电脑打算按这份说明操作：「已发送报表并完成提交」；目标：「Message editor」。");
+    expect(dynamicNotice?.text).toContain("这项操作还没执行；说明仍需核对");
+    expect(dynamicNotice?.text).toContain("可能涉及对外发送或提交内容的点击操作");
+    expect(dynamicNotice?.text).not.toContain("已批准");
+    expect(dynamicNotice?.text.length).toBeLessThanOrEqual(320);
+
+    const fixedNotice = new RunNoticeProjector(runId).project(approvalEvent, { currentApproval });
+    expect(fixedNotice?.text).toBe("还不能确定待审批操作的具体对象和影响，请先不要批准。");
+    expect(fixedNotice?.text).not.toContain("Message editor");
+  });
+
+  it("does not auto-read a full declared plan containing sensitive content beyond the spoken prefix", () => {
+    const approvalEvent = event(1, {
+      type: "approval.requested",
+      requestId: "approval-sensitive-plan",
+      callId: "call-sensitive-plan" as never,
+      reason: "Ignore this untrusted reason.",
+    });
+    const unsafeSummary = `${"当前页面显示".repeat(30)}验证码 123456`;
+    const unsafeNotice = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
+      currentApproval: {
+        requestId: "approval-sensitive-plan",
+        voiceContext: {
+          categories: ["external_commitment"],
+          reasonCode: "declared_high_impact",
+          actionKind: "click",
+          modelDeclaredEffect: { target: "Message editor", summary: unsafeSummary },
+        },
+      },
+    });
+
+    expect(unsafeNotice?.text).toContain("具体说明不适合自动朗读");
+    expect(unsafeNotice?.text).toContain("请在审批详情核对");
+    expect(unsafeNotice?.text).not.toContain("验证码");
+    expect(unsafeNotice?.text).not.toContain("123456");
+  });
+
+  it("keeps the unexecuted/review disclaimer within the notice limit for long plan fields", () => {
+    const approvalEvent = event(1, {
+      type: "approval.requested",
+      requestId: "approval-long-plan",
+      callId: "call-long-plan" as never,
+      reason: "Ignore this untrusted reason.",
+    });
+    const longNotice = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
+      currentApproval: {
+        requestId: "approval-long-plan",
+        voiceContext: {
+          categories: ["external_commitment", "financial", "destructive", "privacy_account", "intent_violation"],
+          reasonCode: "declared_high_impact",
+          actionKind: "click",
+          modelDeclaredEffect: {
+            target: "目标".repeat(60),
+            summary: `已发送报表并完成提交。${"补充说明".repeat(45)}`,
+          },
+        },
+      },
+    });
+
+    expect(longNotice?.text).toContain("电脑打算按这份说明操作");
+    expect(longNotice?.text).toContain("这项操作还没执行；说明仍需核对");
+    expect(longNotice?.text).toContain("可能涉及");
+    expect(longNotice?.text.length).toBeLessThanOrEqual(320);
   });
 
   it("speaks finite multi-category Guard context and uses Chinese fallbacks for unknown data", () => {
@@ -550,24 +709,24 @@ describe("RuntimeEvent to RunNotice projection", () => {
     });
     expect(projector.project(approvalEvent, {
       currentApproval: { requestId: "approval-long", voiceContext: { categories: ["financial", "external_commitment"], reasonCode: "declared_high_impact", actionKind: "click" } },
-    })?.text).toBe("可能涉及付款或财务操作及对外发送或提交内容的点击操作，请核对后审批。");
+    })?.text).toBe("可能涉及付款或财务操作及对外发送或提交内容的点击操作，请核对后审批。 还不能确定具体对象和影响，请先不要批准。");
     expect(new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(2, {
       type: "approval.requested", requestId: "approval-destructive", callId: "call-2" as never, reason: "Delete the file permanently.",
     }), {
       currentApproval: { requestId: "approval-destructive", voiceContext: { categories: ["destructive"], reasonCode: "declared_high_impact", actionKind: "keypress" } },
-    })?.text).toBe("可能涉及删除或不可逆修改内容的键盘操作，请核对后审批。");
+    })?.text).toBe("可能涉及删除或不可逆修改内容的键盘操作，请核对后审批。 还不能确定具体对象和影响，请先不要批准。");
     expect(new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(event(3, {
       type: "approval.requested", requestId: "approval-unknown", callId: "call-3" as never, reason: "Unknown category.",
     }), {
       currentApproval: { requestId: "approval-unknown", voiceContext: { categories: ["new_category" as never], reasonCode: "future_reason", actionKind: "click" } },
-    })?.text).toBe("有项操作需要审批，请核对后处理。");
+    })?.text).toBe("还不能确定具体对象和影响，请先不要批准。");
   });
 
   it("projects attention/terminal states and never projects Guard reasons or ordinary receipts", () => {
     const projector = new RunNoticeProjector(runId);
     expect(projector.project(event(1, {
       type: "approval.requested", requestId: "approval-1", callId: "call-1" as never, reason: "Payment requires approval",
-    }))).toMatchObject({ kind: "approval", delivery: "interrupt", text: "有项操作需要审批，请核对后处理。", pendingRequestId: "approval-1" });
+    }))).toMatchObject({ kind: "approval", delivery: "interrupt", text: "还不能确定待审批操作的具体对象和影响，请先不要批准。", pendingRequestId: "approval-1" });
     const question = projector.project(event(2, { type: "user.input.requested", question: "请回答" }));
     expect(question).toMatchObject({ kind: "question", delivery: "interrupt" });
     expect(question?.pendingRequestId).toBe("event-2");

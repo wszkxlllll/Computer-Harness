@@ -7,6 +7,17 @@ import { EventTimeline } from "./EventTimeline";
 afterEach(() => cleanup());
 
 describe("mobile event timeline", () => {
+  it("keeps recent concrete run notices available to read again", () => {
+    render(<EventTimeline events={[
+      { runId: "run", sequence: 1, type: "run.notice", data: { type: "run.notice", text: "已核对本次操作，等待你确认是否继续。" } },
+      { runId: "run", sequence: 2, type: "run.notice", data: { type: "run.notice", text: "任务结果已由电脑确认并显示在结果区。" } },
+    ]} />);
+
+    expect(screen.getByText("已核对本次操作，等待你确认是否继续。")).toBeDefined();
+    expect(screen.getByText("任务结果已由电脑确认并显示在结果区。")).toBeDefined();
+    expect(document.querySelectorAll(".event-timeline li")).toHaveLength(2);
+  });
+
   it("shows model, action, and monitor progress events", () => {
     render(<EventTimeline events={[
       { runId: "run", sequence: 1, type: "run.progress", data: { phase: "model", status: "started" } },

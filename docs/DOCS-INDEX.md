@@ -1,5 +1,13 @@
 # Computer Harness 文档索引
 
+2026-10-18 离线整改收口：[六类评测报告顶部修复与无障碍复查](./life-business-evaluation-2026-10-15.md)、[集中审查](./life-repair-concentrated-review-2026-10-18.md)。Monitor、限流、受管浏览器桌面候选、Memory、指标及完整语句/审批计划朗读已修，Sol 增量复审 GO；最终 Vitest 2563/2563、类型与 Web 构建通过。Node 另有 10 项本机 symlink 权限失败，未冒充通过。未调用付费 API 或重跑业务任务，未切换 Preview；iPhone VoiceOver 及业务效果待实机验收。
+
+2026-10-18修复后实跑收敛：[六类四组终态、模块效果与下一步](./life-business-evaluation-2026-10-15.md)、[完整六题Goal](../eval/life-business-six-domain-20261018/README.md)。24包中16次实跑全部结束、8组按用户同问题跳题/限流策略未运行；旧5次pilot独立保留。Runtime为9成功、5取消、2失败，不等于业务9成功。已验证4条真实纠正消费，失败/部分完成/未运行均保留，未替换Preview或commit/push。
+
+执行只用用户Harness，Luna读取保存的截图和轨迹；Sol独立核终态、指标及冻结指纹。595次主模型请求、551个GUI动作；全桌面实测未提供UIA/DOM候选。下一轮优先处理grounding组合边界、重复导航/来源适用范围、429脱敏诊断和统计去重，不直接把本批写成Plan/Memory有效或跨APP成功。历史预检和离线接线过程保留在同一报告中，以下按当时时点记录。
+
+2026-10-17队友实跑状态：[PR37只读同步](./life-business-eight-task-results-2026-10-16.md#2026-10-17队友新增实跑pr37状态同步只读)。队友用方舟low在其Windows候选跑CP01/CP02/M02各4遍，共12遍；据其复核5遍清单通过、4遍有瑕疵、3遍未交付。不是本机新增六题、不是Plan/Memory开关对照，也不是最新main实机验收。本次仅读提交及报告，未合并PR37、未改本机准备配置或Preview。
+
 2026-10-16新六题启动准备：购物售后/家庭通信日程通过同一life-eval脚本显式选择独立suite，默认方舟`deepseek-v4.1-flash`、Batch关闭，B00/P10/M01/PM11控制Plan/Memory。各题从manifest指定官网开始，四题答复、两题WPS；不需登录Apple/iCloud。新key仅live读取指定私有变量，离线不读env，原九题及历史记录不改。见[六题与对照操作说明](./life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)。当前不调用API/GUI、不启动评测，实机预检及首次监督留今晚授权后完成。
 
 2026-10-16 PR36接续完成：已合main `282ac6c`，[PR CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38897851567)与[main CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38898351528)均全绿，真实Ark基础API17项及完整2480项Vitest通过。三GUI动作同轮Batch两次未过并保留原记录；不替换Preview。PR35六题Windows适用性见[总报告末节](./life-business-eight-task-results-2026-10-16.md)，新suite脚本接入状态以上一段本轮记录为准；[Ark独立验收](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)保留协议通过与业务未测的区别。

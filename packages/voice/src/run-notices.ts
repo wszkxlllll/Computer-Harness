@@ -37,11 +37,16 @@ export interface ApprovalNoticeVoiceContext {
   readonly categories: readonly RiskCategory[];
   readonly reasonCode: string;
   readonly actionKind?: ActionGuardActionSummary["kind"];
+  readonly modelDeclaredEffect?: {
+    readonly target: string;
+    readonly summary: string;
+  };
 }
 
 const MAX_NOTICE_CHARS = 320;
 const MAX_DYNAMIC_TEXT_CHARS = 240;
 const MAX_SPOKEN_MILESTONE_CHARS = 120;
+const MAX_APPROVAL_PLAN_CHARS = 220;
 const SAFE_MILESTONE_FALLBACK = "已确认一个阶段结果。";
 const SAFE_BLOCKER_FALLBACK = "当前页面显示有事项需要处理。";
 const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
@@ -234,7 +239,7 @@ export class RunNoticeProjector {
     return this.notice(
       event,
       "approval",
-      dynamic ? voiceText : "有项操作需要审批，请核对后处理。",
+      dynamic ? voiceText : "还不能确定待审批操作的具体对象和影响，请先不要批准。",
       "interrupt",
       `approval:${event.requestId}`,
       dynamic ? "dynamic" : "fixed",
@@ -288,7 +293,55 @@ function safeDynamicText(value: string | undefined, maxChars = MAX_NOTICE_CHARS)
   // cannot evade filtering by falling outside the spoken prefix.
   const text = value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/gu, " ").trim();
   if (text.length === 0 || isPotentiallySensitive(text)) return undefined;
-  return text.slice(0, Math.min(maxChars, MAX_DYNAMIC_TEXT_CHARS));
+  return truncateDynamicNotice(text, Math.max(1, Math.floor(Math.min(maxChars, MAX_DYNAMIC_TEXT_CHARS))));
+}
+
+function truncateDynamicNotice(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+
+  // Leave room for an explicit omission mark. If no phrase boundary fits,
+  // keep the bounded prefix rather than repeatedly backing up to an empty string.
+  const boundary = lastNoticeBoundary(text, Math.max(1, maxChars - 2));
+  if (boundary !== undefined) {
+    const prefix = text.slice(0, boundary).trimEnd();
+    const omissionMark = /[.!?,;:]$/u.test(prefix) ? " …" : "…";
+    if (prefix && prefix.length + omissionMark.length <= maxChars) return `${prefix}${omissionMark}`;
+  }
+
+  const boundedPrefix = sliceWithoutSplittingSurrogatePair(text, maxChars - 1);
+  const prefix = boundedPrefix.trimEnd();
+  return `${prefix || boundedPrefix}…`;
+}
+
+function sliceWithoutSplittingSurrogatePair(text: string, maxEnd: number): string {
+  let end = Math.min(maxEnd, text.length);
+  if (end > 0 && end < text.length) {
+    const previous = text.charCodeAt(end - 1);
+    const next = text.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+function lastNoticeBoundary(text: string, maxEnd: number): number | undefined {
+  let boundary: number | undefined;
+  for (let index = 0; index < maxEnd; index += 1) {
+    const character = text[index]!;
+    if (isSentenceBoundary(text, index, character) || ",，;；:：、—–".includes(character)) {
+      boundary = index + 1;
+    }
+  }
+  return boundary;
+}
+
+function isSentenceBoundary(text: string, index: number, character: string): boolean {
+  if ("。！？".includes(character)) return true;
+  if (character !== "." && character !== "!" && character !== "?") return false;
+  if (character === "." && /\d/u.test(text[index - 1] ?? "") && /\d/u.test(text[index + 1] ?? "")) return false;
+
+  let next = index + 1;
+  while (/["'”’»)]/u.test(text[next] ?? "")) next += 1;
+  return next >= text.length || /\s/u.test(text[next] ?? "");
 }
 
 /** Known-pattern filter only. It is not a semantic privacy guarantee. */
@@ -356,6 +409,20 @@ function modelRequestFailureVoiceText(category: string): string {
 
 function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): string | undefined {
   if (context === undefined) return undefined;
+  const riskText = approvalRiskVoiceText(context);
+  const plan = approvalPlanVoiceText(context.modelDeclaredEffect);
+  if (plan.kind === "sensitive") {
+    const notAutoRead = "具体说明不适合自动朗读，请在审批详情核对，或请可信任的人协助；核对前请不要批准。";
+    return riskText === undefined ? notAutoRead : `${riskText} ${notAutoRead}`;
+  }
+  if (plan.kind === "unavailable") {
+    const insufficientInformation = "还不能确定具体对象和影响，请先不要批准。";
+    return riskText === undefined ? insufficientInformation : `${riskText} ${insufficientInformation}`;
+  }
+  return riskText === undefined ? plan.text : `${plan.text} ${riskText}`;
+}
+
+function approvalRiskVoiceText(context: ApprovalNoticeVoiceContext): string | undefined {
   const categoryLabels: Readonly<Record<RiskCategory, string>> = {
     external_commitment: "对外发送或提交内容",
     financial: "付款或财务操作",
@@ -393,6 +460,29 @@ function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): str
     ? actionLabels[context.actionKind]
     : "电脑操作";
   return `可能涉及${riskText}的${actionText}，请核对后审批。`;
+}
+
+function approvalPlanVoiceText(
+  declaredEffect: ApprovalNoticeVoiceContext["modelDeclaredEffect"],
+): { readonly kind: "ready"; readonly text: string } | { readonly kind: "sensitive" } | { readonly kind: "unavailable" } {
+  if (declaredEffect === undefined || typeof declaredEffect.target !== "string" || typeof declaredEffect.summary !== "string") {
+    return { kind: "unavailable" };
+  }
+
+  // Scan both full model-authored fields together and individually before any
+  // bounded copy so a sensitive value split across the fields cannot be spoken.
+  const fullPlan = `${declaredEffect.target}\n${declaredEffect.summary}`;
+  const normalizedFullPlan = fullPlan.replace(CONTROL_CHARACTERS, " ").replace(/\s+/gu, " ").trim();
+  if (isPotentiallySensitive(normalizedFullPlan)) return { kind: "sensitive" };
+  if (safeDynamicText(fullPlan) === undefined) return { kind: "unavailable" };
+  const target = safeDynamicText(declaredEffect.target, 64);
+  const summary = safeDynamicText(declaredEffect.summary, 96);
+  if (target === undefined || summary === undefined) return { kind: "unavailable" };
+  const text = safeDynamicText(
+    `电脑打算按这份说明操作：「${summary}」；目标：「${target}」。这项操作还没执行；说明仍需核对，请勿仅凭说明批准。`,
+    MAX_APPROVAL_PLAN_CHARS,
+  );
+  return text === undefined ? { kind: "unavailable" } : { kind: "ready", text };
 }
 
 function isObservationAssessment(value: unknown): value is ObservationAssessment {

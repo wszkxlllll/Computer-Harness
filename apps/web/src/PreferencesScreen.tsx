@@ -395,6 +395,7 @@ export function PreferencesScreen({ voiceCapabilities }: { voiceCapabilities?: V
                 disabled={!voiceOutputAvailable}
                 onChange={changeRunNoticeSpeech}
               />
+              <p className="field-hint">关闭此开关只停止应用播报；页面文字通知仍可由系统屏幕阅读器读取。浏览器语音合成可能与屏幕阅读器语音重叠，请按需关闭其中一方。</p>
               {!voiceOutputAvailable && <p className="field-hint">当前环境不支持语音播报，任务通知仍会显示为文字。</p>}
             </fieldset>
             <div className="preference-language-row">

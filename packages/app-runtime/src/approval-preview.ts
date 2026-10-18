@@ -8,6 +8,10 @@ export interface ApprovalVoiceContext {
   readonly categories: readonly RiskCategory[];
   readonly reasonCode: string;
   readonly actionKind?: ActionGuardActionSummary["kind"];
+  readonly modelDeclaredEffect?: {
+    readonly target: string;
+    readonly summary: string;
+  };
 }
 
 /** Build private speech context from the Guard record for this exact approval call. */
@@ -22,6 +26,20 @@ export function projectApprovalVoiceContext(
   const approvalEvent = events[approvalIndex];
   if (approvalEvent?.type !== "approval.requested") return undefined;
 
+  let receivedCall: Extract<RuntimeEvent, { type: "tool.call.received" }> | undefined;
+  for (let index = approvalIndex - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type === "tool.call.received" && event.call.id === callId) {
+      receivedCall = event;
+      break;
+    }
+  }
+  const declaredEffect = receivedCall?.call.declaredEffect;
+  const modelDeclaredEffect = typeof declaredEffect?.target === "string" && declaredEffect.target.trim().length > 0
+    && typeof declaredEffect.summary === "string" && declaredEffect.summary.trim().length > 0
+    ? { target: declaredEffect.target, summary: declaredEffect.summary }
+    : undefined;
+
   for (let index = approvalIndex - 1; index >= 0; index -= 1) {
     const event = events[index]!;
     if (event.type !== "action.guard.evaluated" || event.decision !== "require_approval"
@@ -35,6 +53,7 @@ export function projectApprovalVoiceContext(
       categories: [...event.categories],
       reasonCode: event.reasonCode,
       ...(action === undefined ? {} : { actionKind: action.kind }),
+      ...(modelDeclaredEffect === undefined ? {} : { modelDeclaredEffect }),
     };
   }
   return undefined;
