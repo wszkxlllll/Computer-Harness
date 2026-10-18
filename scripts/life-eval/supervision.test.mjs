@@ -165,8 +165,8 @@ test("inspect/read uses the frozen package runtime-output RunId and never the do
   assert.equal(inspected.latestObservation.id, observationId);
   const read = await readSupervision(fixture.packageDir, { afterSequence: 1, limit: 10 });
   assert.equal(read.trajectoryPath, await realpath(join(fixture.outputBase, runId, "trajectory.jsonl")));
-  assert.equal(read.latestScreenshotPath, fixture.screenshotPath);
-  assert.notEqual(read.latestScreenshotPath, fixture.outputAttemptDir);
+  assert.equal(read.latestScreenshotPath, await realpath(fixture.screenshotPath));
+  assert.notEqual(read.latestScreenshotPath, await realpath(fixture.outputAttemptDir));
   assert.equal(read.events.some((event) => event.type === "observation.created"), true);
   assert.equal(read.events.some((event) => event.type === "model.request.started"), true);
 
