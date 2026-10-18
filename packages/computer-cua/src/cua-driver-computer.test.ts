@@ -16,6 +16,7 @@ import { readRuntimeEvents, reduceRuntimeEvents } from "../../trajectory/src/ind
 import { reopenSavedDocumentTool } from "../../runtime/src/computer-tools.js";
 import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
 import { captureWindow, captureWindowWithRetry as productionCaptureWindowWithRetry, isLocalWindowsNamedPipeSocket, listWindowInventory, listWindowTargets } from "./window-contract.js";
+import type { WindowRelationshipProbe } from "./window-relationship-probe.js";
 
 // Historical native fixtures model Windows. Make their contract independent
 // of the machine running Vitest; macOS contract cases explicitly opt in.
@@ -838,6 +839,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let abortAfterCapture: AbortController | undefined;
   let listWindowsCallCount = 0;
   let windowInventoryComplete = true;
+  let omitWindowInventoryCompleteness = false;
   let windowInventoryTruncated = false;
   let missingAfterListCall: number | undefined;
   let failedListWindowsCall: number | undefined;
@@ -938,7 +940,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         if (thirdExtraWindowOnListCall?.call === listWindowsCallCount) thirdExtraWindow = thirdExtraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
         const response = {
-          complete: windowInventoryComplete,
+          ...(omitWindowInventoryCompleteness ? {} : { complete: windowInventoryComplete }),
           truncated: windowInventoryTruncated,
           ...(foregroundTarget === undefined ? {} : {
             foreground_pid: foregroundTarget.pid,
@@ -1109,6 +1111,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     abortAfterNextCapture(controller: AbortController) { abortAfterCapture = controller; },
     setMissingAfterListCall(value: number | undefined) { missingAfterListCall = value; },
     setWindowInventoryComplete(value: boolean) { windowInventoryComplete = value; },
+    omitWindowInventoryCompleteness(value: boolean) { omitWindowInventoryCompleteness = value; },
     setWindowInventoryTruncated(value: boolean) { windowInventoryTruncated = value; },
     setExtraWindow(value: typeof extraWindow) { extraWindow = value; },
     setWindowGroundingState(windowId: number, value: Record<string, unknown>) { groundingStateByWindowId.set(windowId, value); },
@@ -2990,6 +2993,309 @@ describe("CuaDriverComputer", () => {
         groundingRef: candidate!.elementRef,
         point: candidatePoint,
       }, signal)).resolves.toMatchObject({ status: "refused", driverCode: "STALE_OBSERVATION" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a dedicated desktop grounding probe without widening the ordinary window registry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-dedicated-probe-"));
+    const bounds = { x: 100, y: 120, width: 960, height: 680 };
+    const fake = windowDriver(bounds, { width: 960, height: 680 });
+    fake.setDesktopImageSize(1920, 1080);
+    fake.setForegroundTarget(undefined);
+    fake.omitWindowInventoryCompleteness(true);
+    fake.setGroundingState({ pid: fake.target.pid, window_id: fake.target.windowId, elements_complete: true, elements: [
+      { role: "Document", name: "Document", frame: bounds, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-probe-profile",
+      windowTarget: fake.target, tabId: "desktop-probe-tab", generation: "desktop-probe-generation",
+      delivery: "loopback-cdp",
+    };
+    let probeReads = 0;
+    let partialOnEveryRead = false;
+    const desktopGroundingRelationshipProbe: WindowRelationshipProbe = {
+      async read() {
+        probeReads += 1;
+        if (partialOnEveryRead || probeReads === 1) {
+          return {
+            source: "win32_relationship_probe",
+            complete: false,
+            truncated: false,
+            windows: [],
+          };
+        }
+        return {
+          source: "win32_relationship_probe",
+          complete: true,
+          foregroundPid: fake.target.pid,
+          foregroundWindowId: fake.target.windowId,
+          windows: [{
+            pid: fake.target.pid,
+            windowId: fake.target.windowId,
+            bounds,
+            zIndex: 1,
+            isOnScreen: true,
+            minimized: false,
+          }],
+        };
+      },
+    };
+    let collectCalls = 0;
+    const domClicks: Array<{ viewport: unknown; candidate: unknown }> = [];
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      async collect(request) {
+        collectCalls += 1;
+        return {
+          complete: true,
+          tabId: request.browserTarget.tabId,
+          generation: request.browserTarget.generation,
+          coordinateSpace: "physical",
+          candidates: [{ tagName: "button", name: "Grounded action", frame: { x: 200, y: 160, width: 100, height: 40 }, visible: true, interactive: true, state: { enabled: true } }],
+        };
+      },
+      async click(request) {
+        domClicks.push({ viewport: request.viewport, candidate: request.candidate });
+        return { status: "completed", tabId: request.browserTarget.tabId, generation: request.browserTarget.generation };
+      },
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "hybrid-catalog-v1", browserTarget,
+      desktopGroundingRelationshipProbe,
+      domGroundingTransport: transport,
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observation = await computer.observe(session, "desktop-dedicated-probe" as ObservationId, signal);
+      const candidate = observation.grounding?.elements.find((element) => element.source === "dom" && element.name === "Grounded action");
+      expect(observation.surfaceRef.kind).toBe("desktop");
+      expect(observation.viewport).toEqual({ width: 1920, height: 1080, coordinateSpace: "physical" });
+      expect(observation.grounding?.source).toBe("hybrid");
+      expect(candidate?.bbox).toEqual({ x: 300, y: 280, width: 100, height: 40, coordinateSpace: "physical" });
+      expect(probeReads).toBe(3);
+
+      const listed = await computer.listWindows(session, signal);
+      expect(listed.options).toHaveLength(1);
+      expect(listed.options[0]).toMatchObject({ appName: "Computer Harness" });
+      expect(probeReads).toBe(3);
+
+      const groundedClick = await computer.execute(session, {
+        actionId: "desktop-dedicated-probe-grounded-click" as ActionId,
+        basedOn: "desktop-dedicated-probe" as ObservationId,
+        kind: "click",
+        groundingRef: candidate!.elementRef,
+        point: { x: 350, y: 300 },
+      }, signal);
+      expect(groundedClick.status).toBe("completed");
+      expect(domClicks).toHaveLength(1);
+      expect(domClicks[0]).toMatchObject({
+        viewport: { width: 960, height: 680, coordinateSpace: "physical" },
+        candidate: { bbox: { x: 200, y: 160, width: 100, height: 40 } },
+      });
+      expect(collectCalls).toBe(2);
+      expect(probeReads).toBe(5);
+
+      partialOnEveryRead = true;
+      const staleRef = await computer.execute(session, {
+        actionId: "desktop-dedicated-probe-stale-ref" as ActionId,
+        basedOn: "desktop-dedicated-probe" as ObservationId,
+        kind: "click",
+        groundingRef: candidate!.elementRef,
+        point: { x: 350, y: 300 },
+      }, signal);
+      expect(staleRef).toMatchObject({ status: "refused", driverCode: "GROUNDING_REF_STALE" });
+      expect(probeReads).toBe(8);
+      expect(collectCalls).toBe(2);
+      expect(domClicks).toHaveLength(1);
+
+      const visualClick = await computer.execute(session, {
+        actionId: "desktop-dedicated-probe-visual-click" as ActionId,
+        basedOn: "desktop-dedicated-probe" as ObservationId,
+        kind: "click",
+        point: { x: 20, y: 30 },
+      }, signal);
+      expect(visualClick.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      expect(probeReads).toBe(8);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["throws", "empty", "truncated"] as const)(
+    "keeps full-desktop visual clicks available when the dedicated grounding probe is %s",
+    async (probeOutcome) => {
+      const directory = await mkdtemp(join(tmpdir(), `computer-harness-cua-desktop-grounding-probe-${probeOutcome}-`));
+      const fake = windowDriver({ x: 100, y: 120, width: 960, height: 680 }, { width: 960, height: 680 });
+      fake.setDesktopImageSize(1920, 1080);
+      fake.setForegroundTarget(undefined);
+      fake.omitWindowInventoryCompleteness(true);
+      const browserTarget: ManagedBrowserTarget = {
+        kind: "managed-chromium", browser: "edge", profileId: `desktop-probe-${probeOutcome}`,
+        windowTarget: fake.target, tabId: `desktop-probe-${probeOutcome}-tab`, generation: `desktop-probe-${probeOutcome}-generation`,
+        delivery: "loopback-cdp",
+      };
+      let probeReads = 0;
+      const desktopGroundingRelationshipProbe: WindowRelationshipProbe = {
+        async read() {
+          probeReads += 1;
+          if (probeOutcome === "throws") throw new Error("fixture grounding probe unavailable");
+          if (probeOutcome === "truncated") {
+            return { source: "win32_relationship_probe", complete: false, truncated: true, windows: [] };
+          }
+          return { source: "win32_relationship_probe", complete: true, windows: [] };
+        },
+      };
+      const computer = new CuaDriverComputer({
+        socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+        grounding: "hybrid-catalog-v1", browserTarget, desktopGroundingRelationshipProbe,
+        domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, candidates: [] }),
+        driverFactory: () => fake.driver,
+      });
+      const signal = new AbortController().signal;
+      try {
+        const session = await computer.open({}, signal);
+        const observation = await computer.observe(session, `desktop-probe-${probeOutcome}` as ObservationId, signal);
+        expect(observation.surfaceRef.kind).toBe("desktop");
+        expect(observation.screenshot.data.byteLength).toBeGreaterThan(0);
+        expect(observation.grounding).toBeUndefined();
+        expect(probeReads).toBe(1);
+
+        const click = await computer.execute(session, {
+          actionId: `desktop-probe-${probeOutcome}-plain-click` as ActionId,
+          basedOn: `desktop-probe-${probeOutcome}` as ObservationId,
+          kind: "click",
+          point: { x: 300, y: 200 },
+        }, signal);
+        expect(click.status).toBe("completed");
+        expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+        expect(probeReads).toBe(1);
+        await computer.close(session);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("caps incomplete desktop-grounding probe resampling at three reads and keeps visual actions available", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-probe-partial-cap-"));
+    const bounds = { x: 100, y: 120, width: 960, height: 680 };
+    const fake = windowDriver(bounds, { width: 960, height: 680 });
+    fake.setDesktopImageSize(1920, 1080);
+    fake.setForegroundTarget(undefined);
+    fake.omitWindowInventoryCompleteness(true);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-probe-partial-cap",
+      windowTarget: fake.target, tabId: "desktop-probe-partial-cap-tab", generation: "desktop-probe-partial-cap-generation",
+      delivery: "loopback-cdp",
+    };
+    let probeReads = 0;
+    const desktopGroundingRelationshipProbe: WindowRelationshipProbe = {
+      async read() {
+        probeReads += 1;
+        return {
+          source: "win32_relationship_probe",
+          complete: false,
+          truncated: false,
+          foregroundPid: fake.target.pid,
+          foregroundWindowId: fake.target.windowId,
+          windows: [{
+            pid: fake.target.pid,
+            windowId: fake.target.windowId,
+            bounds,
+            zIndex: 1,
+            isOnScreen: true,
+            minimized: false,
+          }],
+        };
+      },
+    };
+    const transport = createMockDomGroundingTransport({
+      complete: true,
+      tabId: browserTarget.tabId,
+      generation: browserTarget.generation,
+      coordinateSpace: "physical",
+      candidates: [{ tagName: "button", name: "Must stay visual", frame: { x: 200, y: 160, width: 100, height: 40 }, visible: true, interactive: true }],
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "hybrid-catalog-v1", browserTarget, desktopGroundingRelationshipProbe,
+      domGroundingTransport: transport,
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observation = await computer.observe(session, "desktop-probe-partial-cap" as ObservationId, signal);
+      expect(observation.surfaceRef.kind).toBe("desktop");
+      expect(observation.screenshot.data.byteLength).toBeGreaterThan(0);
+      expect(observation.grounding).toBeUndefined();
+      expect(probeReads).toBe(3);
+
+      const click = await computer.execute(session, {
+        actionId: "desktop-probe-partial-cap-visual-click" as ActionId,
+        basedOn: "desktop-probe-partial-cap" as ObservationId,
+        kind: "click",
+        point: { x: 300, y: 200 },
+      }, signal);
+      expect(click.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      expect(probeReads).toBe(3);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not retry the dedicated desktop-grounding probe after abort", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-probe-abort-"));
+    const fake = windowDriver();
+    fake.setDesktopImageSize(1920, 1080);
+    fake.setForegroundTarget(undefined);
+    fake.omitWindowInventoryCompleteness(true);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-probe-abort",
+      windowTarget: fake.target, tabId: "desktop-probe-abort-tab", generation: "desktop-probe-abort-generation",
+      delivery: "loopback-cdp",
+    };
+    const abortController = new AbortController();
+    let probeReads = 0;
+    const desktopGroundingRelationshipProbe: WindowRelationshipProbe = {
+      async read() {
+        probeReads += 1;
+        abortController.abort();
+        return {
+          source: "win32_relationship_probe",
+          complete: false,
+          truncated: false,
+          windows: [],
+        };
+      },
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "hybrid-catalog-v1", browserTarget, desktopGroundingRelationshipProbe,
+      domGroundingTransport: createMockDomGroundingTransport({
+        complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, candidates: [],
+      }),
+      driverFactory: () => fake.driver,
+    });
+    try {
+      const session = await computer.open({}, abortController.signal);
+      await expect(computer.observe(session, "desktop-probe-aborted" as ObservationId, abortController.signal))
+        .rejects.toThrow(/operation was aborted/u);
+      expect(probeReads).toBe(1);
       await computer.close(session);
     } finally {
       await rm(directory, { recursive: true, force: true });

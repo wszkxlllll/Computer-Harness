@@ -419,10 +419,39 @@ describe("createComputer", () => {
       windowSwitchAllowedTargets: [nativeScope, managedTarget.windowTarget],
     });
     expect(fixture.calls.delegateOptions).not.toHaveProperty("windowTarget");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("windowRelationshipProbe");
+    if (process.platform === "win32") {
+      expect(fixture.calls.delegateOptions?.desktopGroundingRelationshipProbe).toMatchObject({ read: expect.any(Function) });
+    } else {
+      expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+    }
     expect(fixture.calls).toMatchObject({ hostStart: 1, delegateOpen: 1, hostClose: 0, bootstrapClose: 0 });
 
     await computer.close(session);
     expect(fixture.calls).toMatchObject({ delegateClose: 1, hostClose: 1, bootstrapClose: 1 });
+  });
+
+  it("keeps the desktop companion grounding probe explicitly opt-outable", async () => {
+    const fixture = managedFixture();
+    const computer = await createComputer({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      grounding: "hybrid-catalog-v1",
+      managedBrowserUrl: "about:blank",
+      managedBrowserCompanion: true,
+      windowSwitch: "opened-windows-v1",
+    }, {
+      createManagedBrowserHost: fixture.createHost,
+      openCuaBootstrapSession: fixture.openBootstrap,
+      importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+      windowRelationshipProbe: null,
+    });
+    const session = await computer.open({}, fixture.signal);
+
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("windowRelationshipProbe");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+    await computer.close(session);
   });
 
   it("rejects a companion with an empty Host target scope before opening the browser", async () => {

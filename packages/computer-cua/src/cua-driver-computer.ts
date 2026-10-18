@@ -777,6 +777,8 @@ export interface CuaDriverComputerOptions {
   };
   /** Injected host-only read-only relationship evidence; absent/failed means manual transient handling. */
   windowRelationshipProbe?: WindowRelationshipProbe;
+  /** Optional private Win32 evidence used only for desktop managed-browser grounding and ref freshness. */
+  desktopGroundingRelationshipProbe?: WindowRelationshipProbe;
   /** Host-supplied managed-browser transport; never discovered by this adapter. */
   domGroundingTransport?: DomGroundingTransport;
   /** Total wall-clock budget for endSession/shutdown cleanup; no GUI action is retried. */
@@ -1302,7 +1304,7 @@ export class CuaDriverComputer implements Computer {
           current,
           captureRetryOptions: this.windowCaptureRetryOptions,
           platform: resolveCapturePlatform(this.options.platform, current.platform),
-          ...(this.options.windowRelationshipProbe === undefined ? {} : { relationshipProbe: this.options.windowRelationshipProbe }),
+          ...(this.getDesktopGroundingRelationshipProbe() === undefined ? {} : { relationshipProbe: this.getDesktopGroundingRelationshipProbe()! }),
           ...(this.options.domGroundingTransport === undefined ? {} : { domTransport: this.options.domGroundingTransport }),
           signal,
         });
@@ -4165,7 +4167,7 @@ export class CuaDriverComputer implements Computer {
             candidate: desktopCandidate,
             current,
             platform: resolveCapturePlatform(this.options.platform, current.platform),
-            ...(this.options.windowRelationshipProbe === undefined ? {} : { relationshipProbe: this.options.windowRelationshipProbe }),
+            ...(this.getDesktopGroundingRelationshipProbe() === undefined ? {} : { relationshipProbe: this.getDesktopGroundingRelationshipProbe()! }),
             ...(this.options.domGroundingTransport === undefined ? {} : { domTransport: this.options.domGroundingTransport }),
             signal,
           })))) {
@@ -4957,6 +4959,26 @@ export class CuaDriverComputer implements Computer {
       throw new Error(`CUA computer session ${String(session.id)} is inactive; open a new session`);
     }
     return current;
+  }
+
+  private getDesktopGroundingRelationshipProbe(): WindowRelationshipProbe | undefined {
+    const desktopProbe = this.options.desktopGroundingRelationshipProbe;
+    if (desktopProbe === undefined) return this.options.windowRelationshipProbe;
+    return {
+      async read(signal) {
+        // Desktop grounding needs a stable foreground/z snapshot, but Win32's
+        // EnumWindows and z-chain reads are not atomic. Resample only bounded,
+        // non-truncated partial snapshots; this never retries input or broadens
+        // the regular window-switch inventory.
+        let latest: Awaited<ReturnType<WindowRelationshipProbe["read"]>> | undefined;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          signal.throwIfAborted();
+          latest = await desktopProbe.read(signal);
+          if (latest.complete || latest.truncated === true || signal.aborted || attempt === 2) return latest;
+        }
+        return latest!;
+      },
+    };
   }
 }
 
