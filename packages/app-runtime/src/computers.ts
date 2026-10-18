@@ -288,10 +288,21 @@ export async function createComputer(
 
   const managedBrowser = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
   if (managedBrowser) validateManagedBrowserConfig(config);
+  const desktopCompanionGrounding = managedBrowser && config.managedBrowserCompanion === true &&
+    config.windowSwitch === "opened-windows-v1";
 
   const relationshipProbe = dependencies.windowRelationshipProbe !== undefined
     ? dependencies.windowRelationshipProbe ?? undefined
     : process.platform === "win32" && config.windowDeliveryMode === "foreground" && config.managedBrowserCompanion !== true
+      ? createWindowsWindowRelationshipProbe()
+      : undefined;
+  // A desktop companion is delivered as foreground only after this factory
+  // builds ManagedBrowserComputer, so its source config may not carry that
+  // derived value yet. Give grounding its own probe to avoid widening the
+  // companion's ordinary window-switch inventory or SurfaceRegistry.
+  const desktopGroundingRelationshipProbe = dependencies.windowRelationshipProbe !== undefined
+    ? dependencies.windowRelationshipProbe ?? undefined
+    : process.platform === "win32" && desktopCompanionGrounding
       ? createWindowsWindowRelationshipProbe()
       : undefined;
 
@@ -332,6 +343,7 @@ export async function createComputer(
     openBootstrap,
     createDelegate,
     ...(relationshipProbe === undefined ? {} : { windowRelationshipProbe: relationshipProbe }),
+    ...(desktopGroundingRelationshipProbe === undefined ? {} : { desktopGroundingRelationshipProbe }),
   });
 }
 
@@ -352,6 +364,7 @@ interface ManagedBrowserComputerOptions {
   readonly openBootstrap: typeof openCuaBootstrapSession;
   readonly createDelegate: CuaComputerModule["CuaDriverComputer"];
   readonly windowRelationshipProbe?: WindowRelationshipProbe;
+  readonly desktopGroundingRelationshipProbe?: WindowRelationshipProbe;
 }
 
 class ManagedBrowserComputer implements Computer {
@@ -416,6 +429,7 @@ class ManagedBrowserComputer implements Computer {
         ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),
         ...(scopedTargets === undefined ? {} : { windowSwitchAllowedTargets: scopedTargets }),
         ...(this.options.windowRelationshipProbe === undefined ? {} : { windowRelationshipProbe: this.options.windowRelationshipProbe }),
+        ...(this.options.desktopGroundingRelationshipProbe === undefined ? {} : { desktopGroundingRelationshipProbe: this.options.desktopGroundingRelationshipProbe }),
       };
       const delegate = new this.options.createDelegate(delegateOptions);
       this.delegate = delegate;

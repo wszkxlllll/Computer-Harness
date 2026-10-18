@@ -1,6 +1,31 @@
 # 真实生活任务评测：原九题与新增六题对照
 
-## 2026-10-18 修复与无障碍复查（离线验收完成，已发布 Preview）
+## 2026-10-18 全桌面受管浏览器 grounding 实测（本页最新状态）
+
+本节更新下方当时“grounding尚待实机验收”的状态。全桌面截图、Host授权的受管Browser companion及 requested `grounding=off` → resolved `hybrid-catalog-v1` 的既有配置语义均保留；未启用普通桌面应用候选、未更改CLI/factory配置语义，也未连接个人浏览器。
+
+根因有两段。最初的生产装配在 managed-browser companion 路径没有传入现有 Windows relationship probe，CUA desktop observation 因而拿不到 foreground/completeness 证据，在 `foregroundAuthorizedWindow` gate 视觉降级。修复是在现有 Computer 私有选项中增加只供 desktop grounding/ref freshness 使用的 Host probe；只读目标仍限于 Host 精确授权的 managed Browser PID/HWND/tab/generation。普通 `windowRelationshipProbe`、`list_windows`、WindowSwitch、native app 范围及截图输入均未扩张。
+
+补上probe后，独立的 `EnumWindows` 与 z-order 链读取偶尔会跨越 HWND 创建/销毁。一次严格Run的同帧日志显示foreground身份精确匹配、唯一目标行可见且z已知，但合并后的inventory为 `complete=false`/`completeAttestation=negative`，所以可选catalog按既有规则降级，而不是把未知遮挡当作无遮挡。三次直接只读Win32快照复现过两次 `z_order_contains_unenumerated_hwnd`/`z_order_count_mismatch`（一次有3个未枚举higher HWND，另一次变化在lower一侧），随后一次完整；未观察到DWM/owner/class失败。为吸收这类非原子读取抖动，只对专用desktop grounding probe加入每次inventory读取最多3次（首次+2）的只读重采样：只在 `complete=false`、未truncated且未abort时立即再读，遇完整即停；异常、截断或Abort不重试。单次observe或ref freshness都可能有读取前后两次inventory，因此两者各自最多共6次probe read；这不是整次observe只读3次。它不重试输入、不新增sleep、不要求更宽授权；每次最多3次仍partial即视觉降级，普通视觉坐标动作保持可用。
+
+新增CUA回归覆盖partial→complete后catalog和groundingRef点击、freshness变partial时仅拒绝该旧ref而普通visual click仍成功、每次inventory最多3次、truncated/Abort/异常不重试，以及普通 `list_windows` 不触发专用wrapper。根协调器独立全量 Vitest：141文件、2570项通过（其中CUA 418项、app-runtime computers 25项）；隔离候选 AppRuntime/CUA TypeScript 编译通过。这些离线/mock结果不替代下面的实机证据。
+
+| Run | 结果与证据 |
+| --- | --- |
+| `run-1792314130436-452f8d25-3b1` | 本轮最终严格机制Run，真实Harness + Ark `deepseek-v4.1-flash`，ephemeral managed Browser访问gov.cn，共3次Provider请求。三帧均为primary desktop `2560×1600`；首帧59个本机grounding候选（16 DOM + 43 UIA），Context实际投影16个；脱敏真实请求body含当前DOM ref及 `click_element` schema。发送图像记录为PNG 2560×1600、2,796,665 bytes、SHA-256 `4acd26cc3a362df3fb21868a9bf183375066c39e784eacaae5806d13112c6d15`，不保存base64副本。模型调用 `click_element(elementRef=dom-0b60b2ae96ee-5)`，receipt `completed` / `managed-browser DOM click dispatched`。点击后第一帧仍显示首页，模型仅等待2500ms；后续观察到新标签文章页URL `https://www.gov.cn/yaowen/liebiao/202610/content_7083416.htm`，可见标题与所点headline一致；最终Run succeeded。证据目录：`runs/desktop-grounding-live-20261018/candidate-live-click-element-bounded-retry/run-1792314130436-452f8d25-3b1`（`provider-request-context.jsonl`保存脱敏实际请求文字/schema/图像元数据，`trajectory.jsonl`保存ref与receipt）；点击后截图 `assets/screenshots/417a6453-2b40-4d92-be1a-3fd46f7a9451.png` 仍是首帧页面，等待后的确认截图 `assets/screenshots/2118ea44-5c58-41e5-8442-7ffd73638279.png` 显示文章页。 |
+| `run-1792312892382-f9381fef-e65` | bounded retry修复前的严格机制Run，真实API响应但未输入；同次stage记录Win32合并inventory不完整、无grounding，provider Context因此明确没有catalog，模型按Goal失败退出。保留为失败记录，不计入成功。 |
+| `run-1792312314984-20284c41-a82` | 前一严格机制Run，无grounding且无动作；保留，不将“模型未选DOM”作为解释，因为当帧没有候选。 |
+| `run-1792312148313-cd14d3ef-055` | 首个候选真实Run产生16个投影refs并视觉上打开同一文章，但模型用了普通坐标 `click`，不是 `click_element`；保留为功能导航证据，不算本轮元素链路验收。 |
+| `run-1792312686984-64095e9a-9f2` | capture-only、无API/输入；在完整foreground snapshot下采到56项（16 DOM + 40 UIA），证明生产端候选可产生。 |
+| `run-1792313183556-7310ee2d-749` | capture-only诊断时，临时插桩令PowerShell `-EncodedCommand` 超过命令行长度并导致 probe `spawn ENAMETOOLONG`；这是诊断产物问题，不是生产Run失败或grounding结果，按无效诊断记录保留。 |
+
+最终严格Run中，Context三次请求的 `monitorGuidanceIncluded=false`、估算0 tokens；有1条 `monitor.proposal`、2条 `monitor.transition`，未观察到 `grounding.selection.recovery` 重排字段/记录。因此本Run未观察到Monitor guidance注入或recovery重排，不能把 `shadow` 声称为全程零影响。首帧候选进入模型请求、被模型选用、DOM动作receipt完成及文章截图复核是分别核对的三个阶段。当前窗口切tab后中间观察没有catalog，下一观察恢复候选；这属于旧tab/generation不匹配时的安全视觉降级与fresh observation恢复，不把缺ref帧强行填充。
+
+运行结束后仅关闭本次Harness拥有的ephemeral Browser/Computer并确认无物理桌面lease；没有删除持久profile/cookies、登录页或旧标签。Preview Host仍存活、`127.0.0.1:4318` 未重启；未部署、未commit/push。以上Run及失败记录均保留供复核。
+
+## 2026-10-18 修复与无障碍复查（历史记录：离线验收完成；当时已发布 Preview）
+
+> 本节记录此前一轮修复/发布状态；其中“仍需真实桌面验收”是当时状态，已由本文前置章节的受控 grounding 机制实测更新。该实测不代表六题业务任务全通过，也未部署本轮本地源码变更。
 
 本轮只做离线修复和回归，不重跑业务任务，不改冻结 Goal、不放宽 Guard、不覆盖原始运行记录。下方批次结果仍对应原冻结版本，不因源码已修改而追溯升级为成功。
 
