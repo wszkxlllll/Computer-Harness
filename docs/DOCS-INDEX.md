@@ -1,6 +1,6 @@
 # Computer Harness 文档索引
 
-2026-10-18 离线整改收口：[六类评测报告顶部修复与无障碍复查](./life-business-evaluation-2026-10-15.md)、[集中审查](./life-repair-concentrated-review-2026-10-18.md)。Monitor、限流、受管浏览器桌面候选、Memory、指标及完整语句/审批计划朗读已修，Sol 增量复审 GO；最终 Vitest 2563/2563、类型与 Web 构建通过。Node 另有 10 项本机 symlink 权限失败，未冒充通过。未调用付费 API 或重跑业务任务，未切换 Preview；iPhone VoiceOver 及业务效果待实机验收。
+2026-10-18 修复发布：[发布／备份／重新配对与回退](./voice-preview-deploy-phone-test-2026-09-29.md)、[六类评测与修复](./life-business-evaluation-2026-10-15.md)、[集中审查](./life-repair-concentrated-review-2026-10-18.md)。Monitor、限流、受管浏览器桌面候选、Memory、指标及完整语句/审批计划朗读已修，Sol 增量复审 GO；本机 Vitest 2563/2563、类型与 Web 构建通过。源码 `480126a` 已推送并部署 Preview Web/Relay＋本机 Host，旧版保留、正式入口不变，手机重新扫码。CI 首轮四矩阵应用测试均通过，但一条评测脚本规范路径断言在 Mac/Windows 失败，正按测试专属修复重跑；本机另有 10 项 symlink 权限失败，未冒充通过。未调用付费 API 或重跑业务任务；iPhone VoiceOver 及业务效果待实机验收。
 
 2026-10-18修复后实跑收敛：[六类四组终态、模块效果与下一步](./life-business-evaluation-2026-10-15.md)、[完整六题Goal](../eval/life-business-six-domain-20261018/README.md)。24包中16次实跑全部结束、8组按用户同问题跳题/限流策略未运行；旧5次pilot独立保留。Runtime为9成功、5取消、2失败，不等于业务9成功。已验证4条真实纠正消费，失败/部分完成/未运行均保留，未替换Preview或commit/push。
 

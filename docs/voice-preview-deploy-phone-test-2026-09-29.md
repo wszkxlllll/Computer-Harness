@@ -1,7 +1,42 @@
 # 语音手机 Preview 部署与测试记录
 
-日期：2026-09-29
-状态：2026-10-10 已 Web-only 发布隔离 Preview `2026-10-10-web-accessibility-v1`；Relay backend 保持上一版编译代码，本机 Host 4318 和 CUA 不重启，WSS 在线、已有配对保留。iPhone 旁白与真实任务待用户验收；不因部署自动通过。
+日期：2026-09-29（持续更新）
+状态：2026-10-18 已发布 Preview `2026-10-18-life-repair-480126a`，服务器 Web/Relay 和本机 Host 均已切换；原 Preview 与本机旧代码、构建和配置保留。Relay/Host 重启清空内存配对，需要重新扫码；浏览器登录 profile 未清理。以下旧日期记录按历史保留，不覆盖本节。
+
+## 2026-10-18：生活任务修复与无障碍／审批朗读版本
+
+### 使用入口
+
+1. 在运行新版 Host 的电脑打开 `http://127.0.0.1:4318/connect`。
+2. 手机扫描新二维码，并在电脑确认连接。手机使用 [新版 Preview](https://47.108.197.221:8443/?v=life-repair-20261018)，不是手机上的 localhost。关闭旧内存页面再打开，不需要清理网站账号或重新准备登录 profile。
+3. 本机默认模型保持 GLM-5.3-Flash、thinking low，没有擅自改成付费新模型。Planning/Memory/Batch/Guard 等仍按现有手机设置和 Host 合同使用；部署本身不会自动运行任务或批准操作。
+4. 使用 iPhone 旁白时建议先关闭应用自动播报，单独确认导航和通知；两种声音是独立链路，可能重叠。关闭应用播报不关闭旁白状态通知。运行页目标说明合并为完整朗读单元；进展和审批通知保留可读文字。
+
+审批新增朗读已有、请求绑定的模型计划与目标，并标明尚未执行、仍需核对；没有增加额外 LLM 请求。敏感或缺失说明采用安全提醒，不替代用户批准。GUI 审批仍要求请求绑定的画面证据，不能宣称已经完成独立非视觉审批验收。
+
+### 版本与验证
+
+- 远端分支：`codex/life-eval-six-ark-20261016`；部署源码 `480126a857cd4050c96016bc5a0df157e929075f`。拆分提交为评测监督、Runtime/grounding/Memory/限流、无障碍/审批朗读及任务入口状态修正。
+- 修复前代码备份分支：`codex/backup-before-life-repair-20261018`，基线 `1ae5b0a61e66f48d84f5afb2407248bd31e8338e`。
+- 本地最终 Vitest 141 文件、2563/2563 通过；类型检查、CUA spike 与 Web 生产构建通过，Sol 复审通过。Node 脚本另有 10 项本机 symlink 权限 EPERM 失败，未记为通过。
+- 服务器从 Git tracked source 归档构建，frozen lockfile 安装、TypeScript、Web 构建及 Relay 入口语法检查通过；不上传私有 env、浏览器 profile、任务截图或运行轨迹。
+- 源码归档 SHA-256：`3B3E926186672E582D5B08C298868816CB919741FA163D42EE97AF2619F12E60`。
+- 公网 HTML SHA-256：`6FCA0E30C561D83CA2C8AF13ACAB69C974BC96BA5F9C0E39BF7CFAB65E07C724`。
+- 新 JS：`index-DJu8rd0w.js`，SHA-256 `D21296B691137737FFE8F2A20C27AB9D7547BE9974687C22276975C1B0A1F7E3`；本地、服务器和公网一致。
+- 新版 health、主页、JS 均 HTTP 200；匿名任务 API 401。本机 `/connect` 200，Host 到 8443 的连接 established；旧正式入口 health 仍为 200。
+- [首轮 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105278735)四矩阵应用测试 2563 项均通过，但 Mac/Windows 一条评测脚本路径断言失败：realpath 与同文件词法别名比较不一致。仅修测试的轨迹、截图及交付目录规范路径预期，没有改生产 containment；补齐截图断言前的一次 CI 已主动取消。[修正后 CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105768682)验证代码 head `a38a815`，当前等待结果，不预写全绿。部署功能源码仍为 `480126a`；后续只有测试和说明变更，不需要重复切换服务。
+
+本机 Host 已从本轮修复工作区运行，不是旧 Preview 工作区。复用已运行并核验的 Windows CUA 0.22.2 候选：源码 `7852ab1983b60c0ce581b8736c9da13eaf04640a`、二进制 SHA-256 `400AB8670980ECD461F304FDC7E7A9D8A27F53585EA629B81EE1B7C260BC3095`，配套 `foreground-caret-v1` 输入策略。未重新编译或替换系统级 CUA，未修改系统环境变量。当前 Preview 与评测使用同一物理桌面及候选 daemon，不得同时运行任务。
+
+### 备份和回退
+
+- 服务器旧 release `/opt/computer-harness-preview/releases/2026-10-10-web-accessibility-v1` 完整保留；原 unit、私有 Relay 配置和旧 current 指向已备份到仅 root 可读的 `/opt/computer-harness-preview/backups/2026-10-18-before-life-repair/`。
+- 新 release 为 `/opt/computer-harness-preview/releases/2026-10-18-life-repair-480126a`，包含 `.release-source` 来源标识。仅 Preview 的 current 原子切换；正式入口的 current 未修改。
+- 本机忽略目录 `runs/preview-release-20261018/backup/` 保存修复前 Git bundle/patch、原 Preview tracked source 归档、原构建及私有启动配置。本机旧工作区及旧启动器未改；登录资料和原 Run 原地保留，私有备份不推 GitHub、不上传服务器。
+- 本机忽略目录 `runs/preview-release-20261018/` 中的启动器、日志和 sessions 是机器专属部署文件；其他电脑仍按通用 `scripts/mobile.ps1` 配置启动，不能照搬本机绝对路径。本机具体命令见同目录 `DEPLOYMENT-LOCAL.md`。
+- 回退前先确认没有进行中的任务。服务器将 Preview current 恢复到保留的旧 release，再重启 `computer-harness-relay-preview`；本机停止新版 Host 后用未改动的旧启动器恢复。重新扫码，复查 health、资源哈希和匿名 API 拒绝；不要改正式入口、删除 profile 或清理未知桌面 lease。
+
+本次只完成推送、备份、部署和连接／安全边界检查；没有调用付费模型、启动真实桌面业务任务或代替用户确认手机配对。iPhone VoiceOver 听感、实际审批理解和修复后的业务效果仍待用户真机验收。
 
 2026-10-12 只读复核：公网首页、JS、CSS 三项 SHA-256 均与下方 10 月 10 日记录相同；经已固定服务器指纹的 SSH 登录读取，Preview current 仍为上述无障碍 release，Relay active、PID 155349、启动时间仍为 10 月 9 日 22:57:38 CST；release 标记仍记录 backend d2ee1a3、Web base d4eae01 加未提交无障碍改动。未发现当前部署被 PR26 替换的证据，未重启或改动服务。本次默认 SSH 密钥未获授权，但原有密码认证成功，不是已确认的服务器密码失效。此核对不保证期间从未发生又回退的部署，也不代替本机 Host 版本或真实任务验收。
 范围：仅记录语音 Preview 部署、连接检查、手机测试入口和回滚方式；未更改旧服务。
