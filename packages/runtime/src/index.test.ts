@@ -2413,18 +2413,20 @@ describe("RunController S2-2 happy path", () => {
       return originalSetTimeout(callback, delay, ...args);
     });
     try {
-      const boundaryProvider = new PreparedScriptedProvider("same_input_retry");
+      const boundaryStartedAt = Date.now();
+      const boundaryProvider = new PreparedScriptedProvider("same_input_retry", () => vi.setSystemTime(boundaryStartedAt + 90_000));
       const boundary = await makeController(boundaryProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
-        providerAttemptReserveMs: 119_500,
+        providerAttemptReserveMs: 90_000,
       });
       await expect(boundary.controller.start("boundary must not admit retry")).resolves.toBe("failed");
       expect(boundaryProvider.generateCalls).toBe(1);
       expect(boundary.controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, outcome: "failed" });
       await rm(boundary.directory, { recursive: true, force: true });
 
-      const admittedProvider = new PreparedScriptedProvider("same_input_retry");
+      const admittedStartedAt = Date.now();
+      const admittedProvider = new PreparedScriptedProvider("same_input_retry", () => vi.setSystemTime(admittedStartedAt + 89_999));
       const admitted = await makeController(admittedProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
-        providerAttemptReserveMs: 119_499,
+        providerAttemptReserveMs: 90_000,
         onEventCommitted: (event) => {
           if (event.type === "model.request.failed") retryFailureCommitted = true;
         },

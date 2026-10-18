@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { BoundWindowMissingError } from "@computer-harness/protocol";
+import { BoundWindowMissingError, isGroundingWebUrl } from "@computer-harness/protocol";
 import { dirname, join } from "node:path";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type { ToolResult } from "./cua-sdk-contract.js";
@@ -5566,6 +5566,8 @@ function mergeGroundings(
       source: "hybrid",
       observationId,
       computerSessionId,
+      ...(isGroundingWebUrl(dom.catalog.pageUrl) ? { pageUrl: dom.catalog.pageUrl } : {}),
+      ...(dom.catalog.visibleText === undefined ? {} : { visibleText: dom.catalog.visibleText }),
       completeness: truncated ? "partial" : "complete",
       degraded: uia.catalog.degraded || dom.catalog.degraded,
       maxElements: GROUNDING_MAX_ELEMENTS,

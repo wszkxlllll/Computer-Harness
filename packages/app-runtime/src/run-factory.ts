@@ -88,6 +88,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
   }
   if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
+  if (input.runTimeoutMs !== undefined && (!Number.isSafeInteger(input.runTimeoutMs) || input.runTimeoutMs <= 0)) {
+    throw new Error("runTimeoutMs must be a positive safe integer");
+  }
   if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
   if (input.model === "deepseek-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-flash")) {
     validateDeepseekRequestTimeoutMs(input.deepseekRequestTimeoutMs);
@@ -314,15 +317,16 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       contextCompiler,
       toolRegistry: tools,
       policy: dependencies.createPolicy?.(factoryConfig) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
-      ...(dependencies.createProvider === undefined && config.model === "glm-5.3-flash" ? {
-        providerAttemptReserveMs: config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS,
-      } : {}),
-      ...(dependencies.createProvider === undefined && config.model === "deepseek-flash" ? {
-        providerAttemptReserveMs: config.deepseekRequestTimeoutMs ?? DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS,
-      } : {}),
-      ...(dependencies.createProvider === undefined && config.model === "deepseek-v4.1-flash" ? {
-        providerAttemptReserveMs: config.arkRequestTimeoutMs ?? DEFAULT_ARK_REQUEST_TIMEOUT_MS,
-      } : {}),
+      // An injected factory receives the same HTTP deadline configuration as
+      // the built-in factory; neither path gets an unrelated Runtime reserve.
+      providerAttemptReserveMs: config.model === "glm-5.3-flash"
+        ? config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS
+        : config.model === "deepseek-flash"
+          ? config.deepseekRequestTimeoutMs ?? DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS
+          : config.model === "deepseek-v4.1-flash"
+            ? config.arkRequestTimeoutMs ?? DEFAULT_ARK_REQUEST_TIMEOUT_MS
+            : config.model === "qwen3.8-flash" ? 240_000 : DEFAULT_GLM_REQUEST_TIMEOUT_MS,
+      ...(config.runTimeoutMs === undefined ? {} : { runTimeoutMs: config.runTimeoutMs }),
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,

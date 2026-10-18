@@ -1,5 +1,24 @@
 import type { ModelContentBlock, ModelMessage } from "@computer-harness/runtime";
 import type { ObservationFrame, ModelTurn, RuntimeEvent, ToolResult, Viewport } from "@computer-harness/protocol";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
+
+export function observedPageUrlText(observation: ObservationFrame): string | undefined {
+  const grounding = observation.grounding;
+  if (grounding === undefined || grounding.observationId !== observation.id ||
+      grounding.computerSessionId !== observation.computerSessionId ||
+      grounding.surfaceRef.surfaceId !== observation.surfaceRef.surfaceId ||
+      grounding.surfaceRef.generation !== observation.surfaceRef.generation ||
+      grounding.surfaceRef.kind !== observation.surfaceRef.kind ||
+      grounding.surfaceRef.parentSurfaceId !== observation.surfaceRef.parentSurfaceId ||
+      grounding.surfaceRef.admissionSource !== observation.surfaceRef.admissionSource) return undefined;
+  const pageUrl = grounding.pageUrl;
+  if (!isGroundingWebUrl(pageUrl)) return undefined;
+  return `Observed page URL source data: ${JSON.stringify({
+    observationId: observation.id,
+    capturedAt: observation.capturedAt,
+    pageUrl,
+  })}`;
+}
 
 export function modelTurnMessage(
   turn: ModelTurn,

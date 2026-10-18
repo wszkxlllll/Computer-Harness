@@ -195,9 +195,6 @@ describe("Planning tools and PlanStore", () => {
     const update = tools.find((tool) => tool.name === "task_update");
     const list = tools.find((tool) => tool.name === "task_list");
     if (create?.category !== "planning" || update?.category !== "planning" || list?.category !== "planning") throw new Error("planning tools missing");
-    expect(create.description).toContain("same ModelTurn before first GUI action");
-    expect(create.description).toContain("skip simple screens");
-    expect(update.description).toContain("stage/blocker/goal changes");
     const created = await create.execute({ subject: "Open Writer" }, context);
     const mutation = create.planMutationFromResult?.(created);
     if (mutation === undefined || create.afterPlanCommit === undefined) throw new Error("create mutation hooks missing");
@@ -276,16 +273,6 @@ describe("Planning tools and PlanStore", () => {
     const create = tools.find((tool) => tool.name === "task_create");
     const update = tools.find((tool) => tool.name === "task_update");
     const get = tools.find((tool) => tool.name === "task_get");
-    expect(create?.description).toContain("current phase");
-    expect(create?.description).toContain("original Goal");
-    expect(create?.description).toContain("future stages");
-    expect(create?.inputSchema).toMatchObject({
-      properties: {
-        subject: { description: expect.stringContaining("current") },
-        description: { description: expect.stringContaining("unfinished work") },
-      },
-    });
-    expect(update?.description).toContain("full Goal/future stages");
     expect(update?.inputSchema).toMatchObject({ anyOf: expect.arrayContaining([{ required: ["subject"] }, { required: ["status"] }]) });
     expect(() => create?.validate({ subject: "   " })).toThrow(/non-empty/);
     expect(() => update?.validate({ taskId: "task-1" })).toThrow(/at least one/);

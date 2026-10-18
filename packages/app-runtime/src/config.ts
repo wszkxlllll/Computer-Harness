@@ -79,6 +79,8 @@ export interface ResolvedRunConfig {
   outputDir: string;
   maxSteps: number;
   maxModelRequests: number;
+  /** Optional hard Run deadline measured from controller.start(), including waits and preparation. */
+  runTimeoutMs?: number;
   planning: boolean;
   /** Explicit opt-in for the unfinished local execution-segment experiment. */
   executionSegments?: "off" | "segments-v1";

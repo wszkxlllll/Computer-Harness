@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isGroundingWebUrl } from "@computer-harness/protocol";
 import type {
   ComputerSessionId,
   GroundingCatalog,
@@ -6,6 +7,9 @@ import type {
   GroundingElementState,
   GroundingOption,
   ObservationId,
+  GroundingVisibleText,
+  GroundingVisibleTextCell,
+  GroundingVisibleTextRegion,
   Viewport,
 } from "@computer-harness/protocol";
 
@@ -83,6 +87,10 @@ export interface DomGroundingContentRect {
 
 export interface DomGroundingTransportResult {
   readonly candidates: readonly DomGroundingRawCandidate[];
+  /** Exact current-page URL from this collection, never the startup URL. */
+  readonly pageUrl?: unknown;
+  /** Adapter-private bounded rendered table payload, collected with candidates. */
+  readonly visibleText?: unknown;
   readonly complete?: boolean;
   readonly degraded?: boolean;
   readonly tabId?: string;
@@ -262,19 +270,134 @@ export function materializeDomGrounding(
     publicElements.push(element);
   }
   const truncated = result.degraded === true || result.candidates.length > publicElements.length || result.candidates.length > maxElements;
+  const visibleText = materializeVisibleText(request, result, cssProjection);
   return {
     catalog: {
       version: "grounding-catalog-v2",
       source: "dom",
       observationId: request.observationId,
       computerSessionId: request.computerSessionId,
+      ...(isGroundingWebUrl(result.pageUrl) ? { pageUrl: result.pageUrl } : {}),
       completeness: result.complete === true && !truncated ? "complete" : "partial",
       degraded: result.degraded === true,
       maxElements,
       elements: publicElements,
+      ...(visibleText === undefined ? {} : { visibleText }),
     },
     privateElements,
   };
+}
+
+const VISIBLE_TEXT_LIMITS = {
+  maxRegions: 2,
+  maxRows: 24,
+  maxColumns: 12,
+  maxCells: 192,
+  maxCellCharacters: 320,
+  maxCharacters: 4800,
+} as const;
+
+/** Revalidate the private transport shape without changing or slicing cell text. */
+function materializeVisibleText(
+  request: DomGroundingCollectRequest,
+  result: DomGroundingTransportResult,
+  project: ((frame: DomGroundingContentRect) => DomGroundingContentRect) | undefined,
+): GroundingVisibleText | undefined {
+  const raw = record(result.visibleText);
+  if (raw === undefined || raw.source !== "dom-table-v1" || raw.scope !== "current-viewport" ||
+      !Array.isArray(raw.regions) || result.coordinateSpace !== "css" || project === undefined) return undefined;
+  const regions: GroundingVisibleTextRegion[] = [];
+  let partial = raw.completeness !== "complete";
+  let truncated = raw.truncated === true || raw.regions.length > VISIBLE_TEXT_LIMITS.maxRegions;
+  let rowCount = 0;
+  let cellCount = 0;
+  let characters = 0;
+  const projectFrame = (value: unknown): GroundingVisibleTextCell["bbox"] | undefined => {
+    const frame = readFrame(value);
+    const metrics = result.viewportMetrics;
+    if (frame === undefined || metrics === undefined || frame.x < 0 || frame.y < 0 ||
+        frame.x + frame.width > metrics.cssWidth || frame.y + frame.height > metrics.cssHeight) return undefined;
+    const physical = project(frame);
+    if (physical.x < 0 || physical.y < 0 || physical.x + physical.width > request.viewport.width ||
+        physical.y + physical.height > request.viewport.height) return undefined;
+    return { ...physical, coordinateSpace: "physical" };
+  };
+  for (const candidate of raw.regions.slice(0, VISIBLE_TEXT_LIMITS.maxRegions)) {
+    const region = record(candidate);
+    const bbox = projectFrame(region?.frame);
+    if (region === undefined || bbox === undefined || !Array.isArray(region.rows)) { partial = true; continue; }
+    const rows: { rowIndex: number; cells: GroundingVisibleTextCell[] }[] = [];
+    let regionPartial = region.completeness !== "complete";
+    let regionTruncated = region.truncated === true;
+    let previousRow = -1;
+    for (const rawRow of region.rows.slice(0, VISIBLE_TEXT_LIMITS.maxRows)) {
+      if (rowCount >= VISIBLE_TEXT_LIMITS.maxRows) { regionPartial = true; regionTruncated = true; break; }
+      const row = record(rawRow);
+      if (row === undefined || !boundedInteger(row.rowIndex, 0, 127) || row.rowIndex <= previousRow || !Array.isArray(row.cells)) {
+        regionPartial = true; continue;
+      }
+      previousRow = row.rowIndex;
+      const cells: GroundingVisibleTextCell[] = [];
+      let previousColumnEnd = 0;
+      for (const rawCell of row.cells.slice(0, VISIBLE_TEXT_LIMITS.maxColumns)) {
+        const cell = record(rawCell);
+        const cellBox = projectFrame(cell?.frame);
+        if (cell === undefined || cellBox === undefined || typeof cell.text !== "string" ||
+            typeof cell.header !== "boolean" || !boundedInteger(cell.columnIndex, 0, VISIBLE_TEXT_LIMITS.maxColumns - 1) ||
+            !boundedInteger(cell.columnSpan, 1, VISIBLE_TEXT_LIMITS.maxColumns) ||
+            !boundedInteger(cell.rowSpan, 1, 128) || cell.columnIndex < previousColumnEnd ||
+            cell.columnIndex + cell.columnSpan > VISIBLE_TEXT_LIMITS.maxColumns ||
+            row.rowIndex + cell.rowSpan > 128) { regionPartial = true; continue; }
+        previousColumnEnd = cell.columnIndex + cell.columnSpan;
+        if (cell.text.length > VISIBLE_TEXT_LIMITS.maxCellCharacters || characters + cell.text.length > VISIBLE_TEXT_LIMITS.maxCharacters ||
+            cellCount >= VISIBLE_TEXT_LIMITS.maxCells) { regionPartial = true; regionTruncated = true; continue; }
+        // Control characters cannot be represented as trustworthy rendered text;
+        // omit the whole cell instead of silently changing a source string.
+        if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(cell.text)) { regionPartial = true; continue; }
+        const scope = cell.scope === "row" || cell.scope === "col" || cell.scope === "rowgroup" || cell.scope === "colgroup"
+          ? cell.scope : undefined;
+        cells.push({
+          columnIndex: cell.columnIndex,
+          rowSpan: cell.rowSpan,
+          columnSpan: cell.columnSpan,
+          header: cell.header,
+          ...(scope === undefined ? {} : { scope }),
+          text: cell.text,
+          bbox: cellBox,
+        });
+        characters += cell.text.length;
+        cellCount += 1;
+      }
+      if (row.cells.length > VISIBLE_TEXT_LIMITS.maxColumns) { regionPartial = true; regionTruncated = true; }
+      if (cells.length > 0) { rows.push({ rowIndex: row.rowIndex, cells }); rowCount += 1; }
+    }
+    if (region.rows.length > VISIBLE_TEXT_LIMITS.maxRows) { regionPartial = true; regionTruncated = true; }
+    regions.push({
+      regionRef: `table-${observationDiscriminator(request.observationId)}-${regions.length + 1}`,
+      bbox,
+      completeness: regionPartial ? "partial" : "complete",
+      truncated: regionTruncated,
+      rows,
+    });
+    partial = partial || regionPartial;
+    truncated = truncated || regionTruncated;
+  }
+  return {
+    source: "dom-table-v1",
+    scope: "current-viewport",
+    completeness: partial || truncated ? "partial" : "complete",
+    truncated,
+    limits: VISIBLE_TEXT_LIMITS,
+    regions,
+  };
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function boundedInteger(value: unknown, minimum: number, maximum: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum;
 }
 
 /**

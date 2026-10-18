@@ -19,8 +19,8 @@ export function defaultControlTools(options: ControlToolFactoryOptions = {}): re
     {
       name: "terminate",
       description: sourceLinkedFinish === undefined
-        ? "Call exactly once to finish, with both required arguments: status must be success or failure, and text must be the complete user-facing result. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion."
-        : "Call exactly once to finish, with all three required arguments: status must be success or failure, text must be the complete user-facing result, and resultEvidence must follow the source-linked evidence schema. Source references are checked against this Run's committed observations and elements; they do not semantically verify the reported claims. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion.",
+        ? "Call exactly once, as the only tool call in the ModelTurn, to finish. Both arguments are required: status is success or failure and text is the complete user-facing result. Status means the requested task and deliverables are complete and verified, not that compared business records agree: a completed audit can succeed while reporting a discrepancy. Use failure for missing or unverified deliverables, preserving verified partial results and each unknown with its reason. Include all required list members, dates, units and caveats; omit unrelated extra facts. A successful tool receipt is not proof of completion."
+        : "Call exactly once, as the only tool call in the ModelTurn, to finish. All three arguments are required: status is success or failure, text is the complete user-facing result, and resultEvidence follows the source-linked evidence schema. Source references are checked against this Run's committed observations and elements; they do not semantically verify claims. Status means requested work and deliverables are complete and verified, not that compared business records agree: a completed audit can succeed with a discrepancy. Use failure for missing or unverified deliverables. Preserve partial findings, unknown reasons, all required list members, dates, units and caveats in text; source fields do not replace them. A successful tool receipt is not proof of completion.",
       category: "control",
       control: "finish",
       inputSchema: createTerminateInputSchema(sourceLinkedFinish !== undefined),
@@ -75,8 +75,8 @@ export function createDefaultToolRegistry(options: ControlToolFactoryOptions = {
 
 function createTerminateInputSchema(sourceLinkedFinish: boolean): JsonValue {
   const properties: Record<string, JsonValue> = {
-    status: { type: "string", enum: ["success", "failure"], description: "Whether the user goal is complete." },
-    text: { type: "string", minLength: 1, description: "The complete user-facing result. Include every requested deliverable and relevant caveat; do not return only a completion status." },
+    status: { type: "string", enum: ["success", "failure"], description: "Whether requested work and deliverables are complete and verified. A completed comparison may succeed with inconsistent records; failure means requested work is incomplete or unverified." },
+    text: { type: "string", minLength: 1, description: "The complete user-facing result, not a status label. Preserve verified Unicode names/values with their dates, units, required lists and relevant caveats; identify unknown requested fields and evidence gaps. Do not expand into unrequested categories." },
   };
   if (sourceLinkedFinish) properties.resultEvidence = sourceLinkedFinishSchema();
   return {

@@ -639,7 +639,17 @@ describe("app-runtime RunHandle", () => {
   it("uses one explicit GLM timeout for Fetch evidence and Runtime retry reserve", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-explicit-timeout-"));
     const runId = "runtime-glm-explicit-timeout" as RunId;
-    const fetchMock = vi.fn(async () => { throw new Error("synthetic network failure"); });
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("synthetic network failure");
+      return { ok: true, status: 200, json: async () => ({
+        choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{
+          id: "recovered-terminate", type: "function",
+          function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "The fixture recovered within its configured HTTP budget." }) },
+        }] } }],
+      }) };
+    });
     vi.stubGlobal("fetch", fetchMock);
     try {
       const handle = await createRun({
@@ -651,16 +661,32 @@ describe("app-runtime RunHandle", () => {
         credentials: { glmApiKey: "synthetic-secret-token" },
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
-      await expect(handle.start()).resolves.toBe("failed");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const events = (await handle.report()).events;
+      const started = events.filter((event) => event.type === "model.request.started");
+      expect(started).toHaveLength(2);
+      expect(started.map((event) => event.attempt)).toEqual([1, 2]);
+      expect(started[0]?.decisionId).toBe(started[1]?.decisionId);
+      expect(events.filter((event) => event.type === "model.response.received" && event.turn.type === "finish")).toHaveLength(1);
+      expect(events.some((event) => event.type === "action.execution.started")).toBe(false);
       const records = (await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(records).toHaveLength(1);
+      expect(records).toHaveLength(2);
       expect(records[0]).toMatchObject({
         runId,
         correlation: "complete",
         httpEvidence: { source: "fetch", stages: [
           { stage: "fetch_invoked", deadlineMs: 120_000, serializedBodyBytes: expect.any(Number) },
           { stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers" },
+        ] },
+      });
+      expect(records[1]).toMatchObject({
+        runId,
+        correlation: "complete",
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", deadlineMs: 120_000 },
+          { stage: "headers_received" },
+          { stage: "body_received", outcome: "success" },
         ] },
       });
       await handle.close();
@@ -670,26 +696,39 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it.each(["glm-5.3-flash", "qwen3.8-flash"] as const)("does not apply the default GLM retry reserve to injected %s providers", async (model) => {
+  it.each(["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash", "deepseek-v4.1-flash"] as const)("recovers a 38.271-second protocol rejection with the configured injected %s HTTP budget", async (model) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-injected-provider-timeout-"));
     let calls = 0;
+    const realNow = Date.now.bind(Date);
+    let elapsedMs = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => realNow() + elapsedMs);
     const injectedProvider: ProviderAdapter = {
       id: `injected-${model}`,
       async generate() {
         calls += 1;
-        if (calls === 1) throw Object.assign(new Error("synthetic retryable provider error"), { retryable: true, retryMode: "same_input" });
+        if (calls === 1) {
+          elapsedMs += 38_271;
+          throw Object.assign(new Error("synthetic complete protocol rejection"), { retryable: true, retryMode: "feedback" });
+        }
         return { type: "finish", summary: "The injected fixture completed successfully." };
       },
     };
     try {
-      const handle = await createRun({ ...config(outputDir), model, glmRequestTimeoutMs: 120_000, maxModelRequests: 3 }, {
+      const handle = await createRun({ ...config(outputDir), model, glmRequestTimeoutMs: 180_000, deepseekRequestTimeoutMs: 180_000, arkRequestTimeoutMs: 180_000, maxModelRequests: 3 }, {
         createProvider: () => injectedProvider,
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
       await expect(handle.start()).resolves.toBe("succeeded");
       expect(calls).toBe(2);
+      const events = (await handle.report()).events;
+      const started = events.filter((event) => event.type === "model.request.started");
+      expect(started.map((event) => event.attempt)).toEqual([1, 2]);
+      expect(started[0]?.decisionId).toBe(started[1]?.decisionId);
+      expect(events.filter((event) => event.type === "model.response.received" && event.turn.type === "finish")).toHaveLength(1);
+      expect(events.some((event) => event.type === "action.execution.started")).toBe(false);
       await handle.close();
     } finally {
+      now.mockRestore();
       await rm(outputDir, { recursive: true, force: true });
     }
   });

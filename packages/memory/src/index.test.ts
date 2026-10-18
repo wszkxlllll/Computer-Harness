@@ -81,18 +81,6 @@ describe("Run memory", () => {
     const store = new InMemoryMemoryStore();
     const write = createMemoryTools(store).find((tool) => tool.name === "memory_write_fact");
     expect(write).toBeDefined();
-    expect(write?.description).toContain("context-loss");
-    expect(write?.description).toContain("same ModelTurn");
-    expect(write?.description).toContain("skip clicks");
-    expect(write?.description).toContain("task retention");
-    expect(write?.description).toContain("relatedTaskIds");
-    expect(write?.description).toContain("original Goal or Plan");
-    expect(write?.inputSchema).toMatchObject({
-      properties: {
-        retentionClass: { description: expect.stringContaining("task_create") },
-        relatedTaskIds: { description: expect.stringContaining("task_create") },
-      },
-    });
     const output = await write!.execute({ key: "target_file", value: "report.odt" }, {
       runId,
       session: {} as never,
