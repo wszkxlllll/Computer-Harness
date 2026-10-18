@@ -919,6 +919,8 @@ interface PrivateGrounding {
   readonly catalog: Omit<GroundingCatalog, "surfaceRef">;
   /** Exact native surface and window lifecycle that produced this catalog. */
   readonly windowBinding?: CuaWindowBinding;
+  /** Producer-local image viewport when public bounds are projected onto the desktop frame. */
+  readonly producerViewport?: Viewport;
   /** Current host-attested tab/generation, retained only by the Adapter. */
   readonly browserTarget?: ManagedBrowserTarget;
   /** Trusted physical browser content rect derived from the same observation's UIA Document. */
@@ -944,6 +946,8 @@ interface PrivateGroundingElement {
   readonly candidateFrame?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
   readonly selectable?: boolean;
   readonly geometry?: CuaWindowGeometry;
+  /** Window-local physical bounds retained for managed-browser dispatch after desktop projection. */
+  readonly dispatchBBox?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
   /** Stable private identity; excludes element token and editable value. */
   readonly uiaIdentityFingerprint?: string;
   /** Raw UIA token and snapshot are never projected to Runtime or Providers. */
@@ -1288,11 +1292,34 @@ export class CuaDriverComputer implements Computer {
             unknownActionReplayGuard.alternativeActionCompleted) {
           delete current.unknownActionReplayGuard;
         }
+        const desktopGrounding = await readAuthorizedDesktopGrounding({
+          mode: this.options.grounding,
+          driver: current.driver,
+          session: current.label,
+          sessionId: session.id,
+          observationId,
+          desktopViewport: { ...dimensions, coordinateSpace: "physical" },
+          current,
+          captureRetryOptions: this.windowCaptureRetryOptions,
+          platform: resolveCapturePlatform(this.options.platform, current.platform),
+          ...(this.options.windowRelationshipProbe === undefined ? {} : { relationshipProbe: this.options.windowRelationshipProbe }),
+          ...(this.options.domGroundingTransport === undefined ? {} : { domTransport: this.options.domGroundingTransport }),
+          signal,
+        });
+        const boundGrounding: BoundPrivateGrounding | undefined = desktopGrounding === undefined
+          ? undefined
+          : {
+            ...desktopGrounding,
+            catalog: { ...desktopGrounding.catalog, surfaceRef: observedSurfaceRef },
+            surfaceRef: observedSurfaceRef,
+          };
         this.observations.set(String(observationId), {
           sessionId: String(session.id),
           surfaceRef: observedSurfaceRef,
           viewport: current.descriptor.viewport,
         });
+        if (boundGrounding !== undefined) this.groundings.set(String(observationId), boundGrounding);
+        else this.groundings.delete(String(observationId));
         this.latestObservationId = observationId;
         const surfaceTransitionReason = takeSurfaceTransitionReason(current);
         return {
@@ -1301,6 +1328,7 @@ export class CuaDriverComputer implements Computer {
           surfaceRef: observedSurfaceRef,
           ...(surfaceTransitionReason === undefined ? {} : { surfaceTransitionReason }),
           screenshot: { mediaType: "image/png", data },
+          ...(boundGrounding === undefined ? {} : { grounding: boundGrounding.catalog }),
         };
       } catch (error) {
         const details = driverErrorDetails(error);
@@ -4124,6 +4152,26 @@ export class CuaDriverComputer implements Computer {
         return refused(action.actionId, "WINDOW_TARGET_UNKNOWN", "window target could not be verified before action");
       }
     }
+    if ((action.kind === "click" || action.kind === "select_option") && action.groundingRef !== undefined) {
+      const desktopGrounding = this.groundings.get(String(action.basedOn));
+      const desktopCandidate = desktopGrounding?.elements.get(action.groundingRef);
+      if (desktopGrounding?.surfaceRef.kind === "desktop" &&
+          (desktopCandidate === undefined ||
+          !(await revalidateDesktopManagedGrounding({
+            driver: current.driver,
+            session: current.label,
+            sessionId: session.id,
+            grounding: desktopGrounding,
+            candidate: desktopCandidate,
+            current,
+            platform: resolveCapturePlatform(this.options.platform, current.platform),
+            ...(this.options.windowRelationshipProbe === undefined ? {} : { relationshipProbe: this.options.windowRelationshipProbe }),
+            ...(this.options.domGroundingTransport === undefined ? {} : { domTransport: this.options.domGroundingTransport }),
+            signal,
+          })))) {
+        return refused(action.actionId, "GROUNDING_REF_STALE", "the managed browser window or tab changed since the desktop observation; no input was sent");
+      }
+    }
     const multilineTypeDispatch = resolveMultilineTypeDispatch(current.platform, action, this.options.multilineTypeProfile);
     const isMultilineType = multilineTypeDispatch !== "standard";
     const isMultilineUiaType = multilineTypeDispatch === "windows_uia";
@@ -4176,13 +4224,13 @@ export class CuaDriverComputer implements Computer {
       const request: DomSelectOptionRequest = {
         observationId: action.basedOn,
         computerSessionId: session.id,
-        viewport: decisionObservation?.viewport ?? session.viewport,
+        viewport: privateGrounding.producerViewport ?? decisionObservation?.viewport ?? session.viewport,
         browserTarget: target,
         candidate: {
           role: resolved.element.role,
           ...(resolved.element.name === undefined ? {} : { name: resolved.element.name }),
           ...(resolved.element.description === undefined ? {} : { description: resolved.element.description }),
-          bbox: {
+          bbox: resolved.dispatchBBox ?? {
             x: resolved.element.bbox.x,
             y: resolved.element.bbox.y,
             width: resolved.element.bbox.width,
@@ -4269,12 +4317,12 @@ export class CuaDriverComputer implements Computer {
       const request: DomClickRequest = {
         observationId: action.basedOn,
         computerSessionId: session.id,
-        viewport: decisionObservation?.viewport ?? session.viewport,
+        viewport: privateGrounding?.producerViewport ?? decisionObservation?.viewport ?? session.viewport,
         browserTarget,
         candidate: {
           role: browserGrounding.element.role,
           ...(browserGrounding.candidateName === undefined ? {} : { name: browserGrounding.candidateName }),
-          bbox: {
+          bbox: browserGrounding.dispatchBBox ?? {
             x: browserGrounding.element.bbox.x,
             y: browserGrounding.element.bbox.y,
             width: browserGrounding.element.bbox.width,
@@ -4354,9 +4402,9 @@ export class CuaDriverComputer implements Computer {
       this.expectedDomInput = {
         observationId: options?.executionObservationId ?? action.basedOn,
         computerSessionId: session.id,
-        viewport: decisionObservation?.viewport ?? session.viewport,
+        viewport: latestGrounding?.producerViewport ?? decisionObservation?.viewport ?? session.viewport,
         browserTarget: latestGrounding.browserTarget,
-        candidate: { role: candidate.element.role, ...(candidate.candidateName === undefined ? {} : { name: candidate.candidateName }), bbox: candidate.element.bbox, ...(candidate.candidateFrame === undefined ? {} : { frame: candidate.candidateFrame }), fingerprint: candidate.candidateFingerprint },
+        candidate: { role: candidate.element.role, ...(candidate.candidateName === undefined ? {} : { name: candidate.candidateName }), bbox: candidate.dispatchBBox ?? candidate.element.bbox, ...(candidate.candidateFrame === undefined ? {} : { frame: candidate.candidateFrame }), fingerprint: candidate.candidateFingerprint },
       };
     }
     // Escape can cancel editing or dismiss an overlay without entering text.
@@ -4932,6 +4980,281 @@ type GroundingToolResult = {
   readonly degraded?: boolean;
   readonly structuredJson?: string;
 };
+
+interface AuthorizedDesktopGroundingInput {
+  readonly mode: CuaGroundingMode | undefined;
+  readonly driver: CuaDriverLike;
+  readonly session: string;
+  readonly sessionId: ComputerSessionDescriptor["id"];
+  readonly observationId: ObservationId;
+  readonly desktopViewport: Viewport;
+  readonly current: PrivateSession;
+  readonly captureRetryOptions: WindowCaptureRetryOptions;
+  readonly platform: NodeJS.Platform;
+  readonly relationshipProbe?: WindowRelationshipProbe;
+  readonly domTransport?: DomGroundingTransport;
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Project one exact Host-authorized foreground window onto a full desktop
+ * observation. The inventory is used only as a visibility/occlusion check;
+ * unrelated rows never become Surfaces or grounding candidates.
+ */
+async function readAuthorizedDesktopGrounding(
+  input: AuthorizedDesktopGroundingInput,
+): Promise<PrivateGrounding | undefined> {
+  const { mode, driver, session, sessionId, observationId, desktopViewport, current, signal } = input;
+  const hostBrowserTarget = current.managedBrowserTarget;
+  const activeBrowserTarget = current.browserTarget ?? hostBrowserTarget;
+  if (mode !== "hybrid-catalog-v1" || hostBrowserTarget === undefined || activeBrowserTarget === undefined ||
+      desktopViewport.coordinateSpace !== "physical" ||
+      hostBrowserTarget.profileId !== activeBrowserTarget.profileId ||
+      windowIdentityKey(hostBrowserTarget.windowTarget) !== windowIdentityKey(activeBrowserTarget.windowTarget)) return undefined;
+  // Only the exact Browser target issued by the managed-browser Host is a
+  // desktop grounding source. The broader opened-window inventory remains a
+  // picker input and never authorizes additional native-app candidates here.
+  const authorized = new Map<string, CuaWindowTarget>([[windowIdentityKey(hostBrowserTarget.windowTarget), hostBrowserTarget.windowTarget]]);
+
+  try {
+    const before = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
+    const target = foregroundAuthorizedWindow(before, authorized);
+    if (target === undefined) return undefined;
+    const capture = await captureWindowWithRetry(
+      driver,
+      session,
+      target.target,
+      signal,
+      input.captureRetryOptions,
+      input.platform,
+    );
+    if (windowIdentityKey(capture.binding.target) !== windowIdentityKey(target.target) ||
+        !sameWindowGeometry(capture.binding.bounds, target.bounds) || capture.viewport.coordinateSpace !== "physical") {
+      return undefined;
+    }
+
+    const grounding = await readWindowGrounding(
+      mode,
+      driver,
+      session,
+      capture.binding,
+      capture.viewport,
+      observationId,
+      sessionId,
+      activeBrowserTarget,
+      input.domTransport,
+      signal,
+      false,
+      input.platform === "darwin",
+    );
+    if (grounding === undefined || grounding.elements.size === 0 || grounding.browserTarget === undefined) return undefined;
+    if (grounding.browserTarget.profileId !== activeBrowserTarget.profileId ||
+        windowIdentityKey(grounding.browserTarget.windowTarget) !== windowIdentityKey(activeBrowserTarget.windowTarget)) {
+      return undefined;
+    }
+    if (grounding.browserTarget.tabId !== activeBrowserTarget.tabId || grounding.browserTarget.generation !== activeBrowserTarget.generation) {
+      // A fresh host attestation can discover a user-selected tab, but it is
+      // not the tab shown in the desktop frame captured for this observation.
+      // Adopt that exact page for the next observation and keep this one visual.
+      current.browserTarget = grounding.browserTarget;
+      return undefined;
+    }
+
+    const after = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
+    if (!sameForegroundWindowSnapshot(before, after, target)) return undefined;
+    return projectGroundingToDesktop(grounding, capture, desktopViewport, target, after);
+  } catch (error) {
+    if (signal.aborted) signal.throwIfAborted();
+    // Desktop capture remains usable when an optional authorized grounding
+    // read is incomplete or unavailable.
+    return undefined;
+  }
+}
+
+function foregroundAuthorizedWindow(
+  inventory: CuaWindowInventory,
+  authorized: ReadonlyMap<string, CuaWindowTarget>,
+): CuaWindowInfo | undefined {
+  if (!inventory.complete || inventory.truncated === true || inventory.foregroundPid === undefined || inventory.foregroundWindowId === undefined) return undefined;
+  const foreground = { pid: inventory.foregroundPid, windowId: inventory.foregroundWindowId };
+  if (!authorized.has(windowIdentityKey(foreground))) return undefined;
+  const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(foreground));
+  const target = matches.length === 1 ? matches[0] : undefined;
+  if (target === undefined || target.isOnScreen !== true || target.minimized === true || target.zIndex === undefined) return undefined;
+  return target;
+}
+
+function sameForegroundWindowSnapshot(
+  before: CuaWindowInventory,
+  after: CuaWindowInventory,
+  target: CuaWindowInfo,
+): boolean {
+  if (!after.complete || after.truncated === true ||
+      after.foregroundPid !== target.target.pid || after.foregroundWindowId !== target.target.windowId) return false;
+  const matches = after.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target.target));
+  const latest = matches.length === 1 ? matches[0] : undefined;
+  const original = before.windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(target.target));
+  return latest !== undefined && original !== undefined && latest.isOnScreen === true && latest.minimized !== true &&
+    latest.zIndex === original.zIndex && sameWindowGeometry(latest.bounds, target.bounds);
+}
+
+interface DesktopGroundingFreshnessInput {
+  readonly driver: CuaDriverLike;
+  readonly session: string;
+  readonly sessionId: ComputerSessionDescriptor["id"];
+  readonly grounding: BoundPrivateGrounding;
+  readonly candidate: PrivateGroundingElement;
+  readonly current: PrivateSession;
+  readonly relationshipProbe?: WindowRelationshipProbe;
+  readonly platform: NodeJS.Platform;
+  readonly domTransport?: DomGroundingTransport;
+  readonly signal: AbortSignal;
+}
+
+/** Read-only freshness gate for an explicit desktop grounding reference. */
+async function revalidateDesktopManagedGrounding(input: DesktopGroundingFreshnessInput): Promise<boolean> {
+  const { grounding, candidate, current, driver, session, signal } = input;
+  const binding = grounding.windowBinding;
+  const browserTarget = grounding.browserTarget;
+  const hostTarget = current.managedBrowserTarget;
+  const transport = input.domTransport;
+  const viewport = grounding.producerViewport;
+  if (grounding.surfaceRef.kind !== "desktop" || binding === undefined || browserTarget === undefined ||
+      hostTarget === undefined || transport?.collect === undefined || viewport === undefined ||
+      browserTarget.profileId !== hostTarget.profileId ||
+      windowIdentityKey(browserTarget.windowTarget) !== windowIdentityKey(hostTarget.windowTarget) ||
+      windowIdentityKey(binding.target) !== windowIdentityKey(browserTarget.windowTarget)) return false;
+  const authorized = new Map<string, CuaWindowTarget>([[windowIdentityKey(hostTarget.windowTarget), hostTarget.windowTarget]]);
+  const bbox = candidate.element.bbox;
+  const scaleX = viewport.width / binding.bounds.width;
+  const scaleY = viewport.height / binding.bounds.height;
+  if (bbox === undefined || bbox.coordinateSpace !== "physical" ||
+      ![bbox.x, bbox.y, bbox.width, bbox.height, scaleX, scaleY].every(Number.isFinite) ||
+      bbox.width <= 0 || bbox.height <= 0 || scaleX <= 0 || scaleY <= 0 ||
+      Math.abs(scaleX - scaleY) > Math.max(scaleX, scaleY) * 0.01) return false;
+  try {
+    const before = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
+    const target = foregroundAuthorizedWindow(before, authorized);
+    if (target === undefined || !sameWindowGeometry(target.bounds, binding.bounds) ||
+        isOccludedDesktopGroundingCandidate(bbox, target, before, scaleX, scaleY)) return false;
+    const activePage = await transport.collect({
+      observationId: grounding.catalog.observationId,
+      computerSessionId: input.sessionId,
+      viewport,
+      browserTarget,
+    }, signal);
+    const after = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
+    const latestTarget = foregroundAuthorizedWindow(after, authorized);
+    if (latestTarget === undefined || !sameForegroundWindowSnapshot(before, after, target) ||
+        !sameWindowGeometry(latestTarget.bounds, binding.bounds) ||
+        isOccludedDesktopGroundingCandidate(bbox, latestTarget, after, scaleX, scaleY)) return false;
+    if (!isBoundedBrowserIdentity(activePage.tabId) || !isBoundedBrowserIdentity(activePage.generation)) return false;
+    if (activePage.tabId !== browserTarget.tabId || activePage.generation !== browserTarget.generation) {
+      // The exact Host-owned window now shows a different managed tab. Keep
+      // the next observation aligned with that Host attestation; never retarget
+      // the current action's old element reference.
+      current.browserTarget = { ...browserTarget, tabId: activePage.tabId, generation: activePage.generation };
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (signal.aborted) signal.throwIfAborted();
+    return false;
+  }
+}
+
+function projectGroundingToDesktop(
+  grounding: PrivateGrounding,
+  capture: CuaWindowCapture,
+  desktopViewport: Viewport,
+  target: CuaWindowInfo,
+  inventory: CuaWindowInventory,
+): PrivateGrounding | undefined {
+  const bounds = capture.binding.bounds;
+  const scaleX = capture.viewport.width / bounds.width;
+  const scaleY = capture.viewport.height / bounds.height;
+  if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0 ||
+      Math.abs(scaleX - scaleY) > Math.max(scaleX, scaleY) * 0.01) return undefined;
+  // Primary-desktop coordinates start at (0,0); use the exact target bounds
+  // for origin and the captured image/bounds ratio for physical pixel scale.
+  // A maximized window may extend beyond an edge, so only individual element
+  // boxes wholly inside the desktop image survive the clipping check below.
+  const windowFrame = {
+    x: bounds.x * scaleX,
+    y: bounds.y * scaleY,
+    width: capture.viewport.width,
+    height: capture.viewport.height,
+  };
+
+  const elements = new Map<string, PrivateGroundingElement>();
+  const publicElements: GroundingElement[] = [];
+  for (const observedElement of grounding.catalog.elements) {
+    const elementRef = observedElement.elementRef;
+    const candidate = grounding.elements.get(elementRef);
+    if (candidate === undefined) continue;
+    const local = candidate.element.bbox;
+    if (local === undefined || local.coordinateSpace !== "physical") continue;
+    const bbox = {
+      x: windowFrame.x + local.x,
+      y: windowFrame.y + local.y,
+      width: local.width,
+      height: local.height,
+      coordinateSpace: "physical" as const,
+    };
+    if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.width > desktopViewport.width || bbox.y + bbox.height > desktopViewport.height ||
+        isOccludedDesktopGroundingCandidate(bbox, target, inventory, scaleX, scaleY)) continue;
+    const point = { x: windowFrame.x + candidate.point.x, y: windowFrame.y + candidate.point.y };
+    const element: GroundingElement = { ...candidate.element, bbox };
+    elements.set(elementRef, {
+      ...candidate,
+      element,
+      point,
+      dispatchBBox: {
+        x: local.x,
+        y: local.y,
+        width: local.width,
+        height: local.height,
+      },
+    });
+    publicElements.push(element);
+  }
+  if (elements.size === 0) return undefined;
+  return {
+    ...grounding,
+    windowBinding: capture.binding,
+    producerViewport: capture.viewport,
+    elements,
+    catalog: {
+      ...grounding.catalog,
+      ...(publicElements.length === grounding.catalog.elements.length ? {} : { completeness: "partial" as const }),
+      elements: publicElements,
+    },
+  };
+}
+
+function isOccludedDesktopGroundingCandidate(
+  candidate: NonNullable<GroundingElement["bbox"]>,
+  target: CuaWindowInfo,
+  inventory: CuaWindowInventory,
+  scaleX: number,
+  scaleY: number,
+): boolean {
+  for (const window of inventory.windows) {
+    if (windowIdentityKey(window.target) === windowIdentityKey(target.target) || window.isOnScreen === false || window.minimized === true) continue;
+    const bounds = window.bounds;
+    const other = {
+      x: bounds.x * scaleX,
+      y: bounds.y * scaleY,
+      width: bounds.width * scaleX,
+      height: bounds.height * scaleY,
+    };
+    const overlaps = candidate.x < other.x + other.width && candidate.x + candidate.width > other.x &&
+      candidate.y < other.y + other.height && candidate.y + candidate.height > other.y;
+    if (!overlaps) continue;
+    if (window.zIndex === undefined || target.zIndex === undefined || window.zIndex > target.zIndex) return true;
+  }
+  return false;
+}
 
 async function readWindowGrounding(
   mode: CuaGroundingMode | undefined,

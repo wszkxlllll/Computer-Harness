@@ -132,8 +132,16 @@ export interface ChatCompletionsBoundary {
   readonly cacheUsageFormat?: "flat-prompt-cache" | "nested-prompt-details";
   /** Whether protocol-shape errors from a complete strict Provider response may use Runtime feedback retry. */
   readonly strictResponseRetryable?: boolean;
+  /** Optional provider-specific projection for selected HTTP failures; omitted preserves the status-only strict boundary. */
+  readonly httpError?: (failure: ChatCompletionsHttpFailure) => Error | undefined;
   readonly error: (message: string, code?: string, retryable?: boolean, retryMode?: GlmRetryMode) => Error;
   readonly isProviderError: (error: unknown) => boolean;
+}
+
+export interface ChatCompletionsHttpFailure {
+  readonly status: number;
+  readonly payload: unknown;
+  readonly retryAfterHeader: string | null;
 }
 
 const glmBoundary: ChatCompletionsBoundary = {
@@ -502,6 +510,12 @@ export class FetchChatCompletionsHttpClient implements GlmHttpClient {
       checkActive();
       if (!response.ok) {
         if (boundary.strictResponse) {
+          const projectedError = boundary.httpError?.({
+            status: response.status,
+            payload,
+            retryAfterHeader: response.headers.get("retry-after"),
+          });
+          if (projectedError !== undefined) throw projectedError;
           throw providerError(boundary, `GLM HTTP ${response.status}`, `GLM_HTTP_${response.status}`, false);
         }
         const code = readErrorCode(payload);
@@ -534,6 +548,12 @@ export class FetchChatCompletionsHttpClient implements GlmHttpClient {
       if (phase === "before_fetch") throw error;
       if (boundary.strictResponse && response !== undefined && !response.ok) {
         emit({ stage, outcome: "http_error", phase, elapsedMs: elapsedMs(), ...status });
+        const projectedError = boundary.httpError?.({
+          status: response.status,
+          payload: undefined,
+          retryAfterHeader: response.headers.get("retry-after"),
+        });
+        if (projectedError !== undefined) throw projectedError;
         throw providerError(boundary, `GLM HTTP ${response.status}`, `GLM_HTTP_${response.status}`, false);
       }
       if (boundary.strictResponse && phase === "reading_body" && error instanceof SyntaxError) {

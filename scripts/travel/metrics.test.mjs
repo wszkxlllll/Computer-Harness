@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { collectMetrics, collectTrial } from "./metrics.mjs";
+import { collectMetrics, collectTrial, readMetricsArtifacts } from "./metrics.mjs";
 
 const runId = "travel-run-a";
 
@@ -138,7 +138,7 @@ function completeEvents() {
     event("approval.resolved", 13, { requestId: "approval-1", approved: true }),
     event("action.execution.started", 14, { action: action("action-1") }),
     event("action.execution.completed", 15, { receipt: { actionId: "action-1", status: "completed", message: "private receipt" } }),
-    event("model.request.started", 16, { requestId: "request-2", contextBudget: { mode: "raw", estimatedInputTokens: 40, selectedHistoryEvents: 1, omittedHistoryEvents: 0, trace: { compilerVersion: "test", runId, stablePrefixHash: "prefix-b", fixedBlocks: [], selectedEventIds: [], discardedEvents: [], authoritativeUserEventIds: [], observationIncluded: false } } }),
+    event("model.request.started", 16, { requestId: "request-2", contextBudget: { mode: "raw", estimatedInputTokens: 40, selectedHistoryEvents: 1, omittedHistoryEvents: 0, monitorGuidanceIncluded: false, trace: { compilerVersion: "test", runId, stablePrefixHash: "prefix-b", fixedBlocks: [], selectedEventIds: [], discardedEvents: [], authoritativeUserEventIds: [], observationIncluded: false, monitorGuidanceIncluded: true } } }),
     event("model.response.received", 17, {
       requestId: "request-2",
       turn: {
@@ -184,13 +184,14 @@ function completeEvents() {
   ];
 }
 
-async function makeTrial(root, { trial = {}, summary, trajectoryText, manual = "manual sentinel\n" } = {}) {
+async function makeTrial(root, { trial = {}, summary, trajectoryText, providerExchangeText, manual = "manual sentinel\n" } = {}) {
   const trialDirectory = join(root, "trial-1");
   await mkdir(join(trialDirectory, "runtime"), { recursive: true });
   await writeFile(join(trialDirectory, "trial.json"), `${JSON.stringify({ trialId: "trial-1", taskId: "T01", split: "development", ...trial })}\n`, "utf8");
   await writeFile(join(trialDirectory, "manual-review.md"), manual, "utf8");
   if (summary !== undefined) await writeFile(join(trialDirectory, "runtime", "summary.json"), `${JSON.stringify(summary)}\n`, "utf8");
   if (trajectoryText !== undefined) await writeFile(join(trialDirectory, "runtime", "trajectory.jsonl"), trajectoryText, "utf8");
+  if (providerExchangeText !== undefined) await writeFile(join(trialDirectory, "runtime", "provider-exchanges.jsonl"), providerExchangeText, "utf8");
   return trialDirectory;
 }
 
@@ -226,6 +227,9 @@ test("collects complete base and module evidence without raw payloads", async (t
   assert.equal(metrics.context.memory.revalidationCount, 1);
   assert.equal(metrics.context.memory.excludedCount, 1);
   assert.equal(metrics.context.memory.retrievalDegradedCount, 1);
+  assert.equal(metrics.context.monitorGuidanceIncluded.true, 2, "same-request markers are ORed once, including conflicting false/true evidence");
+  assert.equal(metrics.context.monitorGuidanceIncluded.false, 0);
+  assert.equal(metrics.monitor.guidanceIncludedInContext, 2);
   assert.equal(metrics.context.planIncludedRequests, 1);
   assert.equal(metrics.planning.calls, 1);
   assert.equal(metrics.planning.updates, 1);
@@ -258,12 +262,129 @@ test("collects complete base and module evidence without raw payloads", async (t
   assert.equal(Object.hasOwn(metrics, "localPolicy"), false);
   assert.equal(Object.hasOwn(metrics.usageByComponent, "localPolicy"), false);
   assert.equal(metrics.usage.totalTokens, 176);
+  assert.equal(metrics.turnUsage.totalTokens, 170, "turn usage excludes the separate Guard component");
+  assert.equal(metrics.providerApiUsage.status, "missing");
+  assert.equal(metrics.providerApiUsage.source, "unavailable");
+  assert.equal(metrics.providerApiUsage.fallback.source, "Runtime successful-turn usage; excludes rejected/transport-failed API responses");
+  assert.deepEqual(metrics.providerApiUsage.totals, {
+    inputTokens: null,
+    outputTokens: null,
+    totalTokens: null,
+    cacheReadTokens: null,
+    cacheMissTokens: null,
+  });
   assert.equal(metrics.allModelUsage.totalTokens, metrics.usageByComponent.mainProvider.totalTokens + metrics.usageByComponent.guard.totalTokens);
   assert.equal(await readFile(join(trialDirectory, "manual-review.md"), "utf8"), manual);
   const serialized = JSON.stringify(metrics);
   assert.equal(serialized.includes("typed-secret"), false);
   assert.equal(serialized.includes("private response text"), false);
   assert.equal(serialized.includes("screenshots/private.png"), false);
+});
+
+test("provider exchange usage counts each paid call, retry, and risk call while keeping missing usage unknown", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-metrics-provider-exchanges-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const exchanges = [
+    {
+      provider: "deepseek", request: 1, runId, requestId: "formatted-request", decisionId: "same-decision", attempt: 1,
+      latencyMs: 1200,
+      httpEvidence: { source: "fetch", stages: [{ elapsedMs: 150 }, { elapsedMs: 200 }] },
+      response: { diagnosticCodes: ["structured_invalid_json"], usage: { promptTokens: 16_340, completionTokens: 545, totalTokens: 16_885, cachedReadTokens: 16_000, cacheMissTokens: 340 } },
+    },
+    {
+      provider: "deepseek", request: 2, runId, requestId: "formatted-request", decisionId: "same-decision", attempt: 2,
+      latencyMs: 800,
+      response: { usage: { promptTokens: 950, completionTokens: 31, totalTokens: 981, cachedReadTokens: 900, cacheMissTokens: 50 } },
+    },
+    {
+      provider: "ark", request: 1, runId, requestId: "risk-request", decisionId: "risk-decision", attempt: 1,
+      latencyMs: 300,
+      response: { usage: { promptTokens: 200, completionTokens: 10, totalTokens: 210 } },
+    },
+    {
+      provider: "deepseek", request: 3, runId, requestId: "limited-request", decisionId: "limited-decision", attempt: 1,
+      latencyMs: 300,
+      httpEvidence: { source: "fetch", stages: [{ elapsedMs: 120 }, { elapsedMs: 140 }] },
+      transportError: { code: "DEEPSEEK_HTTP_429" },
+    },
+  ];
+  const trialDirectory = await makeTrial(root, {
+    summary: { runId, runtimeOutcome: "failed", modelUsage: { inputTokens: 190, outputTokens: 30, totalTokens: 170 } },
+    trajectoryText: `${completeEvents().map((item) => JSON.stringify(item)).join("\n")}\n`,
+    providerExchangeText: `${exchanges.map((item) => JSON.stringify(item)).join("\n")}\n`,
+  });
+
+  const metrics = await collectTrial(trialDirectory, { root });
+  assert.equal(metrics.turnUsage.inputTokens, 140);
+  assert.equal(metrics.turnUsage.outputTokens, 30);
+  assert.equal(metrics.turnUsage.totalTokens, 170);
+  assert.equal(metrics.providerApiUsage.source, "provider-exchanges.jsonl");
+  assert.equal(metrics.providerApiUsage.status, "partial");
+  assert.deepEqual(metrics.providerApiUsage.calls, {
+    observed: 4,
+    withReportedUsage: 3,
+    withoutReportedUsage: 1,
+    unparsedRecords: 0,
+  });
+  assert.deepEqual(metrics.providerApiUsage.totals, {
+    inputTokens: 17_490,
+    outputTokens: 586,
+    totalTokens: 18_076,
+    cacheReadTokens: 16_900,
+    cacheMissTokens: 390,
+  });
+  assert.equal(metrics.providerApiUsage.fieldCoverage.totalTokens.unknownCalls, 1);
+  assert.equal(metrics.providerApiUsage.fieldCoverage.cacheReadTokens.unknownCalls, 2);
+  assert.equal(metrics.providerApiUsage.retryRecords, 1);
+  assert.deepEqual(metrics.providerApiUsage.byProvider, { ark: 1, deepseek: 3 });
+  assert.equal(metrics.providerApiUsage.latency.totalMs, 2600, "uses one provider-call latency per row, not HTTP-stage elapsedMs");
+  assert.equal(metrics.providerApiUsage.interpretation.includes("unknown, not zero"), true);
+  const serialized = JSON.stringify(metrics.providerApiUsage);
+  assert.equal(serialized.includes("same-decision"), false);
+  assert.equal(serialized.includes("risk-request"), false);
+
+  const rejectedWithoutUsage = collectMetrics({
+    summary: { runId, runtimeOutcome: "failed" },
+    events: [],
+    trajectory: { present: true, events: [] },
+    providerExchanges: {
+      present: true,
+      readable: true,
+      records: [{ provider: "deepseek", request: 1, attempt: 1, latencyMs: 300, transportError: { code: "DEEPSEEK_HTTP_429" } }],
+      parseErrors: 0,
+      invalidRecords: 0,
+    },
+  });
+  assert.equal(rejectedWithoutUsage.providerApiUsage.calls.observed, 1);
+  assert.equal(rejectedWithoutUsage.providerApiUsage.calls.withoutReportedUsage, 1);
+  assert.equal(rejectedWithoutUsage.providerApiUsage.totals.totalTokens, null, "429 without usage is unknown, not zero");
+  assert.equal(rejectedWithoutUsage.providerApiUsage.fieldCoverage.totalTokens.unknownCalls, 1);
+});
+
+test("provider exchange artifact is read once and malformed or absent usage remains explicitly partial", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "travel-metrics-provider-partial-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const trialDirectory = await makeTrial(root, {
+    summary: { runId, runtimeOutcome: "succeeded" },
+    trajectoryText: `${completeEvents().map((item) => JSON.stringify(item)).join("\n")}\n`,
+    providerExchangeText: `${JSON.stringify({ provider: "deepseek", request: 1, latencyMs: 25, response: { usage: { promptTokens: 3, completionTokens: 1, totalTokens: 4 } } })}\nnot-json\n`,
+  });
+  const runtimeDir = join(trialDirectory, "runtime");
+  const artifacts = await readMetricsArtifacts(runtimeDir, { includeSummary: false });
+  assert.equal(artifacts.summary, null, "caller can avoid rereading a summary it already validated");
+  assert.equal(artifacts.providerExchanges.records.length, 1);
+  const metrics = collectMetrics({
+    summary: { runId, runtimeOutcome: "succeeded" },
+    events: artifacts.events,
+    trajectory: artifacts.trajectory,
+    providerExchanges: artifacts.providerExchanges,
+    errors: artifacts.errors,
+  });
+  assert.equal(metrics.providerApiUsage.calls.observed, 1);
+  assert.equal(metrics.providerApiUsage.calls.unparsedRecords, 1);
+  assert.equal(metrics.providerApiUsage.status, "partial");
+  assert.equal(metrics.providerApiUsage.totals.totalTokens, 4);
+  assert.equal(metrics.dataQuality.errors.some((item) => item.code === "invalid_jsonl" && item.path === "runtime/provider-exchanges.jsonl"), true);
 });
 
 test("collects click_element lifecycle and refusal codes without payloads", async (t) => {

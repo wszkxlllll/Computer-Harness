@@ -137,7 +137,7 @@ describe("MonitorPolicy", () => {
     expect(stale.state.candidateFingerprint).toBeUndefined();
   });
 
-  it("restores the bounded budget only after changed evidence or age expiry", () => {
+  it("does not erase a bounded unresolved episode just because pixels changed", () => {
     let state = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 4, maxGuidanceCount: 1, cooldownWorkUnits: 1 });
     state = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate())).state;
     const first = reduceMonitorPolicy(state, input(2, { modelDecisionCount: 2, guiActionCount: 0 }, candidate()));
@@ -154,11 +154,51 @@ describe("MonitorPolicy", () => {
       evidence: [{ kind: "visual_transition_changed", eventIds: ["changed" as EventId] }],
       eventIds: ["changed" as EventId],
     }));
-    expect(changed.state.guidanceCount).toBe(0);
-    const freshEpisode = reduceMonitorPolicy(changed.state, input(6, { modelDecisionCount: 5, guiActionCount: 1 }, candidate("fresh-candidate")));
+    expect(changed.state.guidanceCount).toBe(1);
+    expect(changed.state.candidateFingerprint).toBeDefined();
+    const stillUnresolved = reduceMonitorPolicy(changed.state, input(6, { modelDecisionCount: 5, guiActionCount: 1 }, candidate("same-target-again")));
+    expect(stillUnresolved.proposal).toEqual({ kind: "none", reason: "guidance_budget_exhausted" });
+
+    const agedOut = reduceMonitorPolicy(stillUnresolved.state, input(7, { modelDecisionCount: 7, guiActionCount: 1 }));
+    expect(agedOut.state.guidanceCount).toBe(0);
+    expect(agedOut.state.candidateFingerprint).toBeUndefined();
+    const freshEpisode = reduceMonitorPolicy(agedOut.state, input(8, { modelDecisionCount: 8, guiActionCount: 1 }, candidate("fresh-candidate")));
     expect(freshEpisode.proposal).toEqual({ kind: "none", reason: "candidate_observed" });
-    const freshGuidance = reduceMonitorPolicy(freshEpisode.state, input(7, { modelDecisionCount: 6, guiActionCount: 1 }, candidate("fresh-candidate")));
+    const freshGuidance = reduceMonitorPolicy(freshEpisode.state, input(9, { modelDecisionCount: 9, guiActionCount: 1 }, candidate("fresh-candidate")));
     expect(freshGuidance.proposal.kind).toBe("guidance");
+  });
+
+  it("preserves bound no-effect episodes but resets unrelated candidates on changed pixels", () => {
+    const initial = reduceMonitorPolicy(
+      createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 1 }),
+      input(1, { modelDecisionCount: 1, guiActionCount: 1 }, unchangedTransition()),
+    );
+    const guidance = reduceMonitorPolicy(initial.state, input(2, { modelDecisionCount: 2, guiActionCount: 1 }, unchangedTransition()));
+    expect(guidance.proposal.kind).toBe("guidance");
+    const changedNoEffect = reduceMonitorPolicy(guidance.state, input(3, { modelDecisionCount: 2, guiActionCount: 2 }, {
+      candidate: false,
+      reasons: [],
+      evidence: [{ kind: "visual_transition_changed", eventIds: ["changed-no-effect" as EventId] }],
+      eventIds: ["changed-no-effect" as EventId],
+    }));
+    expect(changedNoEffect.state.candidateFingerprint).toMatch(/^no_observed_change:/u);
+
+    const proposalOnly: MonitorPolicyInput["monitor"] = {
+      candidate: true,
+      reasons: [{ code: "repeated_proposal", eventIds: ["proposal-only" as EventId] }],
+      evidence: [{ kind: "action_proposed", eventIds: ["proposal-only" as EventId] }],
+      eventIds: ["proposal-only" as EventId],
+    };
+    const firstProposal = reduceMonitorPolicy(createMonitorPolicyState({ mode: "guidance" }), input(1, { modelDecisionCount: 1, guiActionCount: 0 }, proposalOnly));
+    const proposalGuidance = reduceMonitorPolicy(firstProposal.state, input(2, { modelDecisionCount: 2, guiActionCount: 0 }, proposalOnly));
+    const changedProposal = reduceMonitorPolicy(proposalGuidance.state, input(3, { modelDecisionCount: 2, guiActionCount: 1 }, {
+      candidate: false,
+      reasons: [],
+      evidence: [{ kind: "visual_transition_changed", eventIds: ["changed-proposal" as EventId] }],
+      eventIds: ["changed-proposal" as EventId],
+    }));
+    expect(changedProposal.state.candidateFingerprint).toBeUndefined();
+    expect(changedProposal.state.guidanceCount).toBe(0);
   });
 
   it("lets execution barriers suppress monitor proposals and never turns unknown into waiting_user", () => {
