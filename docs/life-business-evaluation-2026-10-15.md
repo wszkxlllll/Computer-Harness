@@ -21,7 +21,7 @@
 
 最终严格Run中，Context三次请求的 `monitorGuidanceIncluded=false`、估算0 tokens；有1条 `monitor.proposal`、2条 `monitor.transition`，未观察到 `grounding.selection.recovery` 重排字段/记录。因此本Run未观察到Monitor guidance注入或recovery重排，不能把 `shadow` 声称为全程零影响。首帧候选进入模型请求、被模型选用、DOM动作receipt完成及文章截图复核是分别核对的三个阶段。当前窗口切tab后中间观察没有catalog，下一观察恢复候选；这属于旧tab/generation不匹配时的安全视觉降级与fresh observation恢复，不把缺ref帧强行填充。
 
-运行结束后仅关闭本次Harness拥有的ephemeral Browser/Computer并确认无物理桌面lease；没有删除持久profile/cookies、登录页或旧标签。Preview Host仍存活、`127.0.0.1:4318` 未重启；未部署、未commit/push。以上Run及失败记录均保留供复核。
+实测结束时仅关闭本次Harness拥有的ephemeral Browser/Computer并确认无物理桌面lease；没有删除持久profile/cookies、登录页或旧标签，当时尚未部署。用户随后授权发布：[PR #39](https://github.com/wszkxlllll/Computer-Harness/pull/39) 的四组CI及必需检查全部通过，已合入main `8d77912`。本机Preview Host已备份并更新，关键构建指纹与真实测试候选一致；本地连接页、公网Preview页面及health均HTTP200，新Host已连接8443 Relay。Web/Relay无本轮代码变化、未无关替换；旧构建和原登录profile保留。手机需要重新扫码。本次发布后未自动重跑业务任务或声称手机端已验收，详见[发布记录](./voice-preview-deploy-phone-test-2026-09-29.md)。以上Run及失败记录均保留供复核。
 
 ## 2026-10-18 修复与无障碍复查（历史记录：离线验收完成；当时已发布 Preview）
 

@@ -1,6 +1,6 @@
 # Computer Harness 文档索引
 
-2026-10-18 最新受控实测：[全桌面浏览器候选修复与真实执行证据](./life-business-evaluation-2026-10-15.md)。修复 companion 缺少窗口证据与只读枚举抖动；真实 Harness／方舟 DeepSeek 请求含 DOM 候选，模型通过 `click_element` 打开官网文章，后续全桌面截图独立确认。无候选仍保留视觉操作，不改普通窗口切换；全量 Vitest 2570/2570。此增量仅本地候选验证，尚未提交或部署，不追溯升级原业务评测结果。shadow 不注入提示正文，但现有检测可能间接影响候选排序。
+2026-10-18 最新受控实测与发布：[全桌面浏览器候选修复与真实执行证据](./life-business-evaluation-2026-10-15.md)。修复 companion 缺少窗口证据与只读枚举抖动；真实 Harness／方舟 DeepSeek 请求含 DOM 候选，模型通过 `click_element` 打开官网文章，后续全桌面截图独立确认。无候选仍保留视觉操作，不改普通窗口切换；全量 Vitest 2570/2570。[PR #39](https://github.com/wszkxlllll/Computer-Harness/pull/39) 全部 CI 通过并合入 main `8d77912`；本机 Preview Host 已更新、旧构建保留，Web/Relay 无本轮代码变化。手机重新扫码，详见[发布记录](./voice-preview-deploy-phone-test-2026-09-29.md)。不追溯升级原业务评测结果。shadow 不注入提示正文，但现有检测可能间接影响候选排序。
 
 2026-10-18 修复发布（上一次部署）：[发布／备份／重新配对与回退](./voice-preview-deploy-phone-test-2026-09-29.md)、[六类评测与修复](./life-business-evaluation-2026-10-15.md)、[集中审查](./life-repair-concentrated-review-2026-10-18.md)。Monitor、限流、受管浏览器桌面候选、Memory、指标及完整语句/审批计划朗读已修，Sol 增量复审 GO；本机 Vitest 2563/2563、类型与 Web 构建通过。源码 `480126a` 已推送并部署 Preview Web/Relay＋本机 Host，旧版保留、正式入口不变，手机重新扫码。CI 首轮暴露的 Mac/Windows 测试路径别名已修，[最终四矩阵及必需检查全部通过](https://github.com/wszkxlllll/Computer-Harness/actions/runs/39105768682)，验证 head `a38a815`；本机另有 10 项 symlink 权限失败，未冒充本机通过。该次发布未调用付费 API 或重跑业务任务；iPhone VoiceOver 及业务效果待实机验收。
 

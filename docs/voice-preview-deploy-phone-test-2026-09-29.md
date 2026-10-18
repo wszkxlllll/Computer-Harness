@@ -1,7 +1,18 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29（持续更新）
-状态：2026-10-18 已发布 Preview `2026-10-18-life-repair-480126a`，服务器 Web/Relay 和本机 Host 均已切换；原 Preview 与本机旧代码、构建和配置保留。Relay/Host 重启清空内存配对，需要重新扫码；浏览器登录 profile 未清理。以下旧日期记录按历史保留，不覆盖本节。
+状态：2026-10-18 Preview 本机 Host 已追加更新至 main `8d77912`（PR #39）；服务器 Web/Relay 仍为 `2026-10-18-life-repair-480126a`，本次没有相关代码变更，无需重复替换。原 Preview 与本机旧代码、构建和配置保留。Host 重启后需要重新扫码；浏览器登录 profile 未清理。以下旧日期记录按历史保留。
+
+## 2026-10-18：全桌面浏览器候选增量发布
+
+[PR #39](https://github.com/wszkxlllll/Computer-Harness/pull/39) 四组CI及必需检查通过后合入main。本次仅更新电脑Host所用的App Runtime/CUA构建，保留全桌面截图、普通视觉操作及原窗口切换路线；补齐专用窗口证据并对非原子枚举抖动做有界只读重采样，不重试GUI输入。真实Harness已验证DOM候选进入API、模型调用`click_element`、回执完成及动作后文章截图；不将此受控机制测试等同于整批业务成功。
+
+- 地址不变：电脑 `http://127.0.0.1:4318/connect`；手机 [Preview](https://47.108.197.221:8443/)。刷新并扫描新的二维码，在电脑确认连接。
+- 默认模型仍为GLM-5.3-Flash low；本轮真实机制验证使用方舟DeepSeek，不代表Host默认已切换。模块及操作范围按用户设置，没有自动批准动作。
+- 新Host进程和8443 Relay连接已核对，本地连接页、公网页面与health均HTTP200。未替换正式443服务；没有清理持久登录资料，手机交互/声音需用户后续体验。
+- 本机旧构建备份位于本次checkout的 `runs/preview-desktop-grounding-20261018/backup/`，保留Host、App Runtime、CUA原dist及旧启动配置副本；本轮未改变CUA daemon二进制。部署操作记录和日志保留在同一忽略目录。回退时先确认无活动Run，再关闭本次Host、恢复这三个旧dist目录，并使用原启动入口；不要清理profile或重放旧动作。
+
+本轮原始失败和成功Run都保留，详见[实测记录](./life-business-evaluation-2026-10-15.md)。
 
 ## 2026-10-18：生活任务修复与无障碍／审批朗读版本
 
