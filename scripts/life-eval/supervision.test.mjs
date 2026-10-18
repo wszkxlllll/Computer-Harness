@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -164,7 +164,7 @@ test("inspect/read uses the frozen package runtime-output RunId and never the do
   assert.equal(inspected.evidenceFresh, true);
   assert.equal(inspected.latestObservation.id, observationId);
   const read = await readSupervision(fixture.packageDir, { afterSequence: 1, limit: 10 });
-  assert.equal(read.trajectoryPath, join(fixture.outputBase, runId, "trajectory.jsonl"));
+  assert.equal(read.trajectoryPath, await realpath(join(fixture.outputBase, runId, "trajectory.jsonl")));
   assert.equal(read.latestScreenshotPath, fixture.screenshotPath);
   assert.notEqual(read.latestScreenshotPath, fixture.outputAttemptDir);
   assert.equal(read.events.some((event) => event.type === "observation.created"), true);
