@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SUITE_ID, manifestPathForSuite, sha256 } from "./common.mjs";
-import { renderGoal } from "./prepare.mjs";
+import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SIX_DOMAIN_SUITE_ID, SIX_DOMAIN_VARIANTS, SUITE_ID, manifestPathForSuite, sha256 } from "./common.mjs";
+import { createPlan, renderGoal } from "./prepare.mjs";
 import {
   beijingDate,
   buildNextCommands,
@@ -87,6 +87,19 @@ test("start accepts explicit output/date/socket overrides without connecting to 
   assert.equal(built.prepareOptions["--profile-label"], "profile-override");
   assert.equal(built.cuaSocket, "\\\\.\\pipe\\cua-test");
   assert.throws(() => buildPrepareOptions({ ...args, "--cua-socket": "   " }, { config: fixtureConfig }), /must not be empty/u);
+});
+
+test("start honors an explicitly frozen as-of date when deriving the default travel date", () => {
+  const args = parseStartArgs([
+    "--task-id", "T03",
+    "--variant", "A",
+    "--suite", SIX_DOMAIN_SUITE_ID,
+    "--as-of-date", "2026-10-18",
+  ]);
+  const built = buildPrepareOptions(args, { now: new Date("2026-10-10T10:00:00.000Z"), config: fixtureConfig });
+  assert.equal(built.prepareOptions["--as-of-date"], "2026-10-18");
+  assert.equal(built.prepareOptions["--travel-date"], "2026-10-19");
+  assert.deepEqual(Object.keys(SIX_DOMAIN_VARIANTS), ["A", "B", "C", "D"]);
 });
 
 test("start selects the six-task suite explicitly and freezes its configured Ark key-variable name", async () => {
@@ -274,6 +287,136 @@ test("start prepares the shopping suite under its own runs path without reading 
   } finally {
     if (packageId !== undefined && packageDir !== undefined) {
       assert.equal(packageDir, join(ROOT, "runs", SHOPPING_COMMUNICATION_SUITE_ID, packageId));
+      await rm(packageDir, { recursive: true, force: false });
+    }
+    await rm(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test("six-domain suite preserves source goals and provenance while isolating CP02 oracle values", async () => {
+  const newManifestPath = manifestPathForSuite(SIX_DOMAIN_SUITE_ID);
+  const manifest = JSON.parse(await readFile(newManifestPath, "utf8"));
+  const oldManifest = JSON.parse(await readFile(MANIFEST_PATH, "utf8"));
+  const shoppingManifest = JSON.parse(await readFile(manifestPathForSuite(SHOPPING_COMMUNICATION_SUITE_ID), "utf8"));
+  const expectedIds = ["G01", "T03", "M02", "S02", "CM02", "CP02"];
+  assert.equal(manifest.suiteId, SIX_DOMAIN_SUITE_ID);
+  assert.deepEqual(manifest.tasks.map((task) => task.id), expectedIds);
+  assert.deepEqual(manifest.experiment.arms, {
+    A: { planning: false, memory: "off", retrieval: "off", supervision: "observe" },
+    B: { planning: true, memory: "facts", retrieval: "lexical", supervision: "observe" },
+    C: { planning: false, memory: "off", retrieval: "off", supervision: "dynamic" },
+    D: { planning: true, memory: "facts", retrieval: "lexical", supervision: "dynamic" },
+  });
+  for (const taskId of ["G01", "T03", "M02"]) {
+    const actual = manifest.tasks.find((task) => task.id === taskId);
+    const source = oldManifest.tasks.find((task) => task.id === taskId);
+    const expectedGoal = taskId === "T03"
+      ? `${source.goal}如高德地图请求浏览器定位权限，可以选择允许本次请求；这不授权其他网站或其他类型的权限。`
+      : source.goal;
+    assert.equal(actual.goal, expectedGoal);
+    assert.deepEqual(actual.checks, source.checks);
+    assert.equal(actual.sourceProvenance.sourceSuiteId, oldManifest.suiteId);
+  }
+  for (const taskId of ["S02", "CM02"]) {
+    const actual = manifest.tasks.find((task) => task.id === taskId);
+    const source = shoppingManifest.tasks.find((task) => task.id === taskId);
+    assert.equal(actual.goal, source.goal);
+    assert.deepEqual(actual.checks, source.checks);
+    assert.equal(actual.sourceProvenance.sourceSuiteId, shoppingManifest.suiteId);
+  }
+  const cp02 = manifest.tasks.find((task) => task.id === "CP02");
+  const cp02Source = JSON.parse(await readFile("eval/candidates/member-c-public-local-d01-20261011/payment-manifest.v1.json", "utf8"));
+  const cp02SourceGoal = cp02Source.taskFamilies.find((family) => family.cardId === "CP02").variants.find((variant) => variant.id === "v1").goal;
+  assert.equal(cp02.goal, cp02SourceGoal);
+  assert.equal(cp02.sourceProvenance.sourceVariant, "v1");
+  assert.equal(cp02.sourceProvenance.split, "development");
+  assert.match(cp02.goal, /69\.00/u);
+  assert.doesNotMatch(cp02.goal, /68\.55|42\.45/u);
+  const answerKey = JSON.parse(await readFile("eval/life-business-six-domain-20261018/operator-only-answer-key.json", "utf8"));
+  assert.equal(answerKey.expectedSyntheticCalculation.expectedAmountYuan, "68.55");
+  assert.equal(manifest.scoring.oracleFile, "operator-only-answer-key.json");
+  assert.equal(JSON.stringify(manifest.tasks).includes("68.55"), false);
+  assert.equal(manifest.readiness.guiPreflightStatus, "pending");
+});
+
+test("six-domain offline plans freeze Ark guidance, primary desktop, and each A-D arm without reading env files", async () => {
+  const outputRoot = await mkdtemp(join(tmpdir(), "life-eval-six-domain-plan-test-"));
+  const candidateDriverPath = join(outputRoot, "candidate-driver.exe");
+  const candidateDriverBytes = "fixture-only-six-domain-cua-driver";
+  await writeFile(candidateDriverPath, candidateDriverBytes, { encoding: "utf8", flag: "wx" });
+  const envFilePath = join(outputRoot, "not-read.env");
+  const expected = {
+    A: { planning: false, memory: "off", retrieval: "off", mode: "observe" },
+    B: { planning: true, memory: "facts", retrieval: "lexical", mode: "observe" },
+    C: { planning: false, memory: "off", retrieval: "off", mode: "dynamic" },
+    D: { planning: true, memory: "facts", retrieval: "lexical", mode: "dynamic" },
+  };
+  const ownedPackages = [];
+  try {
+    for (const [variant, settings] of Object.entries(expected)) {
+      const options = {
+        "--suite": SIX_DOMAIN_SUITE_ID,
+        "--output-dir": outputRoot,
+        "--profile-label": "travel",
+        "--as-of-date": "2026-10-18",
+        "--travel-date": "2026-10-19",
+        "--task-id": "G01",
+        "--variant": variant,
+        "--api-key-env": "HUOSHAN_API_KEY",
+      };
+      const prepared = await createPlan(options, {
+        root: ROOT,
+        manifestPath: manifestPathForSuite(SIX_DOMAIN_SUITE_ID),
+        now: () => new Date("2026-10-18T03:00:00.000Z"),
+        candidateDriver: {
+          binaryPath: candidateDriverPath,
+          sha256: sha256(candidateDriverBytes),
+          version: "0.22.2",
+          sourceCommit: "fixture-six-domain",
+        },
+        envFilePath,
+      });
+      ownedPackages.push(prepared.packageDir);
+      assert.equal(prepared.plan.suiteId, SIX_DOMAIN_SUITE_ID);
+      assert.equal(prepared.plan.selection.variant, variant);
+      assert.equal(prepared.plan.configuration.model, "deepseek-v4.1-flash");
+      assert.equal(prepared.plan.configuration.thinking, "disabled");
+      assert.equal(prepared.plan.configuration.batching, "off");
+      assert.equal(prepared.plan.configuration.monitor, "guidance");
+      assert.equal(prepared.plan.configuration.contextMode, "recent");
+      assert.equal(prepared.plan.configuration.contextMaxHistoryEvents, 80);
+      assert.equal(prepared.plan.configuration.initialCapture, "primary-desktop");
+      assert.equal(prepared.plan.configuration.riskGuard, "layered");
+      assert.equal(prepared.plan.configuration.planning, settings.planning);
+      assert.equal(prepared.plan.configuration.memory, settings.memory);
+      assert.equal(prepared.plan.configuration.memoryRetrieval, settings.retrieval);
+      assert.deepEqual(prepared.plan.configuration.supervision, {
+        mode: settings.mode,
+        policyVersion: "evidence-triggered-no-scripted-corrections-v1",
+      });
+      const argv = prepared.plan.cli.argvTemplate;
+      assert.equal(argv[argv.indexOf("--model") + 1], "deepseek-v4.1-flash");
+      assert.equal(argv[argv.indexOf("--monitor") + 1], "guidance");
+      assert.equal(argv[argv.indexOf("--batching") + 1], "off");
+      assert.equal(argv[argv.indexOf("--memory") + 1], settings.memory);
+      assert.equal(argv.indexOf("--planning") !== -1, settings.planning);
+      assert.equal(argv.includes("--cua-window-pid"), false);
+      assert.equal(argv.includes("--cua-window-id"), false);
+      assert.equal(argv.includes("--window-switch"), true);
+      assert.equal(prepared.plan.selection.asOfDate, "2026-10-18");
+      assert.equal(prepared.plan.selection.travelDate, "2026-10-19");
+      const outputParts = prepared.outputAttemptDir.split(/[\\/]+/u);
+      const suiteIndex = outputParts.lastIndexOf(SIX_DOMAIN_SUITE_ID);
+      assert.deepEqual(outputParts.slice(suiteIndex, suiteIndex + 3), [SIX_DOMAIN_SUITE_ID, variant, "G01"]);
+      assert.equal(prepared.review.preflight.status, "pending");
+      assert.equal(prepared.review.firstSupervisedRunAccepted, false);
+      assert.equal(prepared.plan.cli.envFilePath, envFilePath);
+      assert.equal(JSON.stringify(prepared.plan).includes("68.55"), false);
+      await assert.rejects(readFile(envFilePath), { code: "ENOENT" });
+    }
+  } finally {
+    for (const packageDir of ownedPackages) {
+      assert.equal(packageDir.startsWith(join(ROOT, "runs", SIX_DOMAIN_SUITE_ID)), true);
       await rm(packageDir, { recursive: true, force: false });
     }
     await rm(outputRoot, { recursive: true, force: true });

@@ -6,6 +6,7 @@ import {
   CLI_ENTRY,
   MANAGED_BROWSER_LABEL_RE,
   ROOT,
+  SIX_DOMAIN_SUITE_ID,
   SUITE_ID,
   VARIANTS,
   assertApiKeyEnvName,
@@ -19,6 +20,7 @@ import {
   parseIsoDate,
   sha256,
   suiteDefinition,
+  variantsForSuite,
   sourceFingerprint,
   verifyCuaDriverBinary,
   validateCliArgv,
@@ -57,8 +59,8 @@ export function renderGoal(task, outputAttemptDir, travelDate, wechatChat) {
   return { goal, usesTravelDate, usesWechatChat };
 }
 
-export function buildCliArgvTemplate({ goal, task, variant, limits, profileLabel, runtimeOutputDir, envFilePath, model = "deepseek-flash", batching = "same-control-input-v1" }) {
-  const config = VARIANTS[variant];
+export function buildCliArgvTemplate({ goal, task, variant, variantConfig = VARIANTS[variant], limits, profileLabel, runtimeOutputDir, envFilePath, model = "deepseek-flash", batching = "same-control-input-v1", monitor = "shadow" }) {
+  const config = variantConfig;
   const argv = [
     "--goal", goal,
     "--model", model,
@@ -72,7 +74,7 @@ export function buildCliArgvTemplate({ goal, task, variant, limits, profileLabel
     "--batching", batching,
     "--context-mode", "recent",
     "--context-max-events", "80",
-    "--monitor", "shadow",
+    "--monitor", monitor,
     "--profile", "live-interactive",
     "--risk-guard", "layered",
     "--risk-model", "same",
@@ -176,7 +178,9 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
   const profileLabel = options["--profile-label"];
   if (!MANAGED_BROWSER_LABEL_RE.test(profileLabel)) throw new Error("--profile-label must contain 1-64 letters, digits, dot, underscore, or hyphen");
   const variant = options["--variant"];
-  if (!Object.hasOwn(VARIANTS, variant)) throw new Error(`--variant must be one of ${Object.keys(VARIANTS).join(", ")}`);
+  const suiteVariants = variantsForSuite(suite.suiteId);
+  if (!Object.hasOwn(suiteVariants, variant)) throw new Error(`--variant must be one of ${Object.keys(suiteVariants).join(", ")}`);
+  const variantConfig = suiteVariants[variant];
   const asOfTime = parseIsoDate(options["--as-of-date"], "--as-of-date");
   const travelTime = parseIsoDate(options["--travel-date"], "--travel-date");
   const deltaDays = (travelTime - asOfTime) / 86_400_000;
@@ -209,7 +213,9 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
   const limits = limitsFor(task.difficulty);
   const packageId = `${task.id}-${variant}-${options["--travel-date"].replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
   const packageDir = join(root, "runs", suite.suiteId, packageId);
-  const outputAttemptDir = resolve(outputRoot, task.id, variant, packageId);
+  const outputAttemptDir = suite.suiteId === SIX_DOMAIN_SUITE_ID
+    ? resolve(outputRoot, suite.suiteId, variant, task.id, packageId)
+    : resolve(outputRoot, task.id, variant, packageId);
   const outputRelative = relative(outputRoot, outputAttemptDir);
   if (outputRelative.startsWith(`..${sep}`) || outputRelative === ".." || isAbsolute(outputRelative)) {
     throw new Error("computed attempt output directory escaped --output-dir");
@@ -220,12 +226,14 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
     goal,
     task,
     variant,
+    variantConfig,
     limits,
     profileLabel,
     runtimeOutputDir,
     envFilePath: requestedEnvFilePath,
     model: suite.model,
     batching: suite.batching,
+    monitor: suite.suiteId === SIX_DOMAIN_SUITE_ID ? "guidance" : "shadow",
   });
   const parseArgs = await loadCliParser();
   validateCliArgv(parseArgs, argvTemplate.map((value) => value === CUA_SOCKET_TOKEN ? "dry-run-cua-socket-placeholder" : value));
@@ -280,12 +288,14 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
       runTimeoutMs: limits.timeoutMs,
       riskTimeoutMs: 90_000,
       cleanupDeadlineMs: 15_000,
-      planning: VARIANTS[variant].planning,
-      memory: VARIANTS[variant].memory,
-      memoryRetrieval: VARIANTS[variant].retrieval,
+      planning: variantConfig.planning,
+      memory: variantConfig.memory,
+      memoryRetrieval: variantConfig.retrieval,
       batching: suite.batching,
+      ...(suite.thinking === undefined ? {} : { thinking: suite.thinking }),
       multilineTypeProfile: "foreground-caret-v1",
-      monitor: "shadow",
+      monitor: suite.suiteId === SIX_DOMAIN_SUITE_ID ? "guidance" : "shadow",
+      ...(variantConfig.supervision === undefined ? {} : { supervision: { ...variantConfig.supervision } }),
       riskProfile: "live-interactive",
       riskGuard: "layered",
       riskModel: "same",

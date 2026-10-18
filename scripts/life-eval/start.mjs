@@ -6,7 +6,7 @@ import { createPlan } from "./prepare.mjs";
 
 export const LOCAL_CONFIG_PATH = join(ROOT, ".tools", "life-eval.local.json");
 
-const VALUE_FLAGS = new Set(["--task-id", "--variant", "--output-dir", "--profile-label", "--travel-date", "--cua-socket", "--suite", "--api-key-env"]);
+const VALUE_FLAGS = new Set(["--task-id", "--variant", "--output-dir", "--profile-label", "--as-of-date", "--travel-date", "--cua-socket", "--suite", "--api-key-env"]);
 const BOOLEAN_FLAGS = new Set(["--help"]);
 
 export function parseStartArgs(argv) {
@@ -87,11 +87,12 @@ export function buildPrepareOptions(args, { now = new Date(), config, task } = {
   const needsWechatChat = requiresWechat && hasWechatTarget;
   const cuaSocket = args["--cua-socket"];
   if (cuaSocket !== undefined && cuaSocket.trim().length === 0) throw new Error("--cua-socket must not be empty");
+  const selectedAsOfDate = args["--as-of-date"] ?? asOfDate;
   const prepareOptions = {
     "--output-dir": args["--output-dir"] ?? config.outputDir,
     "--profile-label": args["--profile-label"] ?? config.profileLabel,
-    "--as-of-date": asOfDate,
-    "--travel-date": args["--travel-date"] ?? addDays(asOfDate, 1),
+    "--as-of-date": selectedAsOfDate,
+    "--travel-date": args["--travel-date"] ?? addDays(selectedAsOfDate, 1),
     "--task-id": args["--task-id"],
     "--variant": args["--variant"],
     "--suite": suite.suiteId,
@@ -152,7 +153,7 @@ export async function prepareFromStartArgs(args, dependencies = {}) {
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write("Usage: node scripts/life-eval/start.mjs [--suite <life-business-20261015|life-business-shopping-communication-20261016>] --task-id <suite task id> --variant <B00|P10|M01|PM11> [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--output-dir <absolute>] [--profile-label <label>] [--travel-date YYYY-MM-DD] [--cua-socket <existing-socket>]\nThe suite defaults to life-business-20261015. Output/profile/API-key environment-variable name/WeChat chat/existing CUA socket are read from ignored .tools/life-eval.local.json; supported values may be overridden. As-of date comes from Asia/Shanghai today and travel date defaults to tomorrow. This creates an offline prepare package only.\n");
+    process.stdout.write("Usage: node scripts/life-eval/start.mjs [--suite <suiteId>] --task-id <suite task id> --variant <variant for selected suite> [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--output-dir <absolute>] [--profile-label <label>] [--as-of-date YYYY-MM-DD] [--travel-date YYYY-MM-DD] [--cua-socket <existing-socket>]\nThe suite defaults to life-business-20261015. Output/profile/API-key environment-variable name/WeChat chat/existing CUA socket are read from ignored .tools/life-eval.local.json; supported values may be overridden. As-of date comes from Asia/Shanghai today and travel date defaults to tomorrow unless explicitly supplied. This creates an offline prepare package only.\n");
     return;
   }
   const args = parseStartArgs(argv);

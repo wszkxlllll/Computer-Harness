@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -11,6 +11,7 @@ import {
   MANIFEST_PATH,
   ROOT,
   SHOPPING_COMMUNICATION_SUITE_ID,
+  SIX_DOMAIN_SUITE_ID,
   SUITE_ID,
   VARIANTS,
   limitsFor,
@@ -38,6 +39,7 @@ import {
   runLive,
   runPackage,
 } from "./run.mjs";
+import { inspectSupervision, readSupervisionReceipt, submitSupervisionCommand } from "./supervision.mjs";
 
 const token = "{{CUA_SOCKET}}";
 
@@ -1052,8 +1054,12 @@ test("run timeout requests CLI cancellation over IPC and records bounded forced 
       terminalStderr,
       timeoutForceKillDelayMs: 5,
       userInterruptCloseObservationMs: 5,
+      buildChildEnvironment: (selectedPlan) => buildLiveChildEnvironment(selectedPlan, {
+        parentEnv: { ...process.env, HARNESS_LIFE_EVAL_SUPERVISION_MODE: "dynamic" },
+      }),
       spawnChild(_executable, _args, options) {
         assert.deepEqual(options.stdio, ["inherit", "pipe", "pipe", "ipc"]);
+        assert.equal(options.env.HARNESS_LIFE_EVAL_SUPERVISION_MODE, undefined, "legacy suite must strip inherited supervision opt-in");
         child = new EventEmitter();
         child.stdout = new PassThrough();
         child.stderr = new PassThrough();
@@ -1656,6 +1662,214 @@ test("T02 and M02 prepare as browser-only goals on desktop-first capture with wi
   } finally {
     for (const { packageDir, packageId } of createdPackages) {
       const ownedPackage = join(ROOT, "runs", SUITE_ID, packageId);
+      assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
+      await rm(ownedPackage, { recursive: true, force: false });
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("six-domain runner completes the private parent-child IPC and helper correction receipt path offline", async (t) => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-supervision-parent-child-test-"));
+  let packageDir;
+  let packageId;
+  let child;
+  let terminalOutput = "";
+  const terminalStdout = new Writable({ write(chunk, _encoding, callback) { terminalOutput += chunk.toString("utf8"); callback(); } });
+  const terminalStderr = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  try {
+    const prepared = await createPlan({
+      "--suite": SIX_DOMAIN_SUITE_ID,
+      "--api-key-env": "ARK_API_KEY",
+      "--output-dir": tempRoot,
+      "--profile-label": "LifeEval-Supervision-IPC",
+      "--as-of-date": "2026-10-18",
+      "--travel-date": "2026-10-19",
+      "--task-id": "G01",
+      "--variant": "C",
+    }, {
+      root: ROOT,
+      manifestPath: manifestPathForSuite(SIX_DOMAIN_SUITE_ID),
+      now: () => new Date("2026-10-18T10:00:00.000Z"),
+    });
+    packageDir = prepared.packageDir;
+    packageId = prepared.packageId;
+    const plan = {
+      ...prepared.plan,
+      configuration: { ...prepared.plan.configuration, runTimeoutMs: 10_000, cleanupDeadlineMs: 1_000 },
+    };
+    const outputBase = plan.cli.argvTemplate[plan.cli.argvTemplate.indexOf("--output") + 1];
+    const actualRunId = "run-20261018-parent-child-fixture";
+    const runtimeDir = join(outputBase, actualRunId);
+    const screenshotRelativePath = "screenshots/supervision-fixture.png";
+    const screenshotPath = join(runtimeDir, "assets", "screenshots", "supervision-fixture.png");
+    await mkdir(join(runtimeDir, "assets", "screenshots"), { recursive: true });
+    await writeFile(screenshotPath, new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+    const observation = {
+      id: "observation-parent-child-1",
+      runId: actualRunId,
+      computerSessionId: "fixture-session",
+      surfaceRef: { surfaceId: "fixture-surface", generation: 1, kind: "desktop" },
+      capturedAt: "2026-10-18T10:00:01.000Z",
+      viewport: { width: 800, height: 600, coordinateSpace: "physical" },
+      screenshot: { assetId: "supervision-fixture", relativePath: screenshotRelativePath, mediaType: "image/png", byteLength: 4 },
+    };
+    const trajectoryPath = join(runtimeDir, "trajectory.jsonl");
+    const events = [
+      { schemaVersion: 2, runId: actualRunId, eventId: "event-created", sequence: 0, occurredAt: "2026-10-18T10:00:00.000Z", type: "run.created", goal: "fixture" },
+      { schemaVersion: 2, runId: actualRunId, eventId: "event-started", sequence: 1, occurredAt: "2026-10-18T10:00:00.500Z", type: "run.started" },
+      { schemaVersion: 2, runId: actualRunId, eventId: "event-observation", sequence: 2, occurredAt: "2026-10-18T10:00:01.000Z", type: "observation.created", observation },
+      { schemaVersion: 2, runId: actualRunId, eventId: "event-provider", sequence: 3, occurredAt: "2026-10-18T10:00:02.000Z", type: "model.request.started", providerId: "fixture" },
+    ];
+    await writeFile(trajectoryPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+    const snapshot = {
+      type: "harness.supervision.snapshot",
+      packageId,
+      attemptId: "pending-attempt-id",
+      mode: "dynamic",
+      runId: actualRunId,
+      status: "running",
+      currentSequence: 3,
+      evidenceSequence: 2,
+      evidenceFresh: true,
+      latestObservation: { id: observation.id, sequence: 2, capturedAt: observation.capturedAt, screenshot: observation.screenshot },
+      terminal: false,
+      updatedAt: new Date().toISOString(),
+    };
+    let finishScheduled = false;
+    const finishChild = () => {
+      if (finishScheduled) return;
+      finishScheduled = true;
+      setTimeout(() => {
+        child.emit("message", { ...snapshot, status: "finished", currentSequence: 4, terminal: true, updatedAt: new Date().toISOString() });
+        child.stdout.end();
+        child.stderr.end();
+        child.exitCode = 0;
+        child.connected = false;
+        child.emit("close", 0, null);
+      }, 40);
+    };
+
+    const runPromise = runLive({
+      plan,
+      review: prepared.review,
+      packageDir,
+      cuaSocket: "offline-supervision-ipc-fixture",
+      supervised: true,
+    }, {
+      terminalStdout,
+      terminalStderr,
+      buildChildEnvironment: async () => ({ ...process.env }),
+      spawnChild(_executable, _args, options) {
+        assert.deepEqual(options.stdio, ["inherit", "pipe", "pipe", "ipc"]);
+        assert.equal(options.env.HARNESS_LIFE_EVAL_SUPERVISION_MODE, "dynamic");
+        child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.connected = true;
+        child.kill = (signal) => {
+          if (signal === "SIGTERM" || signal === "SIGKILL") {
+            child.exitCode = signal === "SIGTERM" ? 143 : 137;
+            child.stdout.end();
+            child.stderr.end();
+            child.emit("close", child.exitCode, null);
+          }
+          return true;
+        };
+        child.send = (message, _sendHandle, _sendOptions, callback) => {
+          if (message.type === "harness.supervision.start") {
+            snapshot.attemptId = message.attemptId;
+            setImmediate(() => {
+              child.emit("message", {
+                type: "harness.supervision.initialized",
+                packageId,
+                attemptId: message.attemptId,
+                mode: "dynamic",
+              });
+              setImmediate(() => child.emit("message", snapshot));
+            });
+          } else if (message.type === "harness.supervision.command" && message.command === "correct") {
+            setImmediate(async () => {
+              await appendFile(trajectoryPath, `${JSON.stringify({
+                schemaVersion: 2,
+                runId: actualRunId,
+                eventId: "event-user-input",
+                sequence: 4,
+                occurredAt: new Date().toISOString(),
+                type: "user.input.received",
+                text: message.text,
+              })}\n`, "utf8");
+              const receipt = {
+                type: "harness.supervision.receipt",
+                commandId: message.commandId,
+                packageId,
+                attemptId: message.attemptId,
+                runId: actualRunId,
+                command: "correct",
+                at: new Date().toISOString(),
+              };
+              child.emit("message", { ...receipt, status: "queued", reason: "accepted-by-RunController-inbox" });
+              child.emit("message", { ...receipt, status: "consumed", reason: "user.input.received", eventSequence: 4 });
+              finishChild();
+            });
+          }
+          callback?.(null);
+          return true;
+        };
+        setImmediate(() => child.emit("message", { type: "harness.supervision.listener-ready", mode: "dynamic" }));
+        return child;
+      },
+    });
+
+    let current;
+    const readyDeadline = Date.now() + 4_000;
+    while (Date.now() < readyDeadline) {
+      try {
+        current = await inspectSupervision(packageDir);
+        if (current.runId === actualRunId && current.evidenceFresh === true && current.latestObservation?.id === observation.id) break;
+      } catch {
+        // The child has not published its first committed snapshot yet.
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.equal(current?.runId, actualRunId);
+    assert.equal(current?.evidenceSequence, 2);
+    const textFile = join(tempRoot, "actual-correction.txt");
+    await writeFile(textFile, "请回看当前页面，检查实际结果后再决定下一步。", "utf8");
+    const command = await submitSupervisionCommand(packageDir, {
+      command: "correct",
+      runId: actualRunId,
+      evidenceSequence: current.latestObservation.sequence,
+      observationId: current.latestObservation.id,
+      textFile,
+      waitMs: 2_000,
+    });
+    assert.ok(command.status === "queued" || command.status === "consumed");
+    let consumedReceipt = command.receipt;
+    const consumedDeadline = Date.now() + 2_000;
+    while (consumedReceipt?.status !== "consumed" && Date.now() < consumedDeadline) {
+      consumedReceipt = await readSupervisionReceipt(packageDir, command.commandId);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    assert.equal(consumedReceipt?.status, "consumed");
+    assert.equal(consumedReceipt?.reason, "user.input.received");
+    assert.equal(consumedReceipt?.eventSequence, 4);
+
+    const final = await runPromise;
+    assert.equal(final.supervision.listenerHandshake, "completed");
+    assert.equal(final.supervision.runId, actualRunId);
+    assert.equal((await readSupervisionReceipt(packageDir, command.commandId)).status, "consumed");
+    const trajectoryText = await readFile(trajectoryPath, "utf8");
+    assert.match(trajectoryText, /请回看当前页面/u);
+    assert.doesNotMatch(trajectoryText, /\uFFFD|\?{3,}|_{2,}/u);
+    assert.match(terminalOutput, /Runner recorded one live attempt/u);
+  } finally {
+    terminalStdout.destroy();
+    terminalStderr.destroy();
+    if (packageDir !== undefined && packageId !== undefined) {
+      const ownedPackage = join(ROOT, "runs", SIX_DOMAIN_SUITE_ID, packageId);
       assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
       await rm(ownedPackage, { recursive: true, force: false });
     }

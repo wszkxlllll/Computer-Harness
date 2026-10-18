@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ROOT,
@@ -20,6 +20,7 @@ import {
   verifyCuaDriverBinary,
   validateCliArgv,
 } from "./common.mjs";
+import { createSupervisionBridge, validateSupervisionPlan } from "./supervision.mjs";
 
 const VALUE_FLAGS = new Set(["--package", "--cua-socket", "--suite"]);
 const BOOLEAN_FLAGS = new Set(["--live", "--confirm-desktop-control", "--supervised", "--help"]);
@@ -284,6 +285,7 @@ export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, su
   const suite = suiteDefinition(plan.suiteId);
   const stdoutLog = join(attemptDir, "stdout.log");
   const stderrLog = join(attemptDir, "stderr.log");
+  const supervision = validateSupervisionPlan(plan);
   return {
     schemaVersion: 1,
     packageId: plan.packageId,
@@ -308,6 +310,16 @@ export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, su
         : "runner does not read envFilePath; the live child CLI reads it via --env-file and receives only the bounded DeepSeek timeout/output-token overrides",
     stdoutLog,
     stderrLog,
+    ...(supervision === undefined ? {} : {
+      supervision: {
+        ...supervision,
+        attemptId: basename(attemptDir),
+        stateFile: "supervision-state.jsonl",
+        commandDirectory: "supervision-commands",
+        receiptFile: "supervision-receipts.jsonl",
+        transport: "private-node-ipc-and-package-local-command-files-v1",
+      },
+    }),
     consumerEvidence: consumerEvidence(plan, stdoutLog, stderrLog),
     final: null,
   };
@@ -389,9 +401,15 @@ export async function runLive(
     userInterruptForceKillDelayMs = 5_000,
     userInterruptCloseObservationMs = 1_000,
     timeoutForceKillDelayMs = 5_000,
+    buildChildEnvironment = buildLiveChildEnvironment,
+    supervisionHandshakeTimeoutMs = 5_500,
+    supervisionPollIntervalMs = 100,
   } = {},
 ) {
-  const childEnv = await buildLiveChildEnvironment(plan);
+  const supervision = validateSupervisionPlan(plan);
+  const childEnv = await buildChildEnvironment(plan);
+  if (supervision === undefined) delete childEnv.HARNESS_LIFE_EVAL_SUPERVISION_MODE;
+  else childEnv.HARNESS_LIFE_EVAL_SUPERVISION_MODE = supervision.mode;
   const attemptDir = join(packageDir, "attempts", `live-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   await mkdir(join(packageDir, "attempts"), { recursive: true });
   await mkdir(attemptDir, { recursive: false });
@@ -419,6 +437,11 @@ export async function runLive(
   let spawnError;
   let child;
   let childCloseWatcher;
+  let supervisionBridge;
+  let supervisionPoll;
+  let supervisionError;
+  let supervisionReady = false;
+  let supervisionFailureStopSent = false;
   let userInterruptSignalReceived = null;
   let userInterruptSignalCount = 0;
   let userInterruptCleanupTimedOut = false;
@@ -472,7 +495,41 @@ export async function runLive(
       }
     }
   };
+  const stopAfterSupervisionFailure = (error) => {
+    supervisionError ??= error instanceof Error ? error.message : String(error);
+    terminalStderr.write(`Evaluation supervision failed: ${supervisionError}\n`);
+    if (child === undefined || child.exitCode !== null || child.signalCode !== null || supervisionFailureStopSent) return;
+    supervisionFailureStopSent = true;
+    const state = supervisionBridge?.latestState;
+    if (!supervisionReady || state?.runId === undefined || state.runId === null) {
+      child.kill("SIGTERM");
+      return;
+    }
+    if (typeof child.send !== "function" || child.connected === false) {
+      child.kill("SIGTERM");
+      return;
+    }
+    try {
+      child.send?.({
+        type: "harness.supervision.command",
+        commandId: randomUUID(),
+        packageId: plan.packageId,
+        attemptId: supervisionBridge.identity.attemptId,
+        runId: state.runId,
+        command: "cancel",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      }, undefined, undefined, (sendError) => {
+        if (sendError && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      });
+    } catch {
+      child.kill("SIGTERM");
+    }
+  };
   try {
+    if (supervision !== undefined) {
+      supervisionBridge = await createSupervisionBridge({ plan, packageDir, attemptDir, mode: supervision.mode, startedAt });
+    }
     signalSource.on("SIGINT", onSigint);
     signalListenerInstalled = true;
     child = spawnChild(process.execPath, [plan.cli.entry, ...argv], {
@@ -486,6 +543,23 @@ export async function runLive(
     tee(child.stderr, terminalStderr, stderrLog);
     child.once("error", (error) => { spawnError = error; });
     childCloseWatcher = watchForClose(child);
+    if (supervisionBridge !== undefined) {
+      child.on("message", (message) => {
+        void supervisionBridge.handleChildMessage(message, child).catch((error) => {
+          stopAfterSupervisionFailure(error);
+        });
+      });
+      await Promise.race([
+        supervisionBridge.waitForReady(supervisionHandshakeTimeoutMs),
+        childCloseWatcher.promise.then(() => { throw new Error("CLI closed before the evaluation supervision handshake completed"); }),
+      ]);
+      supervisionReady = true;
+      supervisionPoll = setInterval(() => {
+        void supervisionBridge.pumpCommands(child).catch((error) => {
+          stopAfterSupervisionFailure(error);
+        });
+      }, supervisionPollIntervalMs);
+    }
     if (userInterruptSignalCount === 0) {
       timeout = setTimeout(() => {
         timedOut = true;
@@ -566,10 +640,16 @@ export async function runLive(
     if (timeout !== undefined) clearTimeout(timeout);
     if (terminateTimer !== undefined) clearTimeout(terminateTimer);
     if (killTimer !== undefined) clearTimeout(killTimer);
+    if (supervisionPoll !== undefined) clearInterval(supervisionPoll);
     await Promise.all([
       new Promise((resolve) => stdoutLog.end(resolve)),
       new Promise((resolve) => stderrLog.end(resolve)),
     ]);
+    if (supervisionBridge !== undefined) {
+      await supervisionBridge.finalize({
+        terminalStatus: supervisionBridge.latestState?.terminal === true ? "finished" : "child-closed",
+      });
+    }
     const final = {
       outcomeMode: plan.task.outcomeMode,
       endedAt: new Date().toISOString(),
@@ -593,6 +673,18 @@ export async function runLive(
       businessSuccess: "not inferred from process exit code; requires human evidence review",
       consumerReviewRequired: true,
       consumerReviewPath: join(packageDir, "review.json"),
+      ...(supervisionBridge === undefined ? {} : {
+        supervision: {
+          mode: supervision.mode,
+          policyVersion: supervision.policyVersion,
+          runId: supervisionBridge.latestState?.runId ?? null,
+          listenerHandshake: "completed",
+          controlState: supervisionBridge.statePath,
+          commandDirectory: supervisionBridge.commandsDir,
+          receiptLog: supervisionBridge.receiptsPath,
+          ...(supervisionError === undefined ? {} : { diagnostic: supervisionError }),
+        },
+      }),
     };
     record.final = final;
     await writeFile(liveRecordPath, jsonText(record), { encoding: "utf8" });
@@ -600,8 +692,12 @@ export async function runLive(
     return final;
   } catch (error) {
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGINT");
+    if (supervisionPoll !== undefined) clearInterval(supervisionPoll);
     stdoutLog.destroy();
     stderrLog.destroy();
+    if (supervisionBridge !== undefined) {
+      await supervisionBridge.finalize({ terminalStatus: "supervision-start-or-runtime-failure" }).catch(() => undefined);
+    }
     const final = {
       outcomeMode: plan.task.outcomeMode,
       endedAt: new Date().toISOString(),
@@ -621,6 +717,18 @@ export async function runLive(
       businessSuccess: "not inferred; requires human evidence review",
       consumerReviewRequired: true,
       consumerReviewPath: join(packageDir, "review.json"),
+      ...(supervisionBridge === undefined ? {} : {
+        supervision: {
+          mode: supervision.mode,
+          policyVersion: supervision.policyVersion,
+          runId: supervisionBridge.latestState?.runId ?? null,
+          listenerHandshake: supervisionReady ? "completed" : "failed",
+          controlState: supervisionBridge.statePath,
+          commandDirectory: supervisionBridge.commandsDir,
+          receiptLog: supervisionBridge.receiptsPath,
+          diagnostic: supervisionError ?? (error instanceof Error ? error.message : String(error)),
+        },
+      }),
     };
     record.final = final;
     await writeFile(liveRecordPath, jsonText(record), { encoding: "utf8" });
@@ -643,6 +751,7 @@ export async function runPackage(options, { root = ROOT, manifestPath, confirm =
   if (options["--suite"] !== undefined && options["--suite"] !== plan.suiteId) {
     throw new Error("--suite does not match the package's frozen suite");
   }
+  validateSupervisionPlan(plan);
   const live = options["--live"] === true;
   if (!live && (options["--confirm-desktop-control"] === true || options["--supervised"] === true)) {
     throw new Error("--confirm-desktop-control and --supervised require --live");

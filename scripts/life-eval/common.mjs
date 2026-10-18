@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const SUITE_ID = "life-business-20261015";
 export const SHOPPING_COMMUNICATION_SUITE_ID = "life-business-shopping-communication-20261016";
+export const SIX_DOMAIN_SUITE_ID = "life-business-six-domain-20261018";
 export const SUITE_DEFINITIONS = Object.freeze({
   [SUITE_ID]: Object.freeze({
     suiteId: SUITE_ID,
@@ -22,6 +23,14 @@ export const SUITE_DEFINITIONS = Object.freeze({
     batching: "off",
     apiKeyTargetEnv: "ARK_API_KEY",
   }),
+  [SIX_DOMAIN_SUITE_ID]: Object.freeze({
+    suiteId: SIX_DOMAIN_SUITE_ID,
+    model: "deepseek-v4.1-flash",
+    provider: "ark",
+    batching: "off",
+    apiKeyTargetEnv: "ARK_API_KEY",
+    thinking: "disabled",
+  }),
 });
 export const API_KEY_ENV_NAMES = Object.freeze(["ARK_API_KEY", "HUOSHAN_API_KEY"]);
 export const MANIFEST_PATH = join(ROOT, "eval", SUITE_ID, "tasks.json");
@@ -32,6 +41,12 @@ export const VARIANTS = Object.freeze({
   P10: Object.freeze({ planning: true, memory: "off", retrieval: "off" }),
   M01: Object.freeze({ planning: false, memory: "facts", retrieval: "lexical" }),
   PM11: Object.freeze({ planning: true, memory: "facts", retrieval: "lexical" }),
+});
+export const SIX_DOMAIN_VARIANTS = Object.freeze({
+  A: Object.freeze({ planning: false, memory: "off", retrieval: "off", supervision: Object.freeze({ mode: "observe", policyVersion: "evidence-triggered-no-scripted-corrections-v1" }) }),
+  B: Object.freeze({ planning: true, memory: "facts", retrieval: "lexical", supervision: Object.freeze({ mode: "observe", policyVersion: "evidence-triggered-no-scripted-corrections-v1" }) }),
+  C: Object.freeze({ planning: false, memory: "off", retrieval: "off", supervision: Object.freeze({ mode: "dynamic", policyVersion: "evidence-triggered-no-scripted-corrections-v1" }) }),
+  D: Object.freeze({ planning: true, memory: "facts", retrieval: "lexical", supervision: Object.freeze({ mode: "dynamic", policyVersion: "evidence-triggered-no-scripted-corrections-v1" }) }),
 });
 export const LIMITS = Object.freeze({
   easy: Object.freeze({ modelRequests: 100, riskRequests: 20, actions: 80, timeoutMs: 15 * 60_000 }),
@@ -44,6 +59,10 @@ export function suiteDefinition(suiteId = SUITE_ID) {
     throw new Error(`unsupported life-eval suite; expected one of ${Object.keys(SUITE_DEFINITIONS).join(", ")}`);
   }
   return SUITE_DEFINITIONS[suiteId];
+}
+
+export function variantsForSuite(suiteId = SUITE_ID) {
+  return suiteId === SIX_DOMAIN_SUITE_ID ? SIX_DOMAIN_VARIANTS : VARIANTS;
 }
 
 export function manifestPathForSuite(suiteId = SUITE_ID, root = ROOT) {
