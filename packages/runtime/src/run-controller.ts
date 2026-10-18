@@ -948,9 +948,11 @@ export class RunController {
             } catch (error) {
               const details = providerErrorDetails(error);
               const nextRetryCount = retryCount + 1;
-              const retryDelayMs = providerRetryDelayMs(nextRetryCount);
+              const retryAdvice = providerRetryAdvice(error);
+              const retryDelayMs = providerRetryDelayMs(nextRetryCount, retryAdvice.retryAfterMs);
               const retryWindowRemaining = MAX_PROVIDER_RETRY_WINDOW_MS - (Date.now() - retryWindowStartedAt);
               const retry = !this.isBoundWindowRecoveryActive() && !this.isAborted()
+                && retryAdvice.allowed
                 && details.retryable === true
                 && retryCount < MAX_PROVIDER_RETRIES
                 && retryWindowRemaining > retryDelayMs + this.providerAttemptReserveMs;
@@ -975,7 +977,7 @@ export class RunController {
                 break;
               }
               retryCount = nextRetryCount;
-              await waitBeforeProviderRetry(this.abortController.signal, retryCount);
+              await waitBeforeProviderRetry(this.abortController.signal, retryCount, retryAdvice.retryAfterMs);
               const retryEffects = await this.drainCommands();
               if ((this.snapshot.status as string) === "paused" || retryEffects.correction) {
                 if (retryEffects.correction) {
@@ -3540,7 +3542,10 @@ export class RunController {
       const progress = reduceProgressMonitor(this.monitorState, event);
       this.monitorState = progress.state;
       this.updateGroundingRecoveryHint(event, progress.output);
-      if ((event.type === "monitor.transition" && event.transition !== "unchanged")
+      const keepUnverifiedEpisode = event.type === "monitor.transition"
+        && event.transition === "changed"
+        && this.hasUnresolvedActionMonitorGuidance();
+      if ((event.type === "monitor.transition" && event.transition !== "unchanged" && !keepUnverifiedEpisode)
         || event.type === "computer.window.handoff.requested"
         || event.type === "computer.window.handoff.completed"
         || event.type === "computer.window.handoff.ignored"
@@ -3621,6 +3626,13 @@ export class RunController {
     this.monitorPendingGuidance = undefined;
   }
 
+  private hasUnresolvedActionMonitorGuidance(): boolean {
+    const fingerprint = this.monitorPolicyState?.candidateFingerprint;
+    const isUnresolvedActionEpisode = fingerprint?.startsWith("action_stall:") === true
+      || fingerprint?.startsWith("no_observed_change:") === true;
+    return this.monitorPendingGuidance !== undefined && isUnresolvedActionEpisode;
+  }
+
   private monitorGuidanceForCandidate(
     event: RuntimeEvent,
     output: import("./progress-monitor.js").ProgressMonitorOutput,
@@ -3648,7 +3660,19 @@ export class RunController {
 
     const transition = this.monitorState.lastTransition;
     if (transition?.postObservationId === String(latestObservation.id)
-      && (transition.transition === "changed" || transition.transition === "unknown")) {
+      && transition.transition === "unknown") {
+      this.monitorPendingGuidance = undefined;
+      return undefined;
+    }
+    if (transition?.postObservationId === String(latestObservation.id)
+      && transition.transition === "changed"
+      && this.hasUnresolvedActionMonitorGuidance()) {
+      return {
+        ...pending,
+        text: "Earlier action/result evidence remains unverified. Recheck the newest image before choosing a strategy; a changed screen alone does not establish progress.",
+      };
+    }
+    if (transition?.postObservationId === String(latestObservation.id) && transition.transition === "changed") {
       this.monitorPendingGuidance = undefined;
       return undefined;
     }
@@ -4393,8 +4417,8 @@ function validateCompositeCallOrder(entries: readonly PreflightEntry[]): string 
   return undefined;
 }
 
-async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number): Promise<void> {
-  const delayMs = providerRetryDelayMs(retryCount);
+async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number, retryAfterMs?: number): Promise<void> {
+  const delayMs = providerRetryDelayMs(retryCount, retryAfterMs);
   await new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
       reject(signal.reason ?? new Error("run aborted"));
@@ -4413,11 +4437,35 @@ async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number):
   });
   }
 
-function providerRetryDelayMs(retryCount: number): number {
-  return Math.min(
+function providerRetryDelayMs(retryCount: number, retryAfterMs?: number): number {
+  const existingDelay = Math.min(
     PROVIDER_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, retryCount - 1)),
     PROVIDER_RETRY_DELAY_CAP_MS,
   );
+  const boundedRetryAfter = Number.isSafeInteger(retryAfterMs) && retryAfterMs! >= 0 && retryAfterMs! <= MAX_PROVIDER_RETRY_WINDOW_MS
+    ? retryAfterMs!
+    : 0;
+  return Math.max(existingDelay, boundedRetryAfter);
+}
+
+function providerRetryAdvice(error: unknown): { allowed: boolean; retryAfterMs?: number } {
+  if (!(error instanceof Error) || error.name !== "ArkProviderError") return { allowed: true };
+  const candidate = error as Error & { code?: unknown; httpFailure?: unknown };
+  if (candidate.code !== "ARK_HTTP_429") return { allowed: true };
+  const defaultArkDelay = { allowed: true, retryAfterMs: 2_000 } as const;
+  const failure = candidate.httpFailure;
+  if (typeof failure !== "object" || failure === null || Array.isArray(failure) ||
+      (failure as { httpStatus?: unknown }).httpStatus !== 429) return defaultArkDelay;
+  const retryAfterState = (failure as { retryAfterState?: unknown }).retryAfterState;
+  if (retryAfterState === "too_long") return { allowed: false };
+  if (retryAfterState === "accepted") {
+    const retryAfterMs = (failure as { retryAfterMs?: unknown }).retryAfterMs;
+    if (!Number.isSafeInteger(retryAfterMs) || (retryAfterMs as number) < 0 || (retryAfterMs as number) > MAX_PROVIDER_RETRY_WINDOW_MS) {
+      return defaultArkDelay;
+    }
+    return { allowed: true, retryAfterMs: retryAfterMs as number };
+  }
+  return defaultArkDelay;
 }
 
 

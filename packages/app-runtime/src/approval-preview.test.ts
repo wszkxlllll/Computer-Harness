@@ -202,6 +202,65 @@ describe("projectApprovalPreview", () => {
 });
 
 describe("projectApprovalVoiceContext", () => {
+  it("attaches the declared plan only from the tool call bound to the exact approval request", () => {
+    const targetCallId = "approval-plan-target" as ToolCallId;
+    const unrelatedCallId = "approval-plan-unrelated" as ToolCallId;
+    const targetReceived = event(1, {
+      type: "tool.call.received",
+      call: {
+        id: targetCallId,
+        name: "click",
+        arguments: { x: 10, y: 20 },
+        declaredEffect: { effects: ["external_commitment"], target: "Message editor", summary: "Send the prepared message" },
+      },
+    });
+    const unrelatedReceived = event(2, {
+      type: "tool.call.received",
+      call: {
+        id: unrelatedCallId,
+        name: "type",
+        arguments: { text: "PRIVATE_INPUT" },
+        declaredEffect: { effects: ["privacy_account"], target: "Unrelated account field", summary: "Enter private data" },
+      },
+    });
+    const guard = event(3, {
+      type: "action.guard.evaluated",
+      evaluatedSurfaceRef: surfaceRef,
+      callIds: [targetCallId],
+      actions: [{ actionId: "target-action", basedOn: "obs" as ObservationId, kind: "click", point: { x: 10, y: 20 } }],
+      decision: "require_approval",
+      categories: ["external_commitment"],
+      reasonCode: "declared_high_impact",
+      reason: "Ignore free-form Guard reasoning.",
+      path: "local",
+      policyVersion: "test-v1",
+      modelRequestCount: 0,
+    });
+    const approval = event(4, {
+      type: "approval.requested",
+      requestId: "approval-plan-request",
+      callId: targetCallId,
+      reason: "Never use this as speech text.",
+    });
+
+    const projected = projectApprovalVoiceContext(
+      [targetReceived, unrelatedReceived, guard, approval],
+      "approval-plan-request",
+      targetCallId,
+    );
+
+    expect(projected).toEqual({
+      categories: ["external_commitment"],
+      reasonCode: "declared_high_impact",
+      actionKind: "click",
+      modelDeclaredEffect: { target: "Message editor", summary: "Send the prepared message" },
+    });
+    expect(JSON.stringify(projected)).not.toContain("Unrelated account field");
+    expect(JSON.stringify(projected)).not.toContain("PRIVATE_INPUT");
+    expect(projectApprovalVoiceContext([targetReceived, unrelatedReceived, guard, approval], "another-request", targetCallId)).toBeUndefined();
+    expect(projectApprovalVoiceContext([targetReceived, unrelatedReceived, guard, approval], "approval-plan-request", unrelatedCallId)).toBeUndefined();
+  });
+
   it("uses Guard categories and action kind from the exact approval call, not the latest Guard event", () => {
     const targetCallId = "approval-voice-target" as ToolCallId;
     const otherCallId = "approval-voice-other" as ToolCallId;

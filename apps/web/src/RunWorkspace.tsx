@@ -67,6 +67,17 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
   const announcementCursor = useMemo(() => new RunAnnouncementCursor(runId), [runId]);
   const speechLifecycleRef = useRef(new Map<RunNoticeSpeechController, number>());
   const isTerminal = snapshot?.status === "finished";
+  const runTarget = snapshot?.target;
+  const runTargetTitle = runTarget?.provenance === "starting_target" ? "起始目标"
+    : runTarget?.provenance === "selected_target" ? "最近确认目标"
+      : runTarget?.provenance === "unknown_after_switch" ? "当前目标" : "运行目标";
+  const runTargetValue = runTarget?.provenance === "unknown_after_switch"
+    ? "目标无法确认；请查看运行结果。"
+    : [runTarget?.appName, runTarget?.title].filter((value) => value?.trim()).join(" · ") || "已确认窗口，名称不可用。";
+  const runTargetDisclaimer = runTarget?.provenance === "selected_target"
+    ? "窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。"
+    : undefined;
+  const runTargetAnnouncement = `${runTargetTitle}：${runTargetValue}${runTargetDisclaimer ? ` ${runTargetDisclaimer}` : ""}`;
   const voiceInputActive = activeVoiceInputs.size > 0;
   const latestProgressNotice = latestNoticeOfKind(notices, "progress");
   const latestProgressEvent = events.reduce<RemoteEvent | undefined>((latest, event) =>
@@ -332,13 +343,12 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
             </button>
           </div>
           <h1 ref={runHeadingRef} id="run-goal" tabIndex={-1}>{snapshot.goal}</h1>
-          {(snapshot.target?.appName || snapshot.target?.title || snapshot.target?.provenance === "unknown_after_switch" || snapshot.target?.provenance === "selected_target") && (
+          {(runTarget?.appName || runTarget?.title || runTarget?.provenance === "unknown_after_switch" || runTarget?.provenance === "selected_target") && (
             <p className="run-target-label">
-              <span>{snapshot.target?.provenance === "starting_target" ? "起始目标" : snapshot.target?.provenance === "selected_target" ? "最近确认目标" : snapshot.target?.provenance === "unknown_after_switch" ? "当前目标" : "运行目标"}</span>
-              <strong>{snapshot.target?.provenance === "unknown_after_switch"
-                ? "目标无法确认；请查看运行结果。"
-                : [snapshot.target?.appName, snapshot.target?.title].filter((value) => value?.trim()).join(" · ") || "已确认窗口，名称不可用。"}</strong>
-              {snapshot.target?.provenance === "selected_target" && <small>窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。</small>}
+              <span className="sr-only">{runTargetAnnouncement}</span>
+              <span aria-hidden="true">{runTargetTitle}</span>
+              <strong aria-hidden="true">{runTargetValue}</strong>
+              {runTargetDisclaimer && <small aria-hidden="true">{runTargetDisclaimer}</small>}
             </p>
           )}
           {snapshot.error && !(isTerminal && snapshot.outcome && !snapshot.reply?.trim()) && (

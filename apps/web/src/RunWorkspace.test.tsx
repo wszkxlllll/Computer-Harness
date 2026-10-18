@@ -126,6 +126,24 @@ describe("request-bound screenshot lifecycle", () => {
     expect(document.getElementById("main-content")?.tagName).toBe("MAIN");
   });
 
+  it("keeps the non-interactive run target as one screen-reader text unit", () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        target: { provenance: "selected_target", appName: "浏览器", title: "任务页面" },
+      },
+    };
+
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    const targetLabel = document.querySelector(".run-target-label") as HTMLElement;
+    expect(targetLabel.querySelector(":scope > .sr-only")?.textContent)
+      .toBe("最近确认目标：浏览器 · 任务页面 窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。");
+    expect(targetLabel.querySelectorAll(":scope > [aria-hidden='true']")).toHaveLength(3);
+    expect(targetLabel.querySelector("button, a, input")).toBeNull();
+  });
+
   it("keeps one live status region silent on mount and deduplicates repeated progress text", async () => {
     localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
       ...DEFAULT_PREFERENCES,
@@ -147,6 +165,7 @@ describe("request-bound screenshot lifecycle", () => {
     const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
     const liveRegion = document.querySelector("[data-run-announcement]") as HTMLElement;
     expect(liveRegion.textContent).toBe("");
+    expect(liveRegion.getAttribute("aria-atomic")).toBe("true");
 
     feedState = { ...feedState, snapshot: { ...feedState.snapshot!, status: "paused", sequence: 3 } };
     view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
@@ -160,6 +179,17 @@ describe("request-bound screenshot lifecycle", () => {
     feedState = { ...feedState, notices: [...feedState.notices, { ...nextProgress, noticeId: "progress-duplicate", feedSequence: 4 }] };
     view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
     expect(liveRegion.textContent).toBe("最近进展：已整理两项结果。");
+
+    const sentenceProgress = {
+      ...nextProgress,
+      noticeId: "progress-sentence",
+      feedSequence: 5,
+      text: "电脑已核对当前画面，并发现需要你确认的结果。",
+    };
+    feedState = { ...feedState, notices: [...feedState.notices, sentenceProgress] };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    await waitFor(() => expect(liveRegion.textContent)
+      .toBe("最近进展：电脑已核对当前画面，并发现需要你确认的结果。"));
     expect(document.querySelectorAll("[data-run-announcement]")).toHaveLength(1);
   });
 

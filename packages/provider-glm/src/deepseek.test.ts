@@ -356,7 +356,12 @@ describe("Ark Agent Plan transport boundary", () => {
   });
 
   it.each([[401, false], [429, true], [503, true]] as const)("keeps HTTP %s failures private and independently named", async (status, retryable) => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status, json: async () => ({ error: { message: "private credential and payload" } }) })));
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status,
+      headers: { get: () => null },
+      json: async () => ({ error: { message: "private credential and payload" } }),
+    })));
     await expect(new FetchArkHttpClient().post("https://fixture.invalid", {}, {}, signal)).rejects.toMatchObject({
       name: "ArkProviderError", message: `Ark HTTP ${status}`, code: `ARK_HTTP_${status}`, retryable, retryMode: retryable ? "same_input" : "feedback",
     });

@@ -1855,7 +1855,7 @@ describe("ApplicationRemoteRunApi", () => {
           type: "run.notice",
           noticeId: expect.any(String),
           kind: "approval",
-          text: "可能涉及对外发送或提交内容的点击操作，请核对后审批。",
+          text: "电脑打算按这份说明操作：「点击查询按钮」；目标：「查询」。这项操作还没执行；说明仍需核对，请勿仅凭说明批准。 可能涉及对外发送或提交内容的点击操作，请核对后审批。",
           delivery: "interrupt",
           eventSequence: expect.any(Number),
           pendingRequestId: pending.requestId,
@@ -2007,6 +2007,7 @@ describe("ApplicationRemoteRunApi", () => {
       await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request approval");
       const pending = api.getRun("device-one", started.runId)?.pendingRequest;
       if (pending?.kind !== "approval") throw new Error("expected an approval request");
+      expect(pending.preview?.modelDeclaredEffect).toEqual({ target: "查询", summary: "点击查询按钮", verified: false });
 
       const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
       const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
@@ -2014,7 +2015,7 @@ describe("ApplicationRemoteRunApi", () => {
       });
       subscription.close();
       const approvalNotice = events.find((event) => event.data?.type === "run.notice" && event.data.kind === "approval");
-      expect(approvalNotice?.data?.text).toBe("可能涉及对外发送或提交内容的点击操作，请核对后审批。");
+      expect(approvalNotice?.data?.text).toBe("电脑打算按这份说明操作：「点击查询按钮」；目标：「查询」。这项操作还没执行；说明仍需核对，请勿仅凭说明批准。 可能涉及对外发送或提交内容的点击操作，请核对后审批。");
       expect(JSON.stringify(approvalNotice)).not.toContain("hunter2");
       expect(JSON.stringify(approvalNotice)).not.toContain("password");
 

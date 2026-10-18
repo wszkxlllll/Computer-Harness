@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "status": "source_verified_pending_gui_and_runner_integration",
+  "status": "source_verified_runner_integrated_pending_gui",
   "suiteId": "life-business-shopping-communication-20261016",
-  "scopeNote": "Standalone candidate manifest. Not wired to the 2026-10-15 runner; does not change or extend its nine-task manifest, frozen plans, or eight-task historical execution. No live GUI, private account, order, message, calendar, or business action is authorized by this manifest.",
+  "scopeNote": "Standalone suite selected explicitly through scripts/life-eval --suite. Uses Ark Agent Plan with batching off and independently selected Planning/Memory variants; does not change the original nine-task manifest or extend its frozen plans or historical execution. Preparation and dry-run are offline. Live GUI execution requires separate authorization and human preflight; this manifest does not authorize private account, order, message, calendar, or business changes beyond the stated new document deliverables.",
   "sourceRegistry": [
     {
       "id": "S01-1",

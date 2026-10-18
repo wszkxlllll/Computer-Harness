@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { EventId, MemoryFact, MemoryState, RunId } from "@computer-harness/protocol";
+import type { EventId, MemoryFact, MemoryState, PlanState, RunId } from "@computer-harness/protocol";
+import type { MemoryRecallSelection } from "@computer-harness/runtime";
+import { selectMemoryForContext } from "./memory-recall.js";
 import { formatMemory } from "./projections.js";
 
 const runId = "memory-projection" as RunId;
@@ -38,6 +40,44 @@ describe("memory projection packets", () => {
     expect(projection?.text).toContain("short-last-known");
     expect(projection?.text).toContain("Current run memory index");
     expect((projection?.text.split("\n").filter((line) => line.includes("fact-19")).length ?? 0)).toBe(1);
+    expect(projection?.selection.hotFacts.map((item) => item.id)).not.toEqual(expect.arrayContaining(["needs", "short"]));
+    expect(projection?.rendered.admittedFactIds).not.toEqual(expect.arrayContaining(["needs", "short"]));
+    expect(projection?.rendered.revalidationFactIds).toEqual(expect.arrayContaining(["needs", "short"]));
+    const admittedSection = projection?.text.split("Revalidation candidates")[0] ?? "";
+    expect(admittedSection).not.toContain("needs-old");
+    expect(admittedSection).not.toContain("short-last-known");
+  });
+
+  it("uses existing task links only as an admitted-fact fallback and keeps query hits without a Plan", () => {
+    const memory: MemoryState = {
+      runId,
+      facts: [
+        fact("matched", "query matched"),
+        fact("task-linked", "linked fallback", { relatedTaskIds: ["t-current"], updatedSequence: 20 }),
+        fact("taskless", "not linked", { updatedSequence: 30 }),
+        fact("expired-linked", "old linked value", { relatedTaskIds: ["t-current"], retentionClass: "short_lived", updatedSequence: 40 }),
+      ],
+      entities: [],
+    };
+    const plan: PlanState = { runId, tasks: [{ id: "t-current", subject: "current task", status: "in_progress" }] };
+    const recall: MemoryRecallSelection = {
+      method: "lexical",
+      semanticStatus: "disabled",
+      stateStable: true,
+      embeddingBudgetUsed: 0,
+      embeddingBudgetLimit: 6,
+      admitted: [{ id: "matched", score: 1, match: "lexical" }],
+      revalidation: [],
+      excluded: [],
+    };
+
+    const withPlan = selectMemoryForContext(memory, plan, {}, { runId, recall });
+    expect(withPlan.admittedFacts.map((item) => item.id)).toEqual(["matched", "task-linked"]);
+    expect(withPlan.hotFacts.map((item) => item.id)).toEqual(["matched", "task-linked"]);
+    expect(withPlan.revalidationCandidates).toHaveLength(0);
+
+    const withoutPlan = selectMemoryForContext(memory, undefined, {}, { runId, recall });
+    expect(withoutPlan.admittedFacts.map((item) => item.id)).toEqual(["matched"]);
   });
 
   it("does not partially expose an oversized candidate value", () => {

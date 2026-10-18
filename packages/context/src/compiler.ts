@@ -15,6 +15,9 @@ import { findLatestObservation, modelTurnMessage, toolResultMessage } from "./me
 import { estimateEventTokens, fitEventsToTokenBudget, isProjectableHistoryEvent } from "./budget.js";
 import { latestGuiHistoryGroup, selectHistoryEvents } from "./history.js";
 
+const SOURCE_EVIDENCE_GUIDANCE = "When a claim depends on source scope, preserve the relevant applicability limits (such as source, date/version, application, or channel); a source supports only claims within that scope. Not found in inspected material is unknown for that scope, not absent everywhere. Separate directly observed facts from inference and uncertainty, and state coverage gaps when they affect the conclusion. A model's own assessment or a changed screen is not independent proof.";
+const PROGRESS_SUMMARY_LANGUAGE_GUIDANCE = "For user-facing progress.summary notices, follow an explicit user language preference; otherwise use the language of the user's Goal. Do not switch to English just because tools, source pages, or interface text are in English. This applies to progress notices and does not require every response to use one language.";
+
 export interface DefaultContextCompilerOptions {
   systemPrompt?: string;
   mode?: "raw" | "recent";
@@ -123,7 +126,7 @@ export class DefaultContextCompiler implements ContextCompiler {
     const sourceLinkedFinishText = input.sourceLinkedFinish === undefined
       ? undefined
       : formatSourceLinkedFinishContract(input.sourceLinkedFinish);
-    const systemPrompt = composeSystemPrompt(this.systemPrompt, features, input.computerSession?.platform);
+    const systemPrompt = `${composeSystemPrompt(this.systemPrompt, features, input.computerSession?.platform)}\n\n${SOURCE_EVIDENCE_GUIDANCE}\n\n${PROGRESS_SUMMARY_LANGUAGE_GUIDANCE}`;
     const planText = features.planning !== "off" && input.plan !== undefined && input.plan.tasks.length > 0 ? formatPlan(input.plan) : undefined;
     const executionSegmentText = features.executionSegments === "segments-v1" && input.executionSegment !== undefined
       ? formatExecutionSegment(input.executionSegment)

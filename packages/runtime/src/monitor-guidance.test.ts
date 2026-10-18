@@ -13,7 +13,7 @@ import type {
   SurfaceRef,
   ToolCallId,
 } from "@computer-harness/protocol";
-import { projectMonitorCandidateGuidance, projectRecentAssessmentGuidance } from "./monitor-guidance.js";
+import { projectCurrentMonitorGuidance, projectMonitorCandidateGuidance, projectRecentAssessmentGuidance } from "./monitor-guidance.js";
 import type { ProgressMonitorOutput } from "./progress-monitor.js";
 
 const runId = "guidance-run" as RunId;
@@ -163,6 +163,203 @@ function hasLoneSurrogate(value: string): boolean {
 }
 
 describe("monitor guidance projection", () => {
+  it.each(["user correction", "handoff", "unknown transition", "Surface change"] as const)(
+    "starts the declared-target guidance tail after a %s and ignores pre-boundary assessment text",
+    (boundaryKind) => {
+      const events: RuntimeEvent[] = [];
+      let sequence = 0;
+      let latestObservationEvent = makeObservation(runId, sequence++, "episode-observation-0", "episode-observation-0");
+      events.push(latestObservationEvent);
+      let latestObservation = (latestObservationEvent as Extract<RuntimeEvent, { type: "observation.created" }>).observation;
+
+      const attempt = (id: string, evidence?: string, surfaceRef: SurfaceRef = baseSurface): RuntimeEvent => {
+        const callId = `episode-call-${id}` as ToolCallId;
+        events.push(makeEvent(runId, sequence++, `episode-call-event-${id}`, {
+          type: "tool.call.received",
+          call: {
+            id: callId,
+            name: "click",
+            arguments: { x: sequence, y: 20 },
+            declaredEffect: { effects: ["navigate"], target: "Search field", summary: `Check search attempt ${id}` },
+          },
+        }));
+        const actionId = `episode-action-${id}` as ActionId;
+        const proposal = makeEvent(runId, sequence++, `episode-proposal-${id}`, {
+          type: "action.proposed",
+          callId,
+          action: { actionId, kind: "click", basedOn: latestObservation.id, point: { x: sequence, y: 20 } },
+        });
+        events.push(proposal);
+        const receipt = makeEvent(runId, sequence++, `episode-receipt-${id}`, {
+          type: "action.execution.completed",
+          receipt: { actionId, status: "completed" },
+        });
+        events.push(receipt);
+        if (evidence === undefined) return receipt;
+
+        const postObservationId = `episode-observation-${id}`;
+        const postObservationEvent = makeObservation(runId, sequence++, `episode-observation-event-${id}`, postObservationId, surfaceRef);
+        events.push(postObservationEvent);
+        events.push(makeEvent(runId, sequence++, `episode-transition-${id}`, {
+          type: "monitor.transition",
+          actionId,
+          preObservationId: latestObservation.id,
+          postObservationId: postObservationId as ObservationId,
+          sourceActionEventId: receipt.eventId,
+          sourceObservationEventId: postObservationEvent.eventId,
+          transition: "unchanged",
+        }));
+        events.push(makeEvent(runId, sequence++, `episode-assessment-${id}`, {
+          type: "model.response.received",
+          turn: {
+            type: "finish",
+            summary: "continue",
+            observationAssessment: {
+              observationId: postObservationId as ObservationId,
+              actionId,
+              actionOutcome: "no_effect",
+              evidence,
+            },
+          },
+        }));
+        latestObservationEvent = postObservationEvent;
+        latestObservation = (postObservationEvent as Extract<RuntimeEvent, { type: "observation.created" }>).observation;
+        return receipt;
+      };
+
+      attempt("before-1", "OLD_ASSESSMENT_SENTINEL");
+      attempt("before-2", "OLD_ASSESSMENT_SENTINEL");
+      const oldActionId = "episode-action-before-2" as ActionId;
+      if (boundaryKind === "user correction") {
+        events.push(makeEvent(runId, sequence++, "episode-user-correction", { type: "user.input.received", text: "Use another approach." }));
+      } else if (boundaryKind === "handoff") {
+        events.push(makeEvent(runId, sequence++, "episode-handoff", { type: "computer.window.handoff.ignored", sourceActionId: oldActionId }));
+      } else if (boundaryKind === "unknown transition") {
+        events.push(makeEvent(runId, sequence++, "episode-unknown-transition", {
+          type: "monitor.transition",
+          actionId: oldActionId,
+          preObservationId: latestObservation.id,
+          postObservationId: latestObservation.id,
+          sourceActionEventId: "episode-old-receipt" as EventId,
+          sourceObservationEventId: latestObservationEvent.eventId,
+          transition: "unknown",
+        }));
+      } else {
+        latestObservationEvent = makeObservation(runId, sequence++, "episode-partition-observation", "episode-partition-observation", otherSurface);
+        events.push(latestObservationEvent);
+        latestObservation = (latestObservationEvent as Extract<RuntimeEvent, { type: "observation.created" }>).observation;
+      }
+
+      attempt("after-1");
+      expect(projectCurrentMonitorGuidance(events, runId, latestObservation)).toBeUndefined();
+
+      attempt("after-2", "Fresh post-boundary no-effect evidence.", latestObservation.surfaceRef);
+      attempt("after-3", "Fresh post-boundary no-effect evidence.", latestObservation.surfaceRef);
+      const projection = projectCurrentMonitorGuidance(events, runId, latestObservation);
+      expect(projection).toBeDefined();
+      expect(projection?.text).toContain("Model-declared target");
+      expect(projection?.text).toContain("no_effect (unverified)");
+      expect(projection?.text).not.toContain("OLD_ASSESSMENT_SENTINEL");
+    },
+  );
+
+  it("names repeated declared target/effect and preserves only an unverified prior report across changed screens", () => {
+    const events: RuntimeEvent[] = [];
+    let sequence = 0;
+    let previousObservationId = "effect-observation-0";
+    events.push(makeObservation(runId, sequence++, "effect-observation-event-0", previousObservationId));
+    const repeatedActionIds: EventId[] = [];
+    let latestObservation: ObservationFrame | undefined;
+    let latestReceipt: RuntimeEvent | undefined;
+
+    for (let index = 1; index <= 3; index += 1) {
+      const actionId = `declared-action-${index}` as ActionId;
+      const callId = `declared-call-${index}` as ToolCallId;
+      const nextObservationId = `effect-observation-${index}`;
+      events.push(makeEvent(runId, sequence++, `declared-call-event-${index}`, {
+        type: "tool.call.received",
+        call: {
+          id: callId,
+          name: "click",
+          arguments: { x: 20 + index, y: 30 },
+          declaredEffect: { effects: ["navigate"], target: "Official site search field", summary: `Search attempt ${index}` },
+        },
+      }));
+      const proposal = makeEvent(runId, sequence++, `declared-proposal-${index}`, {
+        type: "action.proposed",
+        callId,
+        action: { actionId, kind: "click", basedOn: previousObservationId as ObservationId, point: { x: 20 + index, y: 30 } },
+      });
+      events.push(proposal);
+      repeatedActionIds.push(proposal.eventId);
+      const receipt = makeEvent(runId, sequence++, `declared-receipt-${index}`, {
+        type: "action.execution.completed",
+        receipt: { actionId, status: "completed" },
+      });
+      events.push(receipt);
+      latestReceipt = receipt;
+      const nextObservation = makeObservation(runId, sequence++, `declared-observation-event-${index}`, nextObservationId);
+      events.push(nextObservation);
+      latestObservation = (nextObservation as Extract<RuntimeEvent, { type: "observation.created" }>).observation;
+      events.push(makeEvent(runId, sequence++, `declared-transition-${index}`, {
+        type: "monitor.transition",
+        actionId,
+        preObservationId: previousObservationId as ObservationId,
+        postObservationId: nextObservationId as ObservationId,
+        sourceActionEventId: receipt.eventId,
+        sourceObservationEventId: nextObservation.eventId,
+        transition: "changed",
+      }));
+      if (index < 3) {
+        events.push(makeEvent(runId, sequence++, `declared-assessment-${index}`, {
+          type: "model.response.received",
+          turn: {
+            type: "finish",
+            summary: "continue",
+            observationAssessment: {
+              observationId: nextObservationId as ObservationId,
+              actionId,
+              actionOutcome: "unexpected_change",
+              evidence: "The search field still appears blank.",
+            },
+          },
+        }));
+      }
+      previousObservationId = nextObservationId;
+    }
+
+    const latestActionId = `declared-action-3` as ActionId;
+    const repeatedReason = {
+      code: "repeated_declared_effect" as const,
+      eventIds: repeatedActionIds,
+    };
+    const output: ProgressMonitorOutput = {
+      candidate: true,
+      reasons: [repeatedReason],
+      evidence: [{ kind: "action_receipt", eventIds: [latestReceipt?.eventId as EventId] }],
+      eventIds: [latestReceipt?.eventId as EventId],
+    };
+    const candidate = projectMonitorCandidateGuidance({
+      event: latestReceipt!,
+      output,
+      events,
+      runId,
+      ...(latestObservation === undefined ? {} : { latestObservation }),
+    });
+    const current = projectCurrentMonitorGuidance(events, runId, latestObservation);
+
+    expect(candidate.text).toContain("Model-declared target");
+    expect(candidate.text).toContain("Official site search field");
+    expect(candidate.text).toContain("Search attempt 3");
+    expect(candidate.text).toContain("unexpected_change (unverified)");
+    expect(candidate.text).toContain("The search field still appears blank");
+    expect(candidate.text).toContain("Recheck newest image");
+    expect(candidate.text).toContain("pixels alone are not proof");
+    expect(candidate.text.length).toBeLessThanOrEqual(240);
+    expect(current?.text).toBe(candidate.text);
+    expect(events.some((event) => event.type === "action.proposed" && event.action.actionId === latestActionId)).toBe(true);
+  });
+
   it("carries a bounded, untrusted assessment through a later unchanged action on the same Surface", () => {
     const fixture = makeFixture();
     const projection = projectRecentAssessmentGuidance(fixture.events, runId, fixture.latestObservation);

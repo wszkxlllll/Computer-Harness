@@ -380,4 +380,18 @@ PR36接续以最新main `e970fea`为基底，将其合入原PR历史，保留原
 
 独立真实API基础验收已通过：3请求、17项检查全真，首轮task_create+memory_write_fact+click，真实Runtime持久化、回执/历史与新图进入后续请求，独立terminate；单请求2.512–3.280秒。仅用非敏感测试PNG与受限Computer fixture，不是业务GUI成功。两个composite尝试均5请求完成但三个GUI动作分轮，严格Batch验收不通过，记P2能力限制，建议Ark先采用单GUI基线；不动GLM/Qwen或放宽Runtime。首轮旧ARK_API_KEY401，实际用户末尾HUOSHAN_API_KEY有效，probe可显式选择且不回退；生产环境仍需正确设置ARK_API_KEY。实际nested缓存字段已在Provider/诊断两处修复并回归，官方直连平级格式保持。
 
-最终构建/spike/Web通过、完整Vitest2480/2480、旧runner27/27、新probe离线11/11；实现及增量Sol最终GO。中途旧缓存fixture失败已修并全量复验，没有隐藏失败或放松安全断言。详细请求时延、脱敏结果位置与通用复验命令见[Ark独立验收末节](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。下一步更新原PR36到main目标，远端CI全过才合入；Preview不变。
+最终构建/spike/Web通过、完整Vitest2480/2480、旧runner27/27、新probe离线11/11；实现及增量Sol最终GO。中途旧缓存fixture失败已修并全量复验，没有隐藏失败或放松安全断言。详细请求时延、脱敏结果位置与通用复验命令见[Ark独立验收末节](./volcengine-ark-agent-plan-2026-10-16.md#最新main集成及独立api验收2026-10-16接续)。[PR36](https://github.com/wszkxlllll/Computer-Harness/pull/36)后续已改为main目标，[PR CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38897851567)全过后以`282ac6c`合入，[main CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38898351528)也已独立确认全过；Preview不变。
+
+六题runner后续由用户授权单独接入，最新状态与对照命令见[评测操作说明新六题节](./life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)。这项离线准备不属于上述历史八题或API验收，也不代表新六题已经实机通过。
+
+### 2026-10-17队友新增实跑：PR37状态同步（只读）
+
+核对[PR37](https://github.com/wszkxlllll/Computer-Harness/pull/37) head `9a2bfe7`、专项Markdown与JSON摘要。此次仅按已发布材料同步，不重跑模型或独立复核私有轨迹，不修改、评论或合并PR；当前Windows六题准备包与Preview均不改。
+
+队友跑的是其CP01/CP02/M02开发题，各4遍、两批共12遍，不是本机新接的S01—S03/CM01—CM03。其M02是协和医院2026-10-21上午公开排班，不是本机九题中同名的华山预约说明。CP01查佛山公开居民电价，CP02按官方燃气价核对合成账单（不支付），M02读协和指定日期的公开医生表。
+
+按作者报告：CP01两遍清单通过、一遍漏认图注、一遍30分钟取消；CP02三遍清单通过、一遍附带非居民价格抄错，其中一遍正确指出账单差额却自报failure；M02无完整通过，两遍未交付、两遍交付但抄错同一医生姓名。合计5遍清单通过、4遍有事实/完整性瑕疵、3遍未交付；Runtime为8成功/3失败/1取消，不能混为业务成功率。
+
+本轮521请求，520个HTTP200、1个在宿主期限取消时未获响应头；耗时合计约107.7分钟。CP01每遍约7.6—30分钟，CP02约32—67秒，M02约5—7分钟。不是纯API时延统计，不据此归因线路或供应商延迟；费用未知。材料显示没有普遍API连通失败，仍暴露导航效率、图片信息遗漏/识别错字、结束工具混用和思考输出耗尽问题。
+
+所有轮次均显式开启low思考、Plan/Memory/Batch，输出16384、单请求180秒、每轮200请求/200动作、Monitor guidance。没有模块开关对照，实际也没有多GUI Batch；不能证明Plan/Memory或Batch净收益。执行的是WinBoat Windows内既有本地候选，浏览器窗口模式、跨窗口关闭；发布分支虽基于main `282ac6c`，不等于用这棵main树重新部署实测。与本机六题的默认disabled/单GUI/全桌面跨应用准备配置不同，不直接并表。PR仅新增报告/摘要/8张官网裁图和索引，无产品源码修改；作者报告12个Run已close、专用daemon已stop，本轮未独立检查这些进程。

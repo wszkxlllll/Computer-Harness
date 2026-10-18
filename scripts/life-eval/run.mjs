@@ -2,25 +2,27 @@ import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  MANIFEST_PATH,
   ROOT,
-  SUITE_ID,
+  assertApiKeyEnvName,
   builtCliFingerprint,
   gitSummary,
   jsonText,
   loadCliParser,
+  manifestPathForSuite,
   parseFlags,
   pathExists,
   sha256,
+  suiteDefinition,
   sourceFingerprint,
   verifyCuaDriverBinary,
   validateCliArgv,
 } from "./common.mjs";
+import { createSupervisionBridge, validateSupervisionPlan } from "./supervision.mjs";
 
-const VALUE_FLAGS = new Set(["--package", "--cua-socket"]);
+const VALUE_FLAGS = new Set(["--package", "--cua-socket", "--suite"]);
 const BOOLEAN_FLAGS = new Set(["--live", "--confirm-desktop-control", "--supervised", "--help"]);
 const CUA_SOCKET_TOKEN = "{{CUA_SOCKET}}";
 
@@ -33,7 +35,20 @@ export function parseRunArgs(argv) {
 }
 
 export function assertFreezeMatches(plan, packageDir, manifestBytes, currentSource, currentBuiltCli, currentGit) {
-  if (plan.schemaVersion !== 1 || plan.suiteId !== SUITE_ID) throw new Error("unsupported plan schema/suite");
+  if (plan.schemaVersion !== 1) throw new Error("unsupported plan schema/suite");
+  const suite = suiteDefinition(plan.suiteId);
+  if (plan.configuration?.model !== suite.model || plan.configuration?.batching !== suite.batching) {
+    throw new Error("frozen model/batching does not match the selected suite");
+  }
+  const frozenKeyEnvName = plan.configuration?.environment?.apiKeyEnvName;
+  const frozenKeyTargetEnvName = plan.configuration?.environment?.apiKeyTargetEnvName;
+  if (suite.provider === "ark") {
+    assertApiKeyEnvName(frozenKeyEnvName);
+    if (frozenKeyTargetEnvName !== suite.apiKeyTargetEnv) throw new Error("frozen API-key target does not match the selected suite");
+  } else if ((frozenKeyEnvName !== undefined && frozenKeyEnvName !== null) ||
+      (frozenKeyTargetEnvName !== undefined && frozenKeyTargetEnvName !== null)) {
+    throw new Error("provider API-key mapping does not match the selected suite");
+  }
   if (typeof plan.frozenState?.git?.head !== "string") throw new Error("plan is missing its frozen git source version");
   if (resolve(plan.packageDir) !== resolve(packageDir)) throw new Error("package path does not match frozen plan");
   if (sha256(manifestBytes) !== plan.frozenState.manifestSha256) throw new Error("task manifest changed; prepare a new package");
@@ -60,7 +75,7 @@ export async function verifyActiveInputs(activeInputs, manifestPath) {
   }
 }
 
-export async function loadAndVerifyPackage(packageDir, { manifestPath = MANIFEST_PATH, root = ROOT } = {}) {
+export async function loadAndVerifyPackage(packageDir, { manifestPath, root = ROOT } = {}) {
   const absolutePackage = resolve(packageDir);
   const planPath = join(absolutePackage, "plan.json");
   const reviewPath = join(absolutePackage, "review.json");
@@ -72,13 +87,71 @@ export async function loadAndVerifyPackage(packageDir, { manifestPath = MANIFEST
     throw new Error("review.json package/profile does not match frozen plan");
   }
   if (review.planSha256 !== sha256(planBytes)) throw new Error("plan.json changed after prepare; prepare a new package");
-  const manifestBytes = await readFile(manifestPath);
+  const selectedManifestPath = manifestPath ?? manifestPathForSuite(plan.suiteId, root);
+  const manifestBytes = await readFile(selectedManifestPath);
+  const manifest = JSON.parse(manifestBytes.toString("utf8"));
+  if (manifest.suiteId !== plan.suiteId) throw new Error("task manifest does not match the frozen suite");
   const [currentSource, currentBuiltCli] = await Promise.all([sourceFingerprint(root), builtCliFingerprint(root)]);
   const currentGit = gitSummary(root);
   assertFreezeMatches(plan, absolutePackage, manifestBytes, currentSource, currentBuiltCli, currentGit);
   await verifyCuaDriverBinary(plan.configuration?.cuaDriver);
-  await verifyActiveInputs(plan.task.activeInputs, manifestPath);
+  await verifyActiveInputs(plan.task.activeInputs, selectedManifestPath);
   return { absolutePackage, plan, review };
+}
+
+export function parseSelectedEnvValue(envFileText, variableName) {
+  const selectedName = assertApiKeyEnvName(variableName);
+  if (typeof envFileText !== "string") throw new Error("configured Ark API-key env file is not valid UTF-8 text");
+  let matchCount = 0;
+  let selectedValue;
+  for (const line of envFileText.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0 || trimmed.slice(0, separator).trim() !== selectedName) continue;
+    matchCount += 1;
+    if (matchCount > 1) throw new Error("configured Ark API-key environment variable is duplicated");
+    selectedValue = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/gu, "");
+  }
+  if (matchCount === 0) throw new Error("configured Ark API-key environment variable is missing");
+  if (typeof selectedValue !== "string" || selectedValue.trim().length === 0) {
+    throw new Error("configured Ark API-key environment variable is empty");
+  }
+  return selectedValue;
+}
+
+export async function buildLiveChildEnvironment(plan, { parentEnv = process.env, readEnvFile = readFile } = {}) {
+  const suite = suiteDefinition(plan.suiteId);
+  const childEnv = { ...parentEnv };
+  if (suite.provider === "deepseek") {
+    childEnv.DEEPSEEK_REQUEST_TIMEOUT_MS = "90000";
+    childEnv.DEEPSEEK_MAX_OUTPUT_TOKENS = "4096";
+    return childEnv;
+  }
+
+  const envFilePath = plan.cli?.envFilePath;
+  if (typeof envFilePath !== "string" || envFilePath.trim().length === 0 || !isAbsolute(envFilePath)) {
+    throw new Error("Ark live execution requires a frozen env-file path");
+  }
+  const variableName = assertApiKeyEnvName(plan.configuration?.environment?.apiKeyEnvName);
+  if (plan.configuration?.environment?.apiKeyTargetEnvName !== suite.apiKeyTargetEnv) {
+    throw new Error("frozen API-key target does not match the selected suite");
+  }
+  let envFileText;
+  try {
+    const bytes = await readEnvFile(envFilePath);
+    envFileText = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("configured Ark API-key env file could not be read as UTF-8");
+  }
+  const selectedValue = parseSelectedEnvValue(envFileText, variableName);
+  childEnv[suite.apiKeyTargetEnv] = selectedValue;
+  // The CLI later loads the env file itself. A defined empty local alias keeps
+  // that loader from re-populating the source key after the runner maps it.
+  childEnv.HUOSHAN_API_KEY = "";
+  childEnv.ARK_REQUEST_TIMEOUT_MS = "90000";
+  childEnv.ARK_MAX_OUTPUT_TOKENS = "4096";
+  return childEnv;
 }
 
 export function concreteArgv(plan, cuaSocket) {
@@ -152,6 +225,8 @@ function printDryRun(plan, argv, socketPlaceholder) {
     variant: plan.selection.variant,
     model: plan.configuration.model,
     deepseekEnabled: false,
+    arkEnabled: false,
+    providerEnabled: false,
     cuaDriver: plan.configuration.cuaDriver,
     runningCuaDaemonIdentity: "not verified by candidate binary hash; human socket preflight required",
     cuaSocket: socketPlaceholder ? "placeholder (supply --cua-socket for live)" : "provided; not contacted",
@@ -207,8 +282,10 @@ function consumerEvidence(plan, stdoutLog, stderrLog) {
 }
 
 export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, supervised, startedAt, argv }) {
+  const suite = suiteDefinition(plan.suiteId);
   const stdoutLog = join(attemptDir, "stdout.log");
   const stderrLog = join(attemptDir, "stderr.log");
+  const supervision = validateSupervisionPlan(plan);
   return {
     schemaVersion: 1,
     packageId: plan.packageId,
@@ -226,11 +303,23 @@ export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, su
     envFilePath: plan.cli.envFilePath ?? null,
     cuaDriver: plan.configuration.cuaDriver,
     cuaDaemonPreflight: review.preflight.cuaDaemon ?? null,
-    envPolicy: plan.cli.envFilePath === null || plan.cli.envFilePath === undefined
-      ? "runner does not read .env; inherit current environment and override only DeepSeek timeout/output-token caps in this child"
-      : "runner does not read envFilePath; the live child CLI reads it via --env-file and receives only the bounded DeepSeek timeout/output-token overrides",
+    envPolicy: suite.provider === "ark"
+      ? `after live authorization, runner reads only frozen ${plan.configuration.environment.apiKeyEnvName} from the frozen env-file, maps it to ARK_API_KEY, and records no value or fallback; child CLI receives env-file for its existing settings`
+      : plan.cli.envFilePath === null || plan.cli.envFilePath === undefined
+        ? "runner does not read .env; inherit current environment and override only DeepSeek timeout/output-token caps in this child"
+        : "runner does not read envFilePath; the live child CLI reads it via --env-file and receives only the bounded DeepSeek timeout/output-token overrides",
     stdoutLog,
     stderrLog,
+    ...(supervision === undefined ? {} : {
+      supervision: {
+        ...supervision,
+        attemptId: basename(attemptDir),
+        stateFile: "supervision-state.jsonl",
+        commandDirectory: "supervision-commands",
+        receiptFile: "supervision-receipts.jsonl",
+        transport: "private-node-ipc-and-package-local-command-files-v1",
+      },
+    }),
     consumerEvidence: consumerEvidence(plan, stdoutLog, stderrLog),
     final: null,
   };
@@ -241,7 +330,7 @@ async function promptExactConfirmation(plan) {
     throw new Error("live execution requires an interactive terminal for typed per-Run confirmation");
   }
   const expected = `${plan.packageId} ${plan.task.id}:${plan.selection.variant}`;
-  process.stdout.write(`\nThis single Run can control the desktop and call DeepSeek. Type exactly:\n${expected}\n> `);
+  process.stdout.write(`\nThis single Run can control the desktop and call ${plan.configuration.model}. Type exactly:\n${expected}\n> `);
   const answer = await new Promise((resolveAnswer, reject) => {
     let text = "";
     const onData = (chunk) => {
@@ -312,8 +401,15 @@ export async function runLive(
     userInterruptForceKillDelayMs = 5_000,
     userInterruptCloseObservationMs = 1_000,
     timeoutForceKillDelayMs = 5_000,
+    buildChildEnvironment = buildLiveChildEnvironment,
+    supervisionHandshakeTimeoutMs = 5_500,
+    supervisionPollIntervalMs = 100,
   } = {},
 ) {
+  const supervision = validateSupervisionPlan(plan);
+  const childEnv = await buildChildEnvironment(plan);
+  if (supervision === undefined) delete childEnv.HARNESS_LIFE_EVAL_SUPERVISION_MODE;
+  else childEnv.HARNESS_LIFE_EVAL_SUPERVISION_MODE = supervision.mode;
   const attemptDir = join(packageDir, "attempts", `live-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   await mkdir(join(packageDir, "attempts"), { recursive: true });
   await mkdir(attemptDir, { recursive: false });
@@ -341,6 +437,11 @@ export async function runLive(
   let spawnError;
   let child;
   let childCloseWatcher;
+  let supervisionBridge;
+  let supervisionPoll;
+  let supervisionError;
+  let supervisionReady = false;
+  let supervisionFailureStopSent = false;
   let userInterruptSignalReceived = null;
   let userInterruptSignalCount = 0;
   let userInterruptCleanupTimedOut = false;
@@ -394,12 +495,41 @@ export async function runLive(
       }
     }
   };
-  const childEnv = {
-    ...process.env,
-    DEEPSEEK_REQUEST_TIMEOUT_MS: "90000",
-    DEEPSEEK_MAX_OUTPUT_TOKENS: "4096",
+  const stopAfterSupervisionFailure = (error) => {
+    supervisionError ??= error instanceof Error ? error.message : String(error);
+    terminalStderr.write(`Evaluation supervision failed: ${supervisionError}\n`);
+    if (child === undefined || child.exitCode !== null || child.signalCode !== null || supervisionFailureStopSent) return;
+    supervisionFailureStopSent = true;
+    const state = supervisionBridge?.latestState;
+    if (!supervisionReady || state?.runId === undefined || state.runId === null) {
+      child.kill("SIGTERM");
+      return;
+    }
+    if (typeof child.send !== "function" || child.connected === false) {
+      child.kill("SIGTERM");
+      return;
+    }
+    try {
+      child.send?.({
+        type: "harness.supervision.command",
+        commandId: randomUUID(),
+        packageId: plan.packageId,
+        attemptId: supervisionBridge.identity.attemptId,
+        runId: state.runId,
+        command: "cancel",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5_000).toISOString(),
+      }, undefined, undefined, (sendError) => {
+        if (sendError && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      });
+    } catch {
+      child.kill("SIGTERM");
+    }
   };
   try {
+    if (supervision !== undefined) {
+      supervisionBridge = await createSupervisionBridge({ plan, packageDir, attemptDir, mode: supervision.mode, startedAt });
+    }
     signalSource.on("SIGINT", onSigint);
     signalListenerInstalled = true;
     child = spawnChild(process.execPath, [plan.cli.entry, ...argv], {
@@ -413,6 +543,23 @@ export async function runLive(
     tee(child.stderr, terminalStderr, stderrLog);
     child.once("error", (error) => { spawnError = error; });
     childCloseWatcher = watchForClose(child);
+    if (supervisionBridge !== undefined) {
+      child.on("message", (message) => {
+        void supervisionBridge.handleChildMessage(message, child).catch((error) => {
+          stopAfterSupervisionFailure(error);
+        });
+      });
+      await Promise.race([
+        supervisionBridge.waitForReady(supervisionHandshakeTimeoutMs),
+        childCloseWatcher.promise.then(() => { throw new Error("CLI closed before the evaluation supervision handshake completed"); }),
+      ]);
+      supervisionReady = true;
+      supervisionPoll = setInterval(() => {
+        void supervisionBridge.pumpCommands(child).catch((error) => {
+          stopAfterSupervisionFailure(error);
+        });
+      }, supervisionPollIntervalMs);
+    }
     if (userInterruptSignalCount === 0) {
       timeout = setTimeout(() => {
         timedOut = true;
@@ -493,10 +640,16 @@ export async function runLive(
     if (timeout !== undefined) clearTimeout(timeout);
     if (terminateTimer !== undefined) clearTimeout(terminateTimer);
     if (killTimer !== undefined) clearTimeout(killTimer);
+    if (supervisionPoll !== undefined) clearInterval(supervisionPoll);
     await Promise.all([
       new Promise((resolve) => stdoutLog.end(resolve)),
       new Promise((resolve) => stderrLog.end(resolve)),
     ]);
+    if (supervisionBridge !== undefined) {
+      await supervisionBridge.finalize({
+        terminalStatus: supervisionBridge.latestState?.terminal === true ? "finished" : "child-closed",
+      });
+    }
     const final = {
       outcomeMode: plan.task.outcomeMode,
       endedAt: new Date().toISOString(),
@@ -520,6 +673,18 @@ export async function runLive(
       businessSuccess: "not inferred from process exit code; requires human evidence review",
       consumerReviewRequired: true,
       consumerReviewPath: join(packageDir, "review.json"),
+      ...(supervisionBridge === undefined ? {} : {
+        supervision: {
+          mode: supervision.mode,
+          policyVersion: supervision.policyVersion,
+          runId: supervisionBridge.latestState?.runId ?? null,
+          listenerHandshake: "completed",
+          controlState: supervisionBridge.statePath,
+          commandDirectory: supervisionBridge.commandsDir,
+          receiptLog: supervisionBridge.receiptsPath,
+          ...(supervisionError === undefined ? {} : { diagnostic: supervisionError }),
+        },
+      }),
     };
     record.final = final;
     await writeFile(liveRecordPath, jsonText(record), { encoding: "utf8" });
@@ -527,8 +692,12 @@ export async function runLive(
     return final;
   } catch (error) {
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGINT");
+    if (supervisionPoll !== undefined) clearInterval(supervisionPoll);
     stdoutLog.destroy();
     stderrLog.destroy();
+    if (supervisionBridge !== undefined) {
+      await supervisionBridge.finalize({ terminalStatus: "supervision-start-or-runtime-failure" }).catch(() => undefined);
+    }
     const final = {
       outcomeMode: plan.task.outcomeMode,
       endedAt: new Date().toISOString(),
@@ -548,6 +717,18 @@ export async function runLive(
       businessSuccess: "not inferred; requires human evidence review",
       consumerReviewRequired: true,
       consumerReviewPath: join(packageDir, "review.json"),
+      ...(supervisionBridge === undefined ? {} : {
+        supervision: {
+          mode: supervision.mode,
+          policyVersion: supervision.policyVersion,
+          runId: supervisionBridge.latestState?.runId ?? null,
+          listenerHandshake: supervisionReady ? "completed" : "failed",
+          controlState: supervisionBridge.statePath,
+          commandDirectory: supervisionBridge.commandsDir,
+          receiptLog: supervisionBridge.receiptsPath,
+          diagnostic: supervisionError ?? (error instanceof Error ? error.message : String(error)),
+        },
+      }),
     };
     record.final = final;
     await writeFile(liveRecordPath, jsonText(record), { encoding: "utf8" });
@@ -563,9 +744,14 @@ export async function runLive(
   }
 }
 
-export async function runPackage(options, { root = ROOT, manifestPath = MANIFEST_PATH, confirm = promptExactConfirmation } = {}) {
+export async function runPackage(options, { root = ROOT, manifestPath, confirm = promptExactConfirmation } = {}) {
   if (!isAbsolute(options["--package"])) throw new Error("--package must be an absolute prepared package path");
+  if (options["--suite"] !== undefined) suiteDefinition(options["--suite"]);
   const { absolutePackage, plan, review } = await loadAndVerifyPackage(options["--package"], { root, manifestPath });
+  if (options["--suite"] !== undefined && options["--suite"] !== plan.suiteId) {
+    throw new Error("--suite does not match the package's frozen suite");
+  }
+  validateSupervisionPlan(plan);
   const live = options["--live"] === true;
   if (!live && (options["--confirm-desktop-control"] === true || options["--supervised"] === true)) {
     throw new Error("--confirm-desktop-control and --supervised require --live");
@@ -586,6 +772,8 @@ export async function runPackage(options, { root = ROOT, manifestPath = MANIFEST
       modelAccess: false,
       networkAccess: false,
       envFileRead: false,
+      providerEnabled: false,
+      model: plan.configuration.model,
       cuaSocketPlaceholder: options["--cua-socket"] === undefined,
       argv,
     };
@@ -614,7 +802,7 @@ export async function runPackage(options, { root = ROOT, manifestPath = MANIFEST
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write("Usage: node scripts/life-eval/run.mjs --package <absolute-package> [--cua-socket <existing-socket>] [--live --confirm-desktop-control [--supervised]]\nDefault is dry-run; live runs one task only and require a human review.json preflight receipt plus typed terminal confirmation.\n");
+    process.stdout.write("Usage: node scripts/life-eval/run.mjs --package <absolute-package> [--suite <expected frozen suite>] [--cua-socket <existing-socket>] [--live --confirm-desktop-control [--supervised]]\nDefault is dry-run; suite and model are frozen by prepare. Ark live requires the frozen env-file and selected key-variable name; dry-run never reads either value. Live runs one task only and requires human preflight plus typed terminal confirmation.\n");
     return;
   }
   const options = parseRunArgs(argv);

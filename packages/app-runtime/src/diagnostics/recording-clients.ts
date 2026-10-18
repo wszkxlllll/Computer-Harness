@@ -54,6 +54,7 @@ class RecordingChatCompletionsHttpClient implements GlmHttpClient {
       });
       return response;
     } catch (error) {
+      const arkHttpFailure = this.provider === "ark" ? projectArkHttpFailure(error) : undefined;
       await appendGlmRecord(this.path, {
         provider: this.provider,
         request: requestNumber,
@@ -62,11 +63,52 @@ class RecordingChatCompletionsHttpClient implements GlmHttpClient {
         ...(preparedEstimate === undefined ? {} : { preparedEstimate }),
         httpEvidence: transportEvidence.length === 0 ? { source: "unavailable", stages: [] } : { source: "fetch", stages: transportEvidence },
         requestedModel: trustedModel,
-        transportError: summarizeTransportError(error),
+        transportError: {
+          ...summarizeTransportError(error),
+          ...(arkHttpFailure === undefined ? {} : { httpFailure: arkHttpFailure }),
+        },
       });
       throw error;
     }
   }
+}
+
+function projectArkHttpFailure(error: unknown): Record<string, unknown> | undefined {
+  try {
+    if (typeof error !== "object" || error === null || (error as { name?: unknown }).name !== "ArkProviderError") return undefined;
+    const rawFailure = (error as { httpFailure?: unknown }).httpFailure;
+    if (typeof rawFailure !== "object" || rawFailure === null || Array.isArray(rawFailure)) return undefined;
+    const failure = rawFailure as Record<string, unknown>;
+    const retryAfterState = failure.retryAfterState;
+    if (failure.httpStatus !== 429 ||
+        (retryAfterState !== "absent" && retryAfterState !== "invalid" && retryAfterState !== "accepted" && retryAfterState !== "too_long")) return undefined;
+    const providerErrorCode = safeArkProviderCode(failure.providerErrorCode);
+    const providerErrorMessage = safeArkProviderMessage(failure.providerErrorMessage);
+    const retryAfterMs = Number.isSafeInteger(failure.retryAfterMs) && (failure.retryAfterMs as number) >= 0 && (failure.retryAfterMs as number) <= 120_000
+      ? failure.retryAfterMs as number
+      : undefined;
+    return {
+      httpStatus: 429,
+      ...(providerErrorCode === undefined ? {} : { providerErrorCode }),
+      ...(providerErrorMessage === undefined ? {} : { providerErrorMessage }),
+      retryAfterState,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    };
+  } catch { return undefined; }
+}
+
+function safeArkProviderCode(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length < 1 || value.length > 64 || !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u.test(value)) return undefined;
+  if (/[A-Za-z0-9]{24,}/u.test(value)) return undefined;
+  return value;
+}
+
+function safeArkProviderMessage(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length < 1 || value.length > 240 ||
+      !/^[\p{L}\p{N} .,;:!?()'’_-]+$/u.test(value) ||
+      /\b(?:https?|bearer|authorization|api[ _-]*key|access[ _-]*token|secret|credential)\b/iu.test(value) ||
+      /\b[A-Za-z0-9_-]{24,}\b/u.test(value)) return undefined;
+  return value;
 }
 
 export class RecordingGlmHttpClient extends RecordingChatCompletionsHttpClient {}

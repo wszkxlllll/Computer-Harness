@@ -107,4 +107,4 @@ node scripts/provider-ark-conformance.mjs --live --env-file <private-env-file> -
 
 独立证据保存在被忽略的`runs/ark-conformance/`：401 `live-20261016114951784-b4bbd546`；composite `live-20261016115045197-7add4a11`及`live-20261016115430445-3bfddde7`；baseline `live-baseline-20261016120051545-496011f5`，各自`probe-report.json`。报告只公开工具名、形状、安全错误码与数字usage，不输出密钥、原回答/隐藏推理或私有截图。脚本同轮Batch判据绑定同一响应callId及对应Receipt，并有跨轮负例；baseline单独评分，不覆盖composite失败。当前P2限制是Ark三GUI动作Batch未证实，应以单GUI基线做后续业务实验；不影响既有GLM/Qwen设置。
 
-最新PR36的远端CI与合入记录接续于评测总报告末节。API基础已过，须远端全矩阵CI通过后合main；本轮不部署、不改Preview模型默认或服务。
+最新PR36的[远端CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38897851567)已全矩阵通过，API基础通过后已以`282ac6c`合入main；合入后的[main CI](https://github.com/wszkxlllll/Computer-Harness/actions/runs/38898351528)也全部通过，详见评测总报告末节。本轮不部署、不改Preview模型默认或服务。用户后续授权的新六题离线runner接入见[操作说明](./life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)，不把它算作真实业务通过。

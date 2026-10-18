@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import type { ComputerFactoryDependencies } from "@computer-harness/app-runtime"
 import type { Computer, ModelInput } from "@computer-harness/runtime";
 import type { ComputerSessionDescriptor, SurfaceRef, Viewport } from "@computer-harness/protocol";
 import { parseArgs, toResolvedRunConfig } from "./index.js";
+import { createRunSupervisionControl, type RunSupervisionControlSource } from "./run-supervision-control.js";
 
 type CuaComputerModule = Awaited<ReturnType<NonNullable<ComputerFactoryDependencies["importCuaComputer"]>>>;
 type CuaDriverComputerOptions = ConstructorParameters<CuaComputerModule["CuaDriverComputer"]>[0];
@@ -577,5 +579,286 @@ describe("CLI Ark Agent Plan Run configuration", () => {
     expect(config).not.toHaveProperty("arkEndpoint");
     expect(config).not.toHaveProperty("arkRequestTimeoutMs");
     expect(config).not.toHaveProperty("arkMaxOutputTokens");
+  });
+});
+
+describe("CLI evaluation supervision with a real Runtime controller", () => {
+  it("consumes a correction during an in-flight provider request and invalidates the old tool decision", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-supervision-runtime-"));
+    let releasePendingResponse: (() => void) | undefined;
+    let resolvePendingCall: (() => void) | undefined;
+    let resolveProviderStarted: (() => void) | undefined;
+    const pendingResponseGate = new Promise<void>((resolve) => { releasePendingResponse = resolve; });
+    const pendingCall = new Promise<void>((resolve) => { resolvePendingCall = resolve; });
+    const providerStarted = new Promise<void>((resolve) => { resolveProviderStarted = resolve; });
+    const args = [
+      "--goal", "Inspect the fixture and respond after any live correction.",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "supervision-fixture.sock",
+      "--interactive",
+      "--profile", "experiment",
+      "--risk-guard", "off",
+      "--confirm-risk-guard-off",
+      "--output", outputDir,
+    ];
+    const options = parseArgs(args);
+    const config = toResolvedRunConfig(options, options.goal!);
+    let providerCalls = 0;
+    const providerInputs: ModelInput[] = [];
+    let computerActions = 0;
+    let observationCount = 0;
+    const provider = {
+      id: "cli-supervision-offline-provider",
+      async generate(input: ModelInput) {
+        providerCalls += 1;
+        providerInputs.push(input);
+        if (providerCalls === 1) {
+          return {
+            type: "tool_calls" as const,
+            calls: [{ id: "completed-progress-wait" as never, name: "wait", arguments: { durationMs: 1 } }],
+          };
+        }
+        if (providerCalls === 2) {
+          resolveProviderStarted?.();
+          resolvePendingCall?.();
+          await pendingResponseGate;
+          return {
+            type: "tool_calls" as const,
+            calls: [{ id: "stale-click" as never, name: "click", arguments: { x: 10, y: 20 } }],
+          };
+        }
+        return { type: "finish" as const, summary: "Fresh response after the correction." };
+      },
+    };
+    const baseComputer = multilineProfileFixtureComputer();
+    const computer: Computer = {
+      open(...callArgs) { return baseComputer.open(...callArgs); },
+      async observe(...callArgs) {
+        observationCount += 1;
+        return baseComputer.observe(...callArgs);
+      },
+      async execute(...callArgs) {
+        computerActions += 1;
+        return baseComputer.execute(...callArgs);
+      },
+      close(...callArgs) { return baseComputer.close(...callArgs); },
+    };
+    let handle: Awaited<ReturnType<typeof createRun>> | undefined;
+    let control: ReturnType<typeof createRunSupervisionControl> | undefined;
+    const source = new EventEmitter() as EventEmitter & RunSupervisionControlSource;
+    const sent: unknown[] = [];
+    source.connected = true;
+    source.send = (message, callback) => {
+      sent.push(structuredClone(message));
+      callback?.(null);
+      return true;
+    };
+    const waitFor = async (predicate: () => boolean, description: string): Promise<void> => {
+      const deadline = Date.now() + 4_000;
+      while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      if (!predicate()) throw new Error(`timed out waiting for ${description}`);
+    };
+    try {
+      handle = await createRun(config, {
+        createProvider: () => provider,
+        createComputer: async () => computer,
+      });
+      control = createRunSupervisionControl(source, "dynamic");
+      expect(control).toBeDefined();
+      control!.attachController(handle.controller);
+      source.emit("message", {
+        type: "harness.supervision.start",
+        packageId: "G01-C-20261018-a1b2c3d4",
+        attemptId: "live-2026-10-18T00-00-00.000Z-a1b2c3d4",
+        mode: "dynamic",
+      });
+      await control!.waitForInitialization();
+      const outcomePromise = handle.start();
+      let providerStartTimeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          pendingCall,
+          new Promise<never>((_resolve, reject) => { providerStartTimeout = setTimeout(() => reject(new Error("offline provider did not reach the pending second request")), 3_000); }),
+        ]);
+      } finally {
+        if (providerStartTimeout !== undefined) clearTimeout(providerStartTimeout);
+      }
+      await providerStarted;
+      const eventsBeforeCorrection = handle.controller.getEvents();
+      const sourceObservation = eventsBeforeCorrection.find((event) => event.type === "observation.created");
+      const latestObservation = [...eventsBeforeCorrection].reverse().find((event) => event.type === "observation.created");
+      expect(latestObservation?.type).toBe("observation.created");
+      if (latestObservation?.type !== "observation.created") throw new Error("fixture Run did not commit an observation before the pending provider request");
+      expect(sourceObservation?.type).toBe("observation.created");
+      if (sourceObservation?.type !== "observation.created") throw new Error("fixture Run did not commit its initial screenshot");
+      expect(latestObservation.sequence).toBeGreaterThan(sourceObservation.sequence);
+      const actualRunId = handle.controller.getSnapshot().runId;
+      const correctionText = "Reobserve the current screen and continue the original task without repeating an unconfirmed action.";
+      source.emit("message", {
+        type: "harness.supervision.command",
+        commandId: "123e4567-e89b-42d3-a456-426614174111",
+        packageId: "G01-C-20261018-a1b2c3d4",
+        attemptId: "live-2026-10-18T00-00-00.000Z-a1b2c3d4",
+        runId: actualRunId,
+        command: "correct",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        evidenceSequence: sourceObservation.sequence,
+        observationId: sourceObservation.observation.id,
+        text: correctionText,
+      });
+      await waitFor(() => sent.some((message) => (message as { status?: string }).status === "queued"), "inbox queued receipt");
+      expect(handle.controller.getEvents().some((event) => event.type === "user.input.received" && event.text === correctionText)).toBe(false);
+
+      releasePendingResponse?.();
+      await expect(outcomePromise).resolves.toBe("succeeded");
+      await waitFor(() => sent.some((message) => (message as { status?: string }).status === "consumed"), "consumed receipt");
+
+      const events = handle.controller.getEvents();
+      expect(events.some((event) => event.type === "user.input.received" && event.text === correctionText)).toBe(true);
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "stale-click" && event.reason.includes("superseded by user correction"))).toBe(true);
+      expect(events.some((event) => event.type === "action.execution.completed")).toBe(true);
+      expect(events.some((event) => event.type === "action.execution.started" && event.action.kind === "click")).toBe(false);
+      expect(computerActions).toBe(1);
+      expect(observationCount).toBeGreaterThanOrEqual(3);
+      expect(providerCalls).toBe(3);
+      expect(JSON.stringify(providerInputs[2])).toContain(correctionText);
+      expect(handle.controller.getSnapshot().summary).toBe("Fresh response after the correction.");
+    } finally {
+      releasePendingResponse?.();
+      control?.dispose();
+      if (handle !== undefined) await handle.close().catch(() => undefined);
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("queues a text correction during an executing GUI action and exposes it to the next provider input", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-cli-supervision-executing-action-"));
+    let releaseAction: (() => void) | undefined;
+    let resolveActionStarted: (() => void) | undefined;
+    const actionGate = new Promise<void>((resolve) => { releaseAction = resolve; });
+    const actionStarted = new Promise<void>((resolve) => { resolveActionStarted = resolve; });
+    const args = [
+      "--goal", "Inspect the fixture and respond after any live correction.",
+      "--model", "glm-5.3-flash",
+      "--computer", "cua",
+      "--cua-socket", "supervision-executing-fixture.sock",
+      "--interactive",
+      "--profile", "experiment",
+      "--risk-guard", "off",
+      "--confirm-risk-guard-off",
+      "--output", outputDir,
+    ];
+    const options = parseArgs(args);
+    const config = toResolvedRunConfig(options, options.goal!);
+    let providerCalls = 0;
+    const providerInputs: ModelInput[] = [];
+    let computerActions = 0;
+    let observationCount = 0;
+    const provider = {
+      id: "cli-supervision-executing-action-provider",
+      async generate(input: ModelInput) {
+        providerInputs.push(input);
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          return {
+            type: "tool_calls" as const,
+            calls: [{ id: "in-flight-click" as never, name: "click", arguments: { x: 0, y: 0 } }],
+          };
+        }
+        return { type: "finish" as const, summary: "Finished after consuming the correction." };
+      },
+    };
+    const baseComputer = multilineProfileFixtureComputer();
+    const computer: Computer = {
+      open(...callArgs) { return baseComputer.open(...callArgs); },
+      async observe(...callArgs) {
+        observationCount += 1;
+        return baseComputer.observe(...callArgs);
+      },
+      async execute(...callArgs) {
+        computerActions += 1;
+        resolveActionStarted?.();
+        await actionGate;
+        return baseComputer.execute(...callArgs);
+      },
+      close(...callArgs) { return baseComputer.close(...callArgs); },
+    };
+    let handle: Awaited<ReturnType<typeof createRun>> | undefined;
+    let control: ReturnType<typeof createRunSupervisionControl> | undefined;
+    const source = new EventEmitter() as EventEmitter & RunSupervisionControlSource;
+    const sent: unknown[] = [];
+    source.connected = true;
+    source.send = (message, callback) => {
+      sent.push(structuredClone(message));
+      callback?.(null);
+      return true;
+    };
+    const waitFor = async (predicate: () => boolean, description: string): Promise<void> => {
+      const deadline = Date.now() + 4_000;
+      while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      if (!predicate()) throw new Error(`timed out waiting for ${description}`);
+    };
+    try {
+      handle = await createRun(config, {
+        createProvider: () => provider,
+        createComputer: async () => computer,
+      });
+      control = createRunSupervisionControl(source, "dynamic");
+      expect(control).toBeDefined();
+      control!.attachController(handle.controller);
+      source.emit("message", {
+        type: "harness.supervision.start",
+        packageId: "G01-C-20261018-a1b2c3d4",
+        attemptId: "live-2026-10-18T00-00-00.000Z-a1b2c3d4",
+        mode: "dynamic",
+      });
+      await control!.waitForInitialization();
+      const outcomePromise = handle.start();
+      await Promise.race([
+        actionStarted,
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("fixture GUI action did not enter execution")), 3_000)),
+      ]);
+
+      const sourceObservation = handle.controller.getEvents().find((event) => event.type === "observation.created");
+      expect(sourceObservation?.type).toBe("observation.created");
+      if (sourceObservation?.type !== "observation.created") throw new Error("fixture Run did not commit an observation before its action");
+      const actualRunId = handle.controller.getSnapshot().runId;
+      const correctionText = "After the current action completes, reobserve and continue without repeating an unconfirmed action.";
+      source.emit("message", {
+        type: "harness.supervision.command",
+        commandId: "123e4567-e89b-42d3-a456-426614174112",
+        packageId: "G01-C-20261018-a1b2c3d4",
+        attemptId: "live-2026-10-18T00-00-00.000Z-a1b2c3d4",
+        runId: actualRunId,
+        command: "correct",
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        evidenceSequence: sourceObservation.sequence,
+        observationId: sourceObservation.observation.id,
+        text: correctionText,
+      });
+      await waitFor(() => sent.some((message) => (message as { status?: string }).status === "queued"), "executing-action inbox queued receipt");
+      expect(handle.controller.getEvents().some((event) => event.type === "user.input.received" && event.text === correctionText)).toBe(false);
+
+      releaseAction?.();
+      await expect(outcomePromise).resolves.toBe("succeeded");
+      await waitFor(() => sent.some((message) => (message as { status?: string }).status === "consumed"), "executing-action consumed receipt");
+      const events = handle.controller.getEvents();
+      expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "action.execution.started" && event.action.kind === "click")).toHaveLength(1);
+      expect(events.some((event) => event.type === "user.input.received" && event.text === correctionText)).toBe(true);
+      expect(observationCount).toBeGreaterThanOrEqual(2);
+      expect(providerCalls).toBe(2);
+      expect(JSON.stringify(providerInputs[1])).toContain(correctionText);
+      expect(handle.controller.getSnapshot().summary).toBe("Finished after consuming the correction.");
+      expect(computerActions).toBe(1);
+    } finally {
+      releaseAction?.();
+      control?.dispose();
+      if (handle !== undefined) await handle.close().catch(() => undefined);
+      await rm(outputDir, { recursive: true, force: true });
+    }
   });
 });

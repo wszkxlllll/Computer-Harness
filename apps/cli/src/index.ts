@@ -17,6 +17,7 @@ import { defaultManagedBrowserProfileRoot } from "./managed-browser-profile.js";
 import { validateCliArguments } from "./argument-parser.js";
 import { createJevWindowSelector } from "./window-selection-jev.js";
 import { createRunCancellationControl, type RunCancellationControl, type RunCancellationControlSource } from "./run-cancellation-control.js";
+import { createRunSupervisionControl, type CliSupervisionMode, type RunSupervisionControl, type RunSupervisionControlSource } from "./run-supervision-control.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
@@ -27,6 +28,7 @@ type Qwen38OutputMode = "native_tools" | "strict_json";
 const runCancellationControl = process.argv.includes("--interactive") && !process.argv.includes("--tui")
   ? createRunCancellationControl(process as unknown as RunCancellationControlSource)
   : undefined;
+let runSupervisionControl: RunSupervisionControl | undefined;
 
 export interface CliOptions {
   doctor: boolean;
@@ -357,6 +359,22 @@ async function main(): Promise<void> {
     return;
   }
   const options = parseArgs(process.argv.slice(2));
+  const supervisionModeValue = process.env.HARNESS_LIFE_EVAL_SUPERVISION_MODE;
+  if (supervisionModeValue !== undefined) {
+    if (supervisionModeValue !== "observe" && supervisionModeValue !== "dynamic") {
+      throw new Error("HARNESS_LIFE_EVAL_SUPERVISION_MODE must be observe or dynamic");
+    }
+    if (!options.interactive || options.tui) {
+      throw new Error("evaluation supervision IPC is available only for a direct interactive Run");
+    }
+    runSupervisionControl = createRunSupervisionControl(
+      process as unknown as RunSupervisionControlSource,
+      supervisionModeValue as CliSupervisionMode,
+    );
+    if (runSupervisionControl === undefined) {
+      throw new Error("evaluation supervision was requested without a Node.js IPC channel");
+    }
+  }
   if (options.doctor) {
     const report = await runCuaDoctor({ socketPath: options.cuaSocket!, timeoutMs: options.doctorTimeoutMs });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -452,6 +470,7 @@ async function main(): Promise<void> {
         options.interactive,
         markControllerStarted,
         runCancellationControl,
+        runSupervisionControl,
       ),
     );
     await session.waitForActiveRun();
@@ -693,10 +712,12 @@ async function runWithCliControls(
   interactive: boolean,
   markControllerStarted?: () => void,
   cancellationControl?: RunCancellationControl,
+  supervisionControl?: RunSupervisionControl,
 ): Promise<RunOutcome> {
   let lastQuestion: string | undefined;
   let lastApprovalId: string | undefined;
   const monitor = setInterval(() => {
+    supervisionControl?.reportSnapshot();
     const snapshot = controller.getSnapshot();
     if (snapshot.status === "waiting_user" && snapshot.pendingUserQuestion !== lastQuestion) {
       lastQuestion = snapshot.pendingUserQuestion;
@@ -741,12 +762,15 @@ async function runWithCliControls(
   };
   if (cancellationControl === undefined) process.once("SIGINT", onSigint);
   try {
+    supervisionControl?.attachController(controller);
+    await supervisionControl?.waitForInitialization();
     cancellationControl?.bindCancelController((reason) => controller.cancel(reason));
     markControllerStarted?.();
     const outcome = controller.start(goal);
     cancellationControl?.markControllerStarted();
     return await outcome;
   } finally {
+    supervisionControl?.reportSnapshot();
     clearInterval(monitor);
     readline?.close();
     if (cancellationControl === undefined) process.removeListener("SIGINT", onSigint);
@@ -757,5 +781,8 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(p
   main().catch((error: unknown) => {
     process.stderr.write(`${sanitizeTerminalText(error instanceof Error ? error.stack ?? error.message : String(error))}\n`);
     process.exitCode = 1;
-  }).finally(() => runCancellationControl?.dispose());
+  }).finally(() => {
+    runSupervisionControl?.dispose();
+    runCancellationControl?.dispose();
+  });
 }

@@ -159,6 +159,7 @@ describe("personal preferences screen", () => {
     const enabled = screen.getByRole("switch", { name: /朗读任务关键通知/ }) as HTMLInputElement;
     expect(enabled.checked).toBe(false);
     expect(enabled.disabled).toBe(false);
+    expect(screen.getByText(/关闭此开关只停止应用播报；页面文字通知仍可由系统屏幕阅读器读取/)).toBeDefined();
     fireEvent.click(enabled);
     fireEvent.change(screen.getByLabelText("朗读速度"), { target: { value: "fast" } });
     await waitFor(() => {

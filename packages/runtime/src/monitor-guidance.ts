@@ -1,5 +1,5 @@
-import type { ActionIntent, EventId, ObservationFrame, RunId, RuntimeEvent } from "@computer-harness/protocol";
-import type { ProgressMonitorOutput } from "./progress-monitor.js";
+import type { ActionEffectDeclaration, ActionIntent, EventId, ObservationFrame, RunId, RuntimeEvent } from "@computer-harness/protocol";
+import { declaredEffectSignature, type ProgressMonitorOutput } from "./progress-monitor.js";
 import { currentObservationAssessmentBinding, parseObservationAssessment } from "./observation-assessment.js";
 
 export interface MonitorGuidanceProjection {
@@ -15,6 +15,15 @@ export function projectMonitorCandidateGuidance(input: {
   readonly latestObservation?: ObservationFrame;
 }): MonitorGuidanceProjection {
   const sourceEvents = input.events.filter((event) => event.runId === input.runId);
+  const repeatedEffect = projectRepeatedDeclaredEffectGuidance(
+    sourceEvents,
+    input.runId,
+    input.latestObservation,
+    input.output.reasons.find((reason) => reason.code === "repeated_declared_effect")?.eventIds,
+    input.event.eventId,
+  );
+  if (repeatedEffect !== undefined) return repeatedEffect;
+
   const assessed = projectRecentAssessmentGuidance(sourceEvents, input.runId, input.latestObservation);
   if (assessed !== undefined) return assessed;
 
@@ -48,8 +57,10 @@ export function projectRecentAssessmentGuidance(
 ): MonitorGuidanceProjection | undefined {
   if (latestObservation === undefined) return undefined;
   const runEvents = events.filter((event) => event.runId === runId);
+  const boundarySequence = latestAttemptBoundarySequence(runEvents, runId);
   const response = [...runEvents].reverse().find((event): event is Extract<RuntimeEvent, { type: "model.response.received" }> =>
-    event.type === "model.response.received" && event.turn.observationAssessment !== undefined,
+    event.type === "model.response.received" && event.turn.observationAssessment !== undefined
+    && event.sequence > boundarySequence,
   );
   if (response === undefined) return undefined;
   const assessment = parseObservationAssessment(response.turn.observationAssessment);
@@ -59,7 +70,7 @@ export function projectRecentAssessmentGuidance(
   const binding = currentObservationAssessmentBinding(sourceEvents);
   if (binding === undefined || binding.observationId !== assessment.observationId || binding.actionId !== assessment.actionId) return undefined;
   const action = sourceEvents.find((event): event is Extract<RuntimeEvent, { type: "action.proposed" }> =>
-    event.type === "action.proposed" && event.action.actionId === assessment.actionId,
+    event.type === "action.proposed" && event.action.actionId === assessment.actionId && event.sequence > boundarySequence,
   );
   const receipt = sourceEvents.find((event): event is Extract<RuntimeEvent, { type: "action.execution.completed" | "action.execution.failed" }> =>
     (event.type === "action.execution.completed" || event.type === "action.execution.failed")
@@ -159,12 +170,15 @@ export function projectCurrentMonitorGuidance(
 ): MonitorGuidanceProjection | undefined {
   if (latestObservation === undefined) return undefined;
   const runEvents = events.filter((event) => event.runId === runId);
+  const repeatedEffect = projectRepeatedDeclaredEffectGuidance(runEvents, runId, latestObservation);
+  if (repeatedEffect !== undefined) return repeatedEffect;
   const assessmentGuidance = projectRecentAssessmentGuidance(runEvents, runId, latestObservation);
   if (assessmentGuidance !== undefined) return assessmentGuidance;
   const binding = currentObservationAssessmentBinding(runEvents);
   if (binding?.observationId !== latestObservation.id || binding.transition !== "unchanged") return undefined;
   const proposal = runEvents.find((event): event is Extract<RuntimeEvent, { type: "action.proposed" }> =>
-    event.type === "action.proposed" && event.action.actionId === binding.actionId,
+    event.type === "action.proposed" && event.action.actionId === binding.actionId
+    && event.sequence > latestAttemptBoundarySequence(runEvents, runId),
   );
   if (proposal === undefined || proposal.action.kind === "wait") return undefined;
   const receipt = runEvents.find((event): event is Extract<RuntimeEvent, { type: "action.execution.completed" }> =>
@@ -182,6 +196,177 @@ export function projectCurrentMonitorGuidance(
     text: `A ${proposal.action.kind} action was dispatched; the screenshot appeared unchanged. Check the newest image to see whether the intended result is visible, then continue or choose another method.`,
     sourceEventIds: [proposal.eventId, receipt.eventId, preObservation.eventId, postObservation.eventId, transition.eventId],
   };
+}
+
+function projectRepeatedDeclaredEffectGuidance(
+  events: readonly RuntimeEvent[],
+  runId: RunId,
+  latestObservation: ObservationFrame | undefined,
+  reasonEventIds?: readonly EventId[],
+  currentEventId?: EventId,
+): MonitorGuidanceProjection | undefined {
+  const boundarySequence = latestAttemptBoundarySequence(events, runId);
+  const currentEpisodeActions = events.filter((event): event is Extract<RuntimeEvent, { type: "action.proposed" }> =>
+    event.type === "action.proposed" && event.sequence > boundarySequence,
+  );
+  const actionEvents = reasonEventIds === undefined
+    ? currentEpisodeActions.slice(-3)
+    : reasonEventIds.flatMap((id) => {
+        const event = eventById(events, id);
+        return event?.type === "action.proposed" && event.sequence > boundarySequence ? [event] : [];
+      });
+  if (reasonEventIds !== undefined && actionEvents.length !== reasonEventIds.length) return undefined;
+  if (actionEvents.length < 2 || actionEvents.some((event) => event.runId !== runId || event.action.kind !== "click")) return undefined;
+
+  const declarations = actionEvents.map((actionEvent) => declaredEffectForAction(events, actionEvent));
+  const signatures = declarations.map((declaration, index) => {
+    const action = actionEvents[index];
+    return declaration === undefined || action === undefined ? undefined : declaredEffectSignature(declaration, action.action.kind);
+  });
+  if (signatures[0] === undefined || signatures.some((signature) => signature !== signatures[0])) return undefined;
+
+  const receipts = actionEvents.map((actionEvent) => events.find((event): event is Extract<RuntimeEvent, { type: "action.execution.completed" | "action.execution.failed" }> =>
+    (event.type === "action.execution.completed" || event.type === "action.execution.failed")
+    && event.receipt.actionId === actionEvent.action.actionId
+    && event.sequence > actionEvent.sequence,
+  ));
+  if (receipts.some((event) => event?.type !== "action.execution.completed" || event.receipt.status !== "completed")) return undefined;
+
+  const latestAction = actionEvents.at(-1);
+  const latestDeclaration = declarations.at(-1);
+  if (latestAction === undefined || latestDeclaration === undefined) return undefined;
+  const latestReceipt = receipts.at(-1);
+  if (latestReceipt === undefined || (latestObservation !== undefined && latestReceipt.sequence >= (observationEvent(events, latestObservation.id, runId)?.sequence ?? -1))) return undefined;
+
+  if (latestObservation !== undefined) {
+    for (const actionEvent of actionEvents) {
+      const basedOn = actionBasedOnObservation(actionEvent.action);
+      const before = basedOn === undefined ? undefined : observationEvent(events, basedOn, runId);
+      if (before === undefined || !sameObservationPartition(before.observation, latestObservation)) return undefined;
+    }
+  }
+
+  const assessed = latestAssessmentForActions(events, actionEvents.slice(0, -1), runId, latestAction.sequence, boundarySequence);
+  const actionForReport = assessed === undefined
+    ? undefined
+    : actionEvents.find((event) => event.action.actionId === assessed.assessment.actionId)?.action;
+  const report = assessed === undefined || actionForReport === undefined
+    ? undefined
+    : boundedAssessmentEvidence(assessed.assessment.evidence, actionForReport);
+  const target = boundedActionLabel(latestDeclaration.target, latestAction.action, 28);
+  const summary = boundedActionLabel(latestDeclaration.summary, latestAction.action, 32);
+  const prefix = `Model-declared target “${target}” repeated; expected “${summary}” (unverified).`;
+  const suffix = " Recheck newest image first; pixels alone are not proof.";
+  const reportLabel = report === undefined
+    ? " No verified outcome recorded."
+    : ` ${assessed?.assessment.actionOutcome} (unverified):`;
+  const availableReport = Math.max(0, 240 - prefix.length - suffix.length - reportLabel.length - (report === undefined ? 0 : 4));
+  const reportTruncated = report !== undefined && report.length > availableReport;
+  const boundedReport = report === undefined ? undefined : truncateUtf16(report, Math.max(0, availableReport - (reportTruncated ? 1 : 0)));
+  const text = report === undefined
+    ? `${prefix}${reportLabel}${suffix}`
+    : `${prefix}${reportLabel} “${boundedReport}${reportTruncated ? "…" : ""}”.${suffix}`;
+  const latestObservationEvent = latestObservation === undefined ? undefined : observationEvent(events, latestObservation.id, runId);
+  const sourceEventIds = [
+    ...actionEvents.map((event) => event.eventId),
+    ...actionEvents.flatMap((event) => {
+      const call = events.find((candidate): candidate is Extract<RuntimeEvent, { type: "tool.call.received" }> =>
+        candidate.type === "tool.call.received" && candidate.call.id === event.callId,
+      );
+      return call === undefined ? [] : [call.eventId];
+    }),
+    ...(assessed === undefined ? [] : [assessed.response.eventId, assessed.observationEvent.eventId, assessed.transition.eventId]),
+    ...(latestObservationEvent === undefined ? [] : [latestObservationEvent.eventId]),
+    ...(currentEventId === undefined ? [] : [currentEventId]),
+  ];
+  return { text: truncateUtf16(text, 240), sourceEventIds: [...new Set(sourceEventIds)].slice(-12) };
+}
+
+function declaredEffectForAction(
+  events: readonly RuntimeEvent[],
+  actionEvent: Extract<RuntimeEvent, { type: "action.proposed" }>,
+): ActionEffectDeclaration | undefined {
+  const call = events.find((event): event is Extract<RuntimeEvent, { type: "tool.call.received" }> =>
+    event.runId === actionEvent.runId && event.type === "tool.call.received" && event.call.id === actionEvent.callId,
+  );
+  return call?.call.declaredEffect;
+}
+
+function latestAssessmentForActions(
+  events: readonly RuntimeEvent[],
+  actions: readonly Extract<RuntimeEvent, { type: "action.proposed" }>[],
+  runId: RunId,
+  beforeSequence: number,
+  boundarySequence: number,
+): {
+  readonly assessment: NonNullable<ReturnType<typeof parseObservationAssessment>>;
+  readonly response: Extract<RuntimeEvent, { type: "model.response.received" }>;
+  readonly observationEvent: Extract<RuntimeEvent, { type: "observation.created" }>;
+  readonly transition: Extract<RuntimeEvent, { type: "monitor.transition" }>;
+} | undefined {
+  const actionIds = new Set(actions.map((event) => event.action.actionId));
+  const responses = [...events].reverse().filter((event): event is Extract<RuntimeEvent, { type: "model.response.received" }> =>
+    event.runId === runId && event.type === "model.response.received" && event.sequence > boundarySequence
+    && event.sequence < beforeSequence && event.turn.observationAssessment !== undefined,
+  );
+  for (const response of responses) {
+    const assessment = parseObservationAssessment(response.turn.observationAssessment);
+    if (assessment === undefined || !actionIds.has(assessment.actionId)) continue;
+    const action = actions.find((event) => event.action.actionId === assessment.actionId);
+    const receipt = events.find((event): event is Extract<RuntimeEvent, { type: "action.execution.completed" | "action.execution.failed" }> =>
+      (event.type === "action.execution.completed" || event.type === "action.execution.failed")
+      && event.receipt.actionId === assessment.actionId && event.sequence < response.sequence,
+    );
+    const evidenceObservation = observationEvent(events, assessment.observationId, runId);
+    const transition = events.find((event): event is Extract<RuntimeEvent, { type: "monitor.transition" }> =>
+      event.runId === runId && event.type === "monitor.transition" && event.actionId === assessment.actionId
+      && event.postObservationId === assessment.observationId && event.sequence > boundarySequence,
+    );
+    const basedOn = action === undefined ? undefined : actionBasedOnObservation(action.action);
+    const actionObservation = basedOn === undefined ? undefined : observationEvent(events, basedOn, runId);
+    if (action === undefined || action.action.kind === "wait" || receipt?.type !== "action.execution.completed"
+      || receipt.receipt.status !== "completed" || evidenceObservation === undefined || transition === undefined
+      || actionObservation === undefined || !sameObservationPartition(actionObservation.observation, evidenceObservation.observation)
+      || transition.sequence >= response.sequence || receipt.sequence >= evidenceObservation.sequence) continue;
+    return { assessment, response, observationEvent: evidenceObservation, transition };
+  }
+  return undefined;
+}
+
+function latestAttemptBoundarySequence(events: readonly RuntimeEvent[], runId: RunId): number {
+  const orderedEvents = events.filter((event) => event.runId === runId).sort((left, right) => left.sequence - right.sequence);
+  let boundarySequence = -1;
+  let previousObservation: ObservationFrame | undefined;
+  for (const event of orderedEvents) {
+    if (event.type === "user.input.received" || event.type === "computer.window.handoff.requested"
+      || event.type === "computer.window.handoff.completed" || event.type === "computer.window.handoff.ignored"
+      || (event.type === "monitor.transition" && event.transition === "unknown")) {
+      boundarySequence = event.sequence;
+      continue;
+    }
+    if (event.type !== "observation.created") continue;
+    if (previousObservation !== undefined && !sameObservationPartition(previousObservation, event.observation)) {
+      boundarySequence = event.sequence;
+    }
+    previousObservation = event.observation;
+  }
+  return boundarySequence;
+}
+
+function actionBasedOnObservation(action: ActionIntent): string | undefined {
+  return "basedOn" in action ? String(action.basedOn) : undefined;
+}
+
+function boundedActionLabel(value: string, action: ActionIntent, maximum: number): string {
+  let safe = normalizeRecoveryText(value);
+  if (action.kind === "type") {
+    const typedText = normalizeRecoveryText(action.text);
+    const containsTypedText = typedText.length > 0
+      && safe.toLocaleLowerCase("en-US").includes(typedText.toLocaleLowerCase("en-US"));
+    if (containsTypedText && typedText.length < 4) return "typed text omitted";
+    if (containsTypedText) safe = safe.replace(new RegExp(escapeRegExp(typedText), "giu"), "[typed text omitted]");
+  }
+  return truncateUtf16(safe, maximum);
 }
 
 function candidateSourceEventIds(event: RuntimeEvent, output: ProgressMonitorOutput): readonly EventId[] {

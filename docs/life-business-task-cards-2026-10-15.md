@@ -151,9 +151,9 @@
 
 **你最后应得到：** 能回答上述实际问题的中文结果和可复查来源，不要求保存额外文件。
 
-## 购物售后与通信日程候选（2026-10-16）
+## 购物售后与通信日程（2026-10-16，待GUI验收）
 
-这六题来自独立候选套件，不属于上文历史授权的八题运行范围。机器题面见[独立 tasks.json](../eval/life-business-shopping-communication-20261016/tasks.json)，来源可读性与限制见[来源预检说明](life-business-shopping-communication-preflight-2026-10-16.md)。候选状态为来源已核、GUI与runner整合待做；尚未通过真实Harness执行。默认只查公开页面，不登录、不读真实订单/聊天/日历，不发送消息、邀请或共享日历。S03与CM03仅要求新建指定DOCX。社区缴费不在本轮新增范围。
+这六题来自独立套件，不属于上文历史授权的八题运行范围。机器题面见[独立 tasks.json](../eval/life-business-shopping-communication-20261016/tasks.json)，来源可读性与限制见[来源预检说明](life-business-shopping-communication-preflight-2026-10-16.md)。通过`--suite life-business-shopping-communication-20261016`接入同一准备/启动脚本，使用方舟模型并按variant选择Plan/Memory，具体命令及离线验收见[操作说明最新节](life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)；尚未通过真实Harness业务执行。默认只查公开页面，不登录、不读真实订单/聊天/日历，不发送消息、邀请或共享日历。S03与CM03仅要求新建指定DOCX。社区缴费不在本轮新增范围。
 
 ### S01 · 确认 iPhone 15 适用的充电器
 

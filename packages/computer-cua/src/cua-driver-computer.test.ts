@@ -870,6 +870,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let typeTextResult: Partial<ToolResult> | undefined;
   let typeTextThrownError: Error | undefined;
   let extraWindowAfterTypeText: typeof extraWindow | undefined;
+  let desktopImage = { width: 1, height: 1 };
   let platform: unknown = "win32";
   let healthReport: unknown;
   let healthResultOverride: Partial<ToolResult> | undefined;
@@ -912,10 +913,10 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
           driver_version: cuaSdkVersionForPlatform(platform === "win32" || platform === "darwin" || platform === "linux" ? platform : process.platform),
         }) })
         : result(healthResultOverride);
-      if (name === "get_screen_size") return result({ structuredJson: JSON.stringify({ width: 1, height: 1 }) });
+      if (name === "get_screen_size") return result({ structuredJson: JSON.stringify(desktopImage) });
       if (name === "get_desktop_state") {
-        await writeFile(String(input.screenshot_out_file), ONE_BY_ONE_PNG);
-        return result({ structuredJson: JSON.stringify({ screenshot_width: 1, screenshot_height: 1 }) });
+        await writeFile(String(input.screenshot_out_file), Buffer.from(pngWithDimensions(desktopImage.width, desktopImage.height), "base64"));
+        return result({ structuredJson: JSON.stringify({ screenshot_width: desktopImage.width, screenshot_height: desktopImage.height }) });
       }
       if (name === "bring_to_front") {
         if (activationToolResult !== undefined) return result(activationToolResult);
@@ -1096,6 +1097,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
     calls,
     listWindowsResponses,
     setBounds(next: typeof bounds, nextImage: typeof image) { bounds = { ...next }; image = { ...nextImage }; },
+    setDesktopImageSize(width: number, height: number) { desktopImage = { width, height }; },
     setMissing(value: boolean) { missing = value; },
     omitBoundWindow(value: boolean) { omitBoundWindow = value; },
     setGroundingState(value: Record<string, unknown> | undefined) { groundingState = value; groundingStateSequence = undefined; groundingStateIndex = 0; },
@@ -2888,6 +2890,331 @@ describe("CuaDriverComputer", () => {
       expect(stale).toMatchObject({ status: "refused", driverCode: "WINDOW_REF_STALE" });
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(2);
       await computer.close(receipt.sessionAfter);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { platform: "win32" as const, layout: "partly-visible", left: -50, top: -30 },
+    { platform: "darwin" as const, layout: "partly-visible", left: -50, top: -30 },
+    { platform: "win32" as const, layout: "fully-visible", left: 50, top: 70 },
+    { platform: "darwin" as const, layout: "fully-visible", left: 50, top: 70 },
+  ])("projects only the exact foreground managed tab into the desktop viewport on $platform ($layout)", async ({ platform, layout, left, top }) => {
+    const directory = await mkdtemp(join(tmpdir(), `computer-harness-cua-desktop-grounding-${platform}-${layout}-`));
+    const bounds = { x: left, y: top, width: 400, height: 300 };
+    const expectedScreenX = left * 2 + 150;
+    const expectedScreenY = top * 2 + 100;
+    const candidatePoint = { x: expectedScreenX + 60, y: expectedScreenY + 30 };
+    const fake = windowDriver(bounds, { width: 800, height: 600 });
+    fake.setPlatform(platform);
+    fake.setDesktopImageSize(2880, 1800);
+    fake.setForegroundTarget(fake.target);
+    fake.setGroundingState({ pid: fake.target.pid, window_id: fake.target.windowId, elements_complete: true, elements: [
+      { role: "Document", name: "Document", frame: bounds, enabled: true },
+      { role: "Button", name: "Apply", frame: { x: left + 75, y: top + 50, width: 60, height: 30 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-grounding-profile",
+      windowTarget: fake.target, tabId: "desktop-grounding-tab", generation: "desktop-grounding-generation",
+      delivery: "loopback-cdp",
+    };
+    let collectedViewport: unknown;
+    let clickRequest: unknown;
+    let activeTabId = browserTarget.tabId;
+    let activeGeneration = browserTarget.generation;
+    const baseTransport = createMockDomGroundingTransport((request) => {
+      collectedViewport = request.viewport;
+      return {
+        complete: true,
+        tabId: activeTabId,
+        generation: activeGeneration,
+        coordinateSpace: "physical",
+        candidates: [{ tagName: "button", name: "Apply", frame: { x: 150, y: 100, width: 120, height: 60 }, visible: true, interactive: true, state: { enabled: true } }],
+      };
+    });
+    const transport: DomGroundingTransport = {
+      ...baseTransport,
+      async click(request) {
+        clickRequest = request;
+        return { status: "completed", tabId: activeTabId, generation: activeGeneration };
+      },
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, platform, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport,
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observationId = `desktop-grounding-${platform}-${layout}` as ObservationId;
+      const observation = await computer.observe(session, observationId, signal);
+      expect(observation.surfaceRef.kind).toBe("desktop");
+      expect(observation.grounding?.source).toBe("hybrid");
+      const candidate = observation.grounding?.elements.find((item) => item.source === "dom" && item.name === "Apply");
+      expect(candidate?.bbox).toEqual({ x: expectedScreenX, y: expectedScreenY, width: 120, height: 60, coordinateSpace: "physical" });
+      expect(collectedViewport).toEqual({ width: 800, height: 600, coordinateSpace: "physical" });
+
+      const click = await computer.execute(session, {
+        actionId: `desktop-grounding-click-${platform}` as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        groundingRef: candidate!.elementRef,
+        point: candidatePoint,
+      }, signal);
+      expect(click.status).toBe("completed");
+      expect(clickRequest).toMatchObject({
+        viewport: { width: 800, height: 600, coordinateSpace: "physical" },
+        candidate: { bbox: { x: 150, y: 100, width: 120, height: 60 } },
+      });
+      expect(fake.calls.some((call) => call.name === "bring_to_front")).toBe(false);
+
+      activeTabId = "desktop-grounding-new-tab";
+      activeGeneration = "desktop-grounding-new-generation";
+      await expect(computer.execute(session, {
+        actionId: `desktop-grounding-tab-stale-${platform}` as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        groundingRef: candidate!.elementRef,
+        point: candidatePoint,
+      }, signal)).resolves.toMatchObject({ status: "refused", driverCode: "GROUNDING_REF_STALE" });
+      expect(clickRequest).toMatchObject({ candidate: { bbox: { x: 150, y: 100, width: 120, height: 60 } } });
+
+      await computer.observe(session, `desktop-grounding-next-${platform}` as ObservationId, signal);
+      await expect(computer.execute(session, {
+        actionId: `desktop-grounding-stale-${platform}` as ActionId,
+        basedOn: observationId,
+        kind: "click",
+        groundingRef: candidate!.elementRef,
+        point: candidatePoint,
+      }, signal)).resolves.toMatchObject({ status: "refused", driverCode: "STALE_OBSERVATION" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps desktop grounding off and ignores foreground windows outside the Host target scope", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-off-scope-"));
+    const fake = windowDriver();
+    fake.setExtraWindow({ pid: 4_321, windowId: 8_765, appName: "Unapproved Editor", title: "Private window" });
+    fake.setForegroundTarget({ pid: 4_321, windowId: 8_765 });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-off-profile",
+      windowTarget: fake.target, tabId: "desktop-off-tab", generation: "desktop-off-generation",
+      delivery: "loopback-cdp",
+    };
+    let collectCount = 0;
+    const transport = createMockDomGroundingTransport((request) => {
+      collectCount += 1;
+      return { complete: true, tabId: request.browserTarget.tabId, generation: request.browserTarget.generation, candidates: [] };
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target], grounding: "off",
+      browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observation = await computer.observe(session, "desktop-grounding-off" as ObservationId, signal);
+      expect(observation.grounding).toBeUndefined();
+      expect(fake.calls.some((call) => call.name === "list_windows" || call.name === "get_window_state")).toBe(false);
+      expect(collectCount).toBe(0);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+
+    const scopedDirectory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-unapproved-"));
+    const scopedFake = windowDriver();
+    scopedFake.setExtraWindow({ pid: 4_321, windowId: 8_765, appName: "Unapproved Editor", title: "Private window" });
+    scopedFake.setForegroundTarget({ pid: 4_321, windowId: 8_765 });
+    const scopedComputer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: scopedDirectory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [scopedFake.target], grounding: "hybrid-catalog-v1",
+      browserTarget: { ...browserTarget, windowTarget: scopedFake.target },
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, candidates: [] }),
+      driverFactory: () => scopedFake.driver,
+    });
+    try {
+      const session = await scopedComputer.open({}, signal);
+      const observation = await scopedComputer.observe(session, "desktop-grounding-unapproved" as ObservationId, signal);
+      expect(observation.grounding).toBeUndefined();
+      expect(scopedFake.calls.some((call) => call.name === "get_window_state")).toBe(false);
+      await scopedComputer.close(session);
+    } finally {
+      await rm(scopedDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("withholds desktop candidates when an overlapping window has unknown z-order", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-occluded-"));
+    const fake = windowDriver({ x: 100, y: 120, width: 960, height: 680 }, { width: 960, height: 680 });
+    fake.setDesktopImageSize(1920, 1080);
+    fake.setForegroundTarget(fake.target);
+    fake.setExtraWindow({
+      pid: 4_321,
+      windowId: 8_765,
+      appName: "Transient overlay",
+      title: "Unclassified overlay",
+      bounds: { x: 300, y: 300, width: 200, height: 100 },
+      omitOwnerEvidence: true,
+    });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", name: "Document", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      { role: "Button", name: "Covered action", frame: { x: 350, y: 320, width: 100, height: 40 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-occlusion-profile",
+      windowTarget: fake.target, tabId: "desktop-occlusion-tab", generation: "desktop-occlusion-generation",
+      delivery: "loopback-cdp",
+    };
+    const transport = createMockDomGroundingTransport({
+      complete: true,
+      tabId: browserTarget.tabId,
+      generation: browserTarget.generation,
+      coordinateSpace: "physical",
+      candidates: [{ tagName: "button", name: "Covered action", frame: { x: 250, y: 200, width: 100, height: 40 }, visible: true, interactive: true, state: { enabled: true } }],
+    });
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport,
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observation = await computer.observe(session, "desktop-grounding-occluded" as ObservationId, signal);
+      expect(observation.surfaceRef.kind).toBe("desktop");
+      expect(observation.screenshot.data.byteLength).toBeGreaterThan(0);
+      expect(observation.grounding).toBeUndefined();
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["new-overlay", "unknown-z-order", "partial-inventory"] as const)(
+    "stales only an explicit desktop grounding ref when fresh occlusion evidence is %s",
+    async (scenario) => {
+      const directory = await mkdtemp(join(tmpdir(), `computer-harness-cua-desktop-grounding-fresh-${scenario}-`));
+      const bounds = { x: 100, y: 120, width: 960, height: 680 };
+      const fake = windowDriver(bounds, { width: 960, height: 680 });
+      fake.setDesktopImageSize(1920, 1080);
+      fake.setForegroundTarget(fake.target);
+      fake.setGroundingState({ elements_complete: true, elements: [
+        { role: "Document", name: "Document", frame: bounds, enabled: true },
+        { role: "Button", name: "Apply", frame: { x: 250, y: 200, width: 100, height: 40 }, enabled: true },
+      ] });
+      const browserTarget: ManagedBrowserTarget = {
+        kind: "managed-chromium", browser: "edge", profileId: `desktop-fresh-${scenario}`,
+        windowTarget: fake.target, tabId: `desktop-fresh-${scenario}-tab`, generation: `desktop-fresh-${scenario}-generation`,
+        delivery: "loopback-cdp",
+      };
+      let domClickCalls = 0;
+      const baseTransport = createMockDomGroundingTransport({
+        complete: true,
+        tabId: browserTarget.tabId,
+        generation: browserTarget.generation,
+        coordinateSpace: "physical",
+        candidates: [{ tagName: "button", name: "Apply", frame: { x: 250, y: 200, width: 100, height: 40 }, visible: true, interactive: true, state: { enabled: true } }],
+      });
+      const transport: DomGroundingTransport = {
+        ...baseTransport,
+        async click() {
+          domClickCalls += 1;
+          return { status: "completed", tabId: browserTarget.tabId, generation: browserTarget.generation };
+        },
+      };
+      const computer = new CuaDriverComputer({
+        socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+        grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport,
+        driverFactory: () => fake.driver,
+      });
+      const signal = new AbortController().signal;
+      try {
+        const session = await computer.open({}, signal);
+        const basedOn = `desktop-grounding-fresh-${scenario}` as ObservationId;
+        const observation = await computer.observe(session, basedOn, signal);
+        const candidate = observation.grounding?.elements.find((element) => element.source === "dom" && element.name === "Apply");
+        expect(candidate?.bbox).toEqual({ x: 350, y: 320, width: 100, height: 40, coordinateSpace: "physical" });
+
+        if (scenario === "new-overlay") {
+          fake.setExtraWindow({
+            pid: 4_321, windowId: 8_765, appName: "Transient overlay", title: "New overlay",
+            bounds: { x: 300, y: 300, width: 200, height: 100 }, zIndex: 2,
+          });
+        } else if (scenario === "unknown-z-order") {
+          fake.setExtraWindow({
+            pid: 4_321, windowId: 8_765, appName: "Transient overlay", title: "Unclassified overlay",
+            bounds: { x: 300, y: 300, width: 200, height: 100 }, omitOwnerEvidence: true,
+          });
+        } else {
+          fake.setWindowInventoryComplete(false);
+        }
+
+        await expect(computer.execute(session, {
+          actionId: `desktop-grounding-fresh-ref-${scenario}` as ActionId,
+          basedOn,
+          kind: "click",
+          groundingRef: candidate!.elementRef,
+          point: { x: 400, y: 340 },
+        }, signal)).resolves.toMatchObject({ status: "refused", driverCode: "GROUNDING_REF_STALE" });
+        expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+        expect(domClickCalls).toBe(0);
+
+        const visualClick = await computer.execute(session, {
+          actionId: `desktop-grounding-fresh-visual-${scenario}` as ActionId,
+          basedOn,
+          kind: "click",
+          point: { x: 400, y: 340 },
+        }, signal);
+        expect(visualClick.status).toBe("completed");
+        expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+        expect(domClickCalls).toBe(0);
+        await computer.close(session);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("keeps ordinary visual desktop clicks available when optional grounding inventory is incomplete", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-incomplete-inventory-"));
+    const fake = windowDriver({ x: 100, y: 120, width: 960, height: 680 }, { width: 960, height: 680 });
+    fake.setDesktopImageSize(1920, 1080);
+    fake.setForegroundTarget(fake.target);
+    fake.setWindowInventoryComplete(false);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-incomplete-profile",
+      windowTarget: fake.target, tabId: "desktop-incomplete-tab", generation: "desktop-incomplete-generation",
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "hybrid-catalog-v1", browserTarget,
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, candidates: [] }),
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const observation = await computer.observe(session, "desktop-grounding-incomplete-inventory" as ObservationId, signal);
+      expect(observation.grounding).toBeUndefined();
+      const click = await computer.execute(session, {
+        actionId: "desktop-grounding-incomplete-visual-click" as ActionId,
+        basedOn: "desktop-grounding-incomplete-inventory" as ObservationId,
+        kind: "click",
+        point: { x: 300, y: 200 },
+      }, signal);
+      expect(click.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

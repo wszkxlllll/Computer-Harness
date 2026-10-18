@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { RunAnnouncementCursor } from "./run-accessibility";
+import { RunAnnouncementCursor, pendingRequestAnnouncement } from "./run-accessibility";
+import type { PendingRequestBase } from "./types";
 import type { RunAnnouncementInput } from "./run-accessibility";
 
 function input(overrides: Partial<RunAnnouncementInput> = {}): RunAnnouncementInput {
@@ -47,7 +48,112 @@ describe("Run accessibility announcements", () => {
     expect(announcement).toContain("原因：请确认是否保存这些设置。");
     expect(announcement).toContain("待批准操作：点击；输入 6 字。");
     expect(announcement).toContain("文字说明和操作摘要不能核实电脑当前画面");
+    expect(announcement).toContain("还不能确定具体对象和影响，请先不要批准。");
     expect(announcement).not.toContain("任务状态已更新：等你确认操作");
+  });
+
+  it("reads the current approval plan as intended, unexecuted, and unverified without replacing the action list", () => {
+    const cursor = new RunAnnouncementCursor("run-1");
+    cursor.update(input());
+    const pending: PendingRequestBase = {
+      requestId: "approval-plan",
+      kind: "approval",
+      reason: "请核对这项操作。",
+      requiresVisualReview: true,
+      preview: {
+        actions: [{ operation: "click", kind: "click" as const, points: [{ x: 12, y: 24 }] }],
+        modelDeclaredEffect: { target: "Message editor", summary: "Send the prepared message", verified: false as const },
+      },
+    };
+
+    const announcement = cursor.update(input({ status: "waiting_approval", pending }));
+
+    expect(announcement).toContain("电脑打算按这份说明操作：「Send the prepared message」；目标：「Message editor」。");
+    expect(announcement).toContain("这项操作还没执行；说明未经核实，仍需核对。");
+    expect(announcement).toContain("待批准操作：点击。");
+    expect(announcement).toContain("无法核对目标或后果时，请拒绝");
+    expect(announcement).not.toContain("已执行结果");
+    expect(announcement).not.toContain("已批准");
+  });
+
+  it("announces an updated plan on the same pending request and stays unclear when its data is incomplete", () => {
+    const cursor = new RunAnnouncementCursor("run-1");
+    const pending: PendingRequestBase = {
+      requestId: "approval-plan-update",
+      kind: "approval",
+      requiresVisualReview: true,
+      preview: { actions: [{ operation: "click", kind: "click" as const, points: [{ x: 12, y: 24 }] }] },
+    };
+    cursor.update(input({ status: "waiting_approval", pending }));
+
+    const updated = cursor.update(input({
+      status: "waiting_approval",
+      pending: {
+        ...pending,
+        preview: {
+          ...pending.preview!,
+          modelDeclaredEffect: { target: "", summary: "", verified: false as const },
+        },
+      },
+    }));
+    expect(updated).toContain("还不能确定具体对象和影响，请先不要批准。");
+    expect(updated).not.toContain("目标：「");
+
+    const missing = pendingRequestAnnouncement({
+      requestId: "approval-plan-missing",
+      kind: "approval",
+      preview: { actions: [] },
+    });
+    expect(missing).toContain("还不能确定具体对象和影响，请先不要批准。");
+  });
+
+  it("does not auto-read model plan fields flagged by the shared full-value privacy filter", () => {
+    const unsafePlans = [
+      { target: "Message editor", summary: `${"A".repeat(220)} verification code 123456`, verified: false as const },
+      { target: "verification", summary: "code 123456", verified: false as const },
+    ];
+
+    for (const modelDeclaredEffect of unsafePlans) {
+      const announcement = pendingRequestAnnouncement({
+        requestId: "approval-sensitive-plan",
+        kind: "approval",
+        preview: { actions: [], modelDeclaredEffect },
+      });
+      expect(announcement).toContain("具体说明不适合自动朗读");
+      expect(announcement).toContain("请在审批详情核对");
+      expect(announcement).not.toContain("verification code");
+      expect(announcement).not.toContain("123456");
+    }
+  });
+
+  it("bounds safe plan fields with omission marks while retaining the fixed review disclaimer", () => {
+    const target = "T".repeat(80);
+    const summary = "S".repeat(130);
+    const announcement = pendingRequestAnnouncement({
+      requestId: "approval-long-plan",
+      kind: "approval",
+      preview: { actions: [], modelDeclaredEffect: { target, summary, verified: false } },
+    });
+
+    expect(announcement).toContain(`电脑打算按这份说明操作：「${"S".repeat(95)}…」；目标：「${"T".repeat(63)}…」。`);
+    expect(announcement).toContain("这项操作还没执行；说明未经核实，仍需核对。");
+    expect(announcement).not.toContain(summary);
+    expect(announcement).not.toContain(target);
+  });
+
+  it("normalizes control characters before reading a safe model plan", () => {
+    const announcement = pendingRequestAnnouncement({
+      requestId: "approval-control-plan",
+      kind: "approval",
+      preview: {
+        actions: [],
+        modelDeclaredEffect: { target: "Message\u0000editor", summary: "Send\u200bthe prepared message", verified: false },
+      },
+    });
+
+    expect(announcement).toContain("电脑打算按这份说明操作：「Send the prepared message」；目标：「Message editor」。");
+    expect(announcement).not.toContain("\u0000");
+    expect(announcement).not.toContain("\u200b");
   });
 
   it("announces a same-kind replacement when the request identity or its text changes", () => {

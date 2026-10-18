@@ -95,7 +95,11 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     lastSequence: input.sequence,
     lastClock: currentClock,
   };
-  const episodeState = hasEvidence(input.monitor, "visual_transition_changed")
+  // A change alone is not proof of Goal progress. Keep an explicitly unresolved
+  // action-stall/no-effect episode, but let unrelated or uncertain candidates reset.
+  const changedPixels = hasEvidence(input.monitor, "visual_transition_changed");
+  const preserveUnresolvedEpisode = changedPixels && isUnresolvedActionEpisode(base.candidateFingerprint);
+  const episodeState = changedPixels && !preserveUnresolvedEpisode
     ? resetCandidateEpisode(sequenceState)
     : sequenceState;
 
@@ -119,9 +123,8 @@ export function reduceMonitorPolicy(state: MonitorPolicyState, input: MonitorPol
     return { state: clearCandidate(episodeState), proposal: { kind: "none", reason: "terminal" } };
   }
   if (!input.monitor.candidate) {
-    // A changed image invalidates the old diagnostic episode. It does not
-    // establish business progress or success. Unknown evidence drops only the
-    // pending recommendation and retains the episode's spent prompt budget.
+    // Changed pixels preserve only the action-stall/no-effect episode above;
+    // they never establish progress or success by themselves.
     if (hasEvidence(input.monitor, "visual_transition_changed")) {
       return { state: episodeState, proposal: { kind: "none", reason: "no_candidate" } };
     }
@@ -232,11 +235,18 @@ function resetCandidateEpisode(state: MonitorPolicyState): MonitorPolicyState {
 
 function candidateFingerprint(output: ProgressMonitorOutput): string {
   const reasons = [...new Set(output.reasons.map((reason) => {
-    if (reason.code === "repeated_proposal" || reason.code === "repeated_action" || reason.code === "action_cycle") return "action_stall";
+    if (reason.code === "repeated_proposal") return "repeated_proposal";
+    if (reason.code === "repeated_action" || reason.code === "repeated_declared_effect" || reason.code === "action_cycle") return "action_stall";
     if (reason.code === "repeated_refusal" || reason.code === "repeated_failure") return "execution_failure";
     return reason.code;
   }))].sort();
-  return createHash("sha256").update(JSON.stringify({ reasons }), "utf8").digest("hex").slice(0, 24);
+  const family = reasons.includes("action_stall") ? "action_stall" : reasons.length === 1 ? reasons[0] ?? "candidate" : "mixed";
+  const digest = createHash("sha256").update(JSON.stringify({ reasons }), "utf8").digest("hex").slice(0, 24);
+  return `${family}:${digest}`;
+}
+
+function isUnresolvedActionEpisode(fingerprint: string | undefined): boolean {
+  return fingerprint?.startsWith("action_stall:") === true || fingerprint?.startsWith("no_observed_change:") === true;
 }
 
 function fallbackGuidanceText(output: ProgressMonitorOutput): string {

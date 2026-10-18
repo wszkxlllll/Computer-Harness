@@ -1,8 +1,9 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { GlmHttpClient, GlmHttpDiagnostics, GlmTransportEvidence } from "@computer-harness/provider-glm";
+import { ArkProviderError } from "@computer-harness/provider-glm";
 import type { QwenHttpClient } from "@computer-harness/provider-qwen";
 import { RecordingArkHttpClient, RecordingDeepseekHttpClient, RecordingGlmHttpClient, RecordingQwenHttpClient } from "./recording-clients.js";
 
@@ -491,6 +492,44 @@ describe("recording client diagnostic paths", () => {
       expect(serialized).not.toContain("example.invalid");
       expect(serialized).not.toContain("Approve?");
       expect(serialized).not.toContain("secret");
+    }
+  });
+
+  it("records only the allowlisted Ark 429 error fields and bounded Retry-After metadata", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-ark-error-diagnostic-"));
+    const arkPath = join(directory, "ark.jsonl");
+    const failure = new ArkProviderError("Ark HTTP 429: Request rate limit exceeded.", "ARK_HTTP_429", true, "same_input");
+    Object.assign(failure, { httpFailure: {
+      httpStatus: 429,
+      providerErrorCode: "TooManyRequests",
+      providerErrorMessage: "Request rate limit exceeded.",
+      retryAfterState: "accepted",
+      retryAfterMs: 2_000,
+    } });
+    Object.assign(failure, { rawBody: "Authorization: Bearer private-token-123456789012345678901234" });
+    const inner = new FakeGlmHttpClient(undefined, failure);
+    const ark = new RecordingArkHttpClient(arkPath, inner);
+    try {
+      await expect(ark.post(
+        "https://fixture.invalid/secret-path",
+        { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "private request body" }], tools: [] },
+        { authorization: "private-header-token" },
+        new AbortController().signal,
+      )).rejects.toBe(failure);
+      const record = await readRecord(arkPath);
+      expect(record.transportError).toMatchObject({
+        httpFailure: {
+          httpStatus: 429,
+          providerErrorCode: "TooManyRequests",
+          providerErrorMessage: "Request rate limit exceeded.",
+          retryAfterState: "accepted",
+          retryAfterMs: 2_000,
+        },
+      });
+      const serialized = JSON.stringify(record);
+      expect(serialized).not.toMatch(/secret-path|private request body|private-header-token|private-token|rawBody|Authorization/u);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });
