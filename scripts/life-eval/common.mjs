@@ -81,6 +81,12 @@ export function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
 }
 
+/** Hash UTF-8 text after normalizing platform line endings to the Git LF form. */
+export function sha256CanonicalText(text) {
+  if (typeof text !== "string") throw new TypeError("canonical text SHA-256 input must be a string");
+  return sha256(text.replace(/\r\n?/gu, "\n"));
+}
+
 export async function verifyCuaDriverBinary(candidate) {
   if (candidate === undefined || candidate === null) return null;
   if (typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("candidate CUA driver fingerprint must be an object");
