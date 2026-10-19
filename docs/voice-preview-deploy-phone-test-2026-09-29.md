@@ -1,7 +1,27 @@
 # 语音手机 Preview 部署与测试记录
 
 日期：2026-09-29（持续更新）
-状态：2026-10-18 Preview 本机 Host 已追加更新至 main `8d77912`（PR #39）；服务器 Web/Relay 仍为 `2026-10-18-life-repair-480126a`，本次没有相关代码变更，无需重复替换。原 Preview 与本机旧代码、构建和配置保留。Host 重启后需要重新扫码；浏览器登录 profile 未清理。以下旧日期记录按历史保留。
+状态：2026-10-19 Preview 本机 Host 已更新至 [PR #42](https://github.com/wszkxlllll/Computer-Harness/pull/42) 的功能源码 `903048d`；服务器 Web/Relay 仍为 `2026-10-18-life-repair-480126a`，本次不替换。默认风险模型关闭，全桌面跨 APP 不再隐式采集 UIA/DOM。旧源码、构建及配置保留，登录 profile 未清理。Host 重新启动，手机需重新扫码并由用户在电脑确认；以下旧日期记录按历史保留。
+
+## 2026-10-19：默认纯视觉与本地 Guard 发布
+
+- 中文 [PR #42](https://github.com/wszkxlllll/Computer-Harness/pull/42)，分支 `codex/desktop-visual-default-20261019`，尚未合并；PR41 未吸收。三次功能提交分别修正候选缩放／网页 readiness、解耦采集并关闭 Host 风险模型、同步评测配置和回执。后续仅文档提交不要求再重启 Host。
+- 电脑连接页：`http://127.0.0.1:4318/connect`；手机：[Preview](https://47.108.197.221:8443/)。在电脑连接页重新扫码，并由用户确认配对；不代用户批准配对，也不自动开始任务。
+- 默认模型仍为 GLM-5.3-Flash low。Plan 开启，Memory=facts/lexical，Batch=same-control-input-v1，Context=recent/32，Monitor=shadow（只记录，不注入提示）。本次未改动声音、无障碍、个性化或手机界面；手机真实播音仍由用户后续确认。
+- Guard=layered／riskModel=off：本地扫描与必要人工审批保留，不创建风险模型 assessor，不增加风险模型请求。基础权限、Abort 和未知副作用规则不变；模糊项仍可能要求审批，不等同于 Guard 关闭。
+- **全桌面＋跨 APP 的默认 grounding=off**，受管浏览器仍启动且复用原登录资料，列窗和切窗继续可用；关闭时不附带 grounding 窗口采图、UIA/DOM 和专属清单读取。原生窗口沿用默认 off。独立“受管浏览器”目标仍显式请求 hybrid，CLI 显式 auto/DOM/hybrid 属主动开启；不把本次发布描述为全入口强制关闭采集。
+
+### 验证与保留范围
+
+全量 Vitest 单线程2580/2580、类型构建与spike检查通过，评测脚本45/45；Sol 审查生产改动和三处测试修改通过。并发下旧预期及超时失败保留，不延长测试超时或跳过用例。真实用户 Harness＋方舟 DeepSeek 验证两组：关闭采集时携程登录可见并实际切到微信（5主请求、0风险请求）；开启 hybrid 后选“出发城市”，CUA SendInput 屏幕 `(707,618)` 点击并展开城市列表（4主请求、0风险请求）。根独立检查截图和轨迹，没有发送、输入、搜索、购票或付款。成功切窗限定 Host 明确授权的两个目标，不宣称任意自动选窗或完整业务任务均已通过；此前无页面变化的点击失败仍保留。Windows 当前几何已实测，macOS 此轮只有合同回归。详见[完整验证记录](./life-business-evaluation-2026-10-15.md#采集开销取舍与-preview-核对2026-10-19)。
+
+本机旧 Host 本来已退出，此次启动新 Host PID42184，核对命令指向本 checkout 的 host dist；4318连接页200、Host到8443的WSS established，Preview及正式health200、匿名Preview任务API401。直接读取同构建默认配置确认 riskModel=off、riskGuard=layered、grounding=off；不是只检查 TypeScript 源码。没有调用真实模型去复验手机配对后的 Run，真实机制验收在相同生产构建的 ApplicationSession 中完成。
+
+### 备份与回退
+
+本机忽略目录 `runs/preview-release-20261019/backup/` 保留修复前 HEAD `8742865` 的 tracked source archive、未提交补丁、旧 Preview 构建副本及原启动配置；原 `runs/preview-desktop-grounding-20261018/backup/` 和旧工作区原地保留，没有覆盖。源码归档可恢复紧邻本轮的基线，复制的旧构建属于之前已保留的发布点，不能混称为同一版本。日志和本次版本信息在新日期目录，不推送 GitHub；私有配置、浏览器 profile、截图及原始轨迹不上传。
+
+此次没有重启服务器 Relay、切换服务器 current 或替换正式443，也没有替换 CUA daemon二进制。Windows继续使用已核验的0.22.2 foreground-caret-v1候选、SHA-256 `400AB8670980ECD461F304FDC7E7A9D8A27F53585EA629B81EE1B7C260BC3095`。回退前先结束任务并核对准确 Host 进程，再用保留的源码或已知旧构建恢复，不删 profile、不恢复旧动作；服务器没有本轮变更，不应跟随盲目回退。机器专属启动命令仍在本机原启动文档，不把个人绝对路径推广给其他用户。
 
 ## 2026-10-18：全桌面浏览器候选增量发布
 

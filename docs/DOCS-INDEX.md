@@ -1,5 +1,7 @@
 # Computer Harness 文档索引
 
+2026-10-19 已发布至 Preview 本机 Host：[中文 PR #42](https://github.com/wszkxlllll/Computer-Harness/pull/42)、[使用／能力默认值／备份与回退](./voice-preview-deploy-phone-test-2026-09-29.md#2026-10-19默认纯视觉与本地-guard-发布)。功能源码903048d，服务器Web/Relay与正式入口未替换。全桌面跨 APP 默认不采集，Host 风险模型关闭、本地扫描与审批保留；重启后请重新扫码确认。独立受管浏览器入口仍显式 hybrid，不混称全入口默认关闭。
+
 2026-10-19 最新验证：[采集默认关闭、风险模型关闭与真实回归](./life-business-evaluation-2026-10-15.md#采集开销取舍与-preview-核对2026-10-19)。全桌面 companion 不再强制 UIA/DOM；保留登录与跨 APP，Host 默认仅本地 Guard＋必要审批。真实 Harness 已验证携程登录→微信切换及开启 hybrid 后出发城市元素经 CUA SendInput 正确展开列表；全量 Vitest 2580/2580、类型检查及45项评测脚本通过。原始失败与作用域限制均保留，单窗口受管浏览器仍显式使用 hybrid；PR／Preview 发布状态以[部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)最新段落为准，PR41 尚未吸收。
 
 2026-10-18 最新受控实测与发布：[全桌面浏览器候选修复与真实执行证据](./life-business-evaluation-2026-10-15.md)。修复 companion 缺少窗口证据与只读枚举抖动；真实 Harness／方舟 DeepSeek 请求含 DOM 候选，模型通过 `click_element` 打开官网文章，后续全桌面截图独立确认。无候选仍保留视觉操作，不改普通窗口切换；全量 Vitest 2570/2570。[PR #39](https://github.com/wszkxlllll/Computer-Harness/pull/39) 全部 CI 通过并合入 main `8d77912`；本机 Preview Host 已更新、旧构建保留，Web/Relay 无本轮代码变化。手机重新扫码，详见[发布记录](./voice-preview-deploy-phone-test-2026-09-29.md)。不追溯升级原业务评测结果。shadow 不注入提示正文，但现有检测可能间接影响候选排序。
