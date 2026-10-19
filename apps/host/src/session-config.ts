@@ -105,12 +105,12 @@ export function createHostSessionConfig(
     ...(profileSettings.operationGuidance === undefined ? {} : { operationGuidance: profileSettings.operationGuidance }),
     riskProfile: "live-interactive",
     riskGuard: "layered",
-    riskModel: "same",
+    riskModel: "off",
     riskMaxModelRequests: 1,
     riskTimeoutMs: 15_000,
     cleanupDeadlineMs: 5_000,
-    // Keep no-progress evidence in the model context without automatically
-    // blocking a phone-driven action while the interaction path is under test.
+    // Record no-progress evidence without injecting it into the model context
+    // or automatically blocking phone-driven actions while the path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
     ...(!deepseekModel && !arkModel ? {

@@ -349,7 +349,7 @@ describe("request-bound screenshot lifecycle", () => {
     expect(reason.textContent).toContain("电脑暂时无法连接。");
     fireEvent.click(screen.getByRole("button", { name: "重试读取任务状态" }));
     await waitFor(() => expect(commands.refreshStatus).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("button", { name: "重试读取任务状态" })).toBeDefined();
+    await waitFor(() => expect(screen.getByRole("button", { name: "重试读取任务状态" })).toBeDefined());
   });
 
   it("speaks current progress and result on request with auto notices off, and keeps global stop available", async () => {

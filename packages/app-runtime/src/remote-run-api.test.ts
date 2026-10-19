@@ -2252,7 +2252,7 @@ describe("ApplicationRemoteRunApi", () => {
         managedBrowserProfileLabel: "mobile",
         managedBrowserProfileRoot: profileRoot,
         windowSwitch: "opened-windows-v1",
-        grounding: "hybrid-catalog-v1",
+        grounding: "off",
       });
       expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
       expect(session.activeRun?.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "off" });
