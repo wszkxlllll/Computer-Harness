@@ -1,6 +1,137 @@
 # 真实生活任务评测：原九题与新增六题对照
 
-## 2026-10-18 全桌面受管浏览器 grounding 实测（本页最新状态）
+> 当前六题活动 suite 的 T03 已按用户授权从 WPS/DOCX 附件改为直接发送微信文字；完整新 Goal 与评分边界见[六题 suite README](../eval/life-business-six-domain-20261018/README.md#t03--携程与高德南京出行资料并直接发送微信文字)。此前已保存的准备包和运行结果仍是旧 WPS/DOCX 题面，只能按旧题解释，不是新题实测，二者不可直接比较。
+
+## 2026-10-19 复测收口与定位结果
+
+**当前状态：四次已完成，停止扩跑，桌面占用已释放。**用户明确关闭 Guard 自动拦截，重新测试 T03 与 M02，两题各跑 C（Plan/Memory关）和 D（Planning开、facts/lexical Memory开）。四次实际风险请求与审批均为0，Monitor guidance 与动态监看保留；没有购票、付款、预约或微信发送。此次仅评测脚本增加显式选择与冻结校验，没有修改产品 Runtime、Computer、Provider 或 Preview 服务。Sol静态增量GO；根独立定向Node测试45/45通过。不能将改Guard后的结果直接当成原条件下的模块改善，也不能因医院关闭组遇到账号配额超限就判定开启组更优。
+
+此前沿昨天六题四组顺序启动的批次为 `six-domain-20261019-20261022-8cbd060e`，实际完成G01四组和原T03/C一组，其余原包不再自动运行。核验日 2026-10-19，出行日 2026-10-22；模型固定为火山 Ark `deepseek-v4.1-flash`、thinking disabled，全桌面前台、Monitor guidance、Batch off。原A/B不纠正、C/D动态纠正；新四组均由Luna仅依据当前Harness保存的截图和轨迹动态监看。高德定位权限可按本次授权允许，不扩展到其他权限。
+
+T03 使用上方已更新的微信文字任务，不经过 WPS、不发送附件；其结果不得与旧 WPS 题面直接比较。任务包、轨迹和独立核验记录分开，评分真值不提供给运行模型。现有 profile 的关怀版/字号及跨组页面状态如实记录，不擅自清理登录资料、用户文件或消息。
+
+| 任务/组 | Runtime 与业务结论 | 当前证据 |
+| --- | --- | --- |
+| G01/A | Runtime succeeded；业务部分完成 | Run `run-1792340087335-63592fab-185`，约708秒、91次主请求。本人证件与激活说明已回答，家人社区代办未明确写出双方身份证。Monitor guidance 实际纳入15次请求；不是39次提案都进入Context。 |
+| G01/C | Runtime failed；业务未完成 | Run `run-1792341082038-f267d7e1-2d3`，约710秒、86次主请求、80次动作尝试。两条动态纠正均已消费，但没有完成所需信息核验；11次工具执行失败，多次输入焦点拒绝。失败原样保留。 |
+| G01/D | Runtime budget_exhausted；业务未完成 | Run `run-1792341810648-ad23342e-e2c`，约718秒、86次主请求、80次动作尝试、24次工具执行失败。一个 pending 规划任务、无 Memory 事实；一条纠正在末段消费，未恢复。监看反馈不及时，不把该组当成理想纠正效果证明。 |
+| G01/B | Runtime failed；业务未完成 | Run `run-1792342559727-ca6220ff-d20`，约689秒、86次主请求、80次动作尝试；无纠正。最终保存截图为高德滑块验证、地图搜索框含敬老卡查询文字；标签/焦点偏移原因待查，不能仅凭模型自述归因。 |
+| 原T03/C（Guard开） | 30分钟超时正常取消；业务未完成 | Run `run-1792343361565-e19db33f-fd1`；122主请求、15风险请求、117动作尝试；1条纠正消费、5次审批4次批准。日期最终正确，尚未得到车次列表/路线或发微信。约12分14秒为审批等待，HTTP累计约6分40秒，不能算30分钟纯模型执行。 |
+| 新T03/C（Guard关） | Runtime failed；业务未完成 | 包 `T03-C-20261022-296939b5`，Run `run-1792346722182-9ec34fad-5f8`；约1270秒、157主请求、150动作尝试；风险请求/审批均0。站名已填好，日期仍10月19日；未查车次/高德或发微信。1条监看反馈由根代投递并消费。 |
+| 新T03/D（Guard关） | Runtime failed；业务未完成 | 包 `T03-D-20261022-7c6f6b33`，Run `run-1792348074129-ff4e53dd-2e4`；约1434秒、164请求、150动作。中途进入结果页，后日期变为10月20日并最终退回未填好表单；未交付指定车次/路线或发微信。2条纠正消费。 |
+| 新M02/D（Guard关） | Runtime succeeded；业务部分完成 | 包 `M02-D-20261022-5af4b37d`，Run `run-1792349560686-c92f8966-2b8`；约173秒、22请求、17动作。主要电话与取消流程有依据，但最终来源域名误写为huoshan，且漏就诊卡、户口本表述未限制未成年人。1条Memory实际写入、召回并进入Context；无纠正。 |
+| 新M02/C（Guard关） | Runtime failed；账号配额阻断，未交付答案 | 包 `M02-C-20261022-95bd2ab2`，Run `run-1792349876454-17019218-33c`；约176秒、21请求、18动作。最终两次HTTP429明确 `AccountQuotaExceeded`，无Retry-After；此前还有一次未开放工具错误。无纠正。不是业务完整对照，也不归为纯网络超时。 |
+
+未运行组不预填结果。退出码、Runtime终态、独立业务评分与纠正消费分别记录；详细本地证据在各准备包的 `runtime-output/`、`attempts/`、`analysis/daily-20261019-root-v1/` 及忽略的 `runs/life-daily-20261019/root-review.md`。本节随实际完成更新，不覆盖此前结果。已有profile的关怀版、字号、表单值及标签状态可能产生carryover，分别记录，不擅自清理登录资料或用户文件。
+
+### Guard配置核对与诊断边界
+
+普通CLI的risk-model默认off，不代表手机Host或评测脚本默认相同。原评测脚本显式layered/same，关键词submit/提交可能将只读查询升级语义审查；既有assessor还根据alignment/conflicts将日期核对当审批前提，或因evidence格式校验失败回退审批。这些属于Guard范围/提示/契约问题，不直接归因于浏览器故障。原G01四组没有实际风险请求或审批，不等于配置未开启。
+
+Preview Host只读核对：运行PID12572，启动未覆盖风险配置，已加载的session-config.js基础值为layered/same、风险请求上限1；手机关闭Guard时不装配风险Provider。本轮未改动/重启部署。新评测四组则明确off/off，二者分开解释。
+
+### 已定位的问题与优先级
+
+**P0：桌面候选坐标投影有明确缺陷，先修这一处，不先删DOM或换模型。**`packages/computer-cua/src/cua-driver-computer.ts` 的 `projectGroundingToDesktop`（本轮约5196行）将窗口采集的缩小截图坐标直接投为桌面坐标，没有正确恢复全桌面物理尺度。真实T03/C observation seq110的出发城市DOM bbox约为`[354,365,157,28]`；模型在response seq119明确采用中心`(433,378)`，Runtime→SendInput均原样执行。但同帧2560×1600原图中的城市控件位于约x545–870、y550–665，实际点击落在控件外。这不是仅凭“点不中”推断；错误目录实际进入该请求的16个候选投影，并影响模型选点。DOM与UIA可同时受同一窗口→桌面投影影响，两者bbox相互接近并不能证明正确。
+
+离线用现有Ark适配器与保存的真实PNG重建图像/工具投影，确认data URL解码字节与原2560×1600 PNG完全相同，click schema范围为x0..2559/y0..1599，actual_pixels分支和桌面输入均不缩放。此局部离线重建使用本地HTTP stub、不调用API，不是用假环境替代业务执行；原始wire参数未保存，因此从canonical参数到raw参数的identity依代码证明，不冒充独立raw wire证据。服务端内部视觉编码不可见，不作推断。
+
+**关联症状：focus拒绝多数有合理前因，不先放宽。**G01两组的候选语义是textbox，但候选bbox/实际点击约偏小1.64倍，未点在截图的真实输入框上。新T03/C同Run有对照：错误候选中心`(433,378)`后未聚焦，而落在真实控件的`(580,605)`后观察到focused=true、随后type完成。`DOM_INPUT_FOCUS_MISMATCH`明确没有发送键盘输入，与底层CUA乱码不是一回事。PR39的probe只读、不激活窗口；新增接线让此前未进入桌面的候选进入既有点击路径，从而暴露潜在投影问题。其余个别拒绝、标签状态和服务端模型定位偏差仍须逐例判断，不把全部失败强行归一。
+
+**P1：评测/部署安全配置必须显式，Guard不得承担普通答题正确性检查。**评测off模式已实现并实跑确认，但产品Guard本身没有在本轮改动。后续处理submit/提交的只读查询误升级、alignment把业务日期核对变成审批，以及风险输出格式失败后的重复确认；不靠扩大无条件放行或网站关键词白名单修复。Preview仍是前述基础配置，未被悄悄替换。
+
+**P1：火山账号调用配额超出。**医院关闭组HTTP evidence记录429且`providerErrorCode=AccountQuotaExceeded`、Retry-After absent，重试一次后同错退出。需要用户在控制台核对具体套餐/周期配额；本轮不查询收费账户、不买额度、不继续刷API。该样本不能用于证明Planning收益，也不以增加GUI预算解决账号配额。
+
+**P2：输出转写与工具参数遵循。**医院开启组最终来源URL拼错、到院材料有遗漏；评分员独立重新读取[华山医院官网预约说明](https://www.huashan.org.cn/mzdh/yygh.htm)核对，不把真值送给模型。该页FAQ对就诊卡与未成年户口本有专门说明；模型实际回答不能只因Runtime succeeded就全通过。Plan/Memory调用中的observationId/actionId曾被模型平铺在业务arguments，契约要求嵌套observationAssessment后由Provider剥离；未发现明确Schema/Runtime冲突。三例click.x错误实际是click({elementRef})缺x/y，应是click_element调用，不是NaN或坐标转换。可在离线混合工具fixture后改善完整嵌套示例，不新增容忍所有未知字段的解析补丁。
+
+### 模块效果与耗时（新四次）
+
+| 组别 | 总耗时 / 主请求 / 动作尝试 | HTTP累计 / 平均 | 已记录总tokens | 实际模块使用与限制 |
+| --- | --- | --- | --- | --- |
+| T03/C | 21分10秒 / 157 / 150 | 369.312秒 / 2.352秒 | 2,537,878 | 无Plan/Memory；Monitor实际进入37次请求；1条纠正消费，未恢复。 |
+| T03/D | 23分54秒 / 164 / 150 | 443.413秒 / 2.704秒 | 3,803,760 | 3次task_create仅2次成功；1次Memory写入被拒，无实际事实；Monitor实际进入42次请求；2条纠正消费。 |
+| M02/D | 2分53秒 / 22 / 17 | 58.597秒 / 2.664秒 | 430,043 | 1次创建成功；2次task_update元数据平铺而拒绝。m1写入并词法召回，selectedAdmittedFactIds含m1、memory block included，最终仍拼错来源URL。 |
+| M02/C | 2分56秒 / 21 / 18 | 45.516秒 / 2.167秒 | 230,291 | 无Plan/Memory，最终配额超限，无业务答案；不与开启组做成功率胜负推断。 |
+
+HTTP与总耗时不是同一指标，tokens为响应usage汇总不是官方计费账单。T03的全局changed/unchanged主要是机械图像/动作信号，日历开闭也可能算changed，不能直接当有效业务步骤。未逐步语义标注前不编造“无意义步骤百分比”。监督反馈存在分钟级延迟，较晚的纠正不能作为理想人类及时纠正效果；scope为当日诊断样本，不宣称模块因果ablation已完成。
+
+### 修复与重新验收（2026-10-19，进行中）
+
+用户已授权修复后用 Harness 实机任务验收。先修窗口 capture→桌面候选几何，并覆盖遮挡、引用新鲜度及 macOS Retina 回归；不改普通视觉操作、焦点保护或未知副作用处理。Luna 实施，Sol 审查，源码及构建冻结后才启动新 Run，不复用旧指纹的准备包。Preview 暂不替换。
+
+实施已完成：Windows bounds/桌面均用物理像素，仅对 capture-local bbox/point 撤销窗口采样；macOS 使用现有且已校验的 `screenshot_scale`，不从缩图猜 Retina 比例。遮挡与 freshness 复用同一 native→desktop 比例；DOM 执行所需的 producerViewport/dispatchBBox/candidateFrame 仍为窗口局部坐标。只有 CUA Adapter 两个源码文件及对应测试改动，没有改 Provider 坐标协议、Runtime 主循环、焦点保护或 CUA 驱动。Sol 有限审查 GO，两项非阻塞建议（标量收敛与元数据缺失降级测试）已完成。根独立全仓 `tsc -b` 与 spike noEmit 通过；最终三文件 Vitest 434/434 通过，其中 CUA 主测试422项。旧 Adapter dist 已备份；Preview 未重启。
+
+新实机包为 `T03-C-20261022-9c91a522`，Run `run-1792360903809-519b8938-515`，源指纹 `ea92a95d1befd5fdc928470f05cd3a3b254d45aea093c0e2dba88982d633ae87`。配方与原 Guard off C 组一致。新预检使用真实 Harness 观察，确认携程登录页头、微信精确会话及空输入区；微信本来已在前台，预检脚本的冗余 switch 被拒绝，不伪称切换成功。业务由真实模型自行选窗、点击、输入和切标签。
+
+**该次实机结论：坐标修复有真实执行证据，T03业务仍仅部分完成，不放行完整链路。**约865.6秒，98次主请求、89次GUI动作均completed、执行失败/焦点拒绝0；4次 `click_element` 均完成（含UIA与DOM），普通坐标点击及输入继续可用。根查看seq77的输入框候选与原图，公开bbox已恢复桌面尺度；随后城市替换、日期选择和真实结果查询发生。根独立查看seq761原图，G12 10:00→10:59、G100 10:04→11:03，均59分钟、二等座162元/有票，与最终携程部分一致。日期参数10/22、左列方向正确；右列是反向，不混入评分真值。使用已有profile可能暴露旧地址栏历史，本次模型确曾引用旧地图路线历史，作为carryover记录，不算独立发现收益。
+
+高德seq816实际显示滑块失败及二维码验证，未取得路线；轨迹有两次drag尝试，不隐去。微信未发送、无购票付款预约。末段模型切入个人Edge后再枚举不到受管浏览器，但返回列表 `truncated=true`，缺少原始PID/HWND/完整inventory证据，不能断言窗口被关闭或被错误过滤。源码没有无条件排除Host受管目标，不先加例外规则。该问题另查，不归为Surface/坐标拒绝。
+
+Monitor20次提案，实际进入9次请求；一条基于seq405真实画面的纠正在seq467消费，命令 `35c0b230-78fc-41fd-84d3-516cf0184b6e`，由根投递，不提供坐标/答案。Luna较晚的监看反馈未补投，不伪称及时纠正。Guard/风险请求/审批均0。交换日志HTTP累计227.464秒、平均2.321秒（Runtime请求跨度累计227.884秒，为不同计时口径）；其余总耗时包含动作、观察和重复探索，不能全部算API慢。Runtime与业务均不因进程exitCode0而改判通过。
+
+修正前M02在两次capture-only预检中均于 `computer.open` 的网页readiness超时。随后清理前对精确目标页只读补验：HTTPS、loading、DOM/body有、正文756字、27张图片，目标页截图已渲染完整医院首页；根独立看图确认。child exit状态是在cleanup之后采样，并非提前崩溃证据。由此实施通用最小修正：正确HTTP(S)目标暴露DOM/body即可进入观察，不要求文档达到interactive/complete，不表示加载完成；保留精确目标、错误地址拒绝、超时和Abort，不加医院例外。Sol新diff审查GO，根最终五文件525/525及全仓build/spike类型检查通过；没有改用户profile或系统网络。
+
+修正后M02/C新包 `M02-C-20261022-0d4d6968`，Run `run-1792363280985-8aba61f9-98b`，源指纹 `5642bc3a6c0ea04923eedc16baac0cd8ee16654bdd99a21db24aae0d49c00a8d`，已真实运行结束。Runtime succeeded，轨迹约299.5秒、55请求、54动作全部完成、0执行失败/纠正/风险请求/审批；不是此前未启动包 `M02-C-20261022-e53c7046`。业务仍部分完成：主要电话、原渠道取消、来源域名正确，但未覆盖FAQ中的就诊卡和未成年户口本限制，且额外写成最多3个科室，官网实为2个。根另读官网核验，不向模型提供评分答案，不因Runtime succeeded全通过。没有拨号、预约或取消。
+
+该M02真实暴露启动目标问题：初始全桌面图仍是个人Edge，模型前四轮直接在该浏览器搜索并打开官网，后续54次观察均无Host浏览器候选目录。受管浏览器已创建不等于前台已是任务浏览器；全桌面允许视觉操作个人浏览器，但不授权给它附加受管DOM。不能把这种运行当作“从已准备官网开始”的完整接线验收。根只读确认：`app-runtime/src/computers.ts` 中companion的initialTarget沿用config.windowTarget，无显式native目标时为空；`CuaDriverComputer.open` 仅在有windowTarget的foreground分支调用一次激活，无windowTarget的desktop分支只读取屏幕尺寸/注册桌面。因此此入口没有保证初始受管浏览器在前台，模型得到个人浏览器画面后直接导航，不是模型被明确要求使用个人浏览器。该缺口尚未实施修复；修复须保留“显式native起点+后台准备browser companion”语义，不能所有companion一律抢前台，也不能改成每轮强制激活。未擅自关闭/删除个人标签，未自动替换Preview。
+
+#### 14分26秒的耗时拆分与UIA/DOM归因边界
+
+按同一T03轨迹的非重叠事件跨度核算，而非用整轮耗时减模型后猜测：
+
+| 环节 | 次数 | 累计 |
+| --- | --- | --- |
+| 模型请求 started→response/failed | 98 | 227.884秒 |
+| GUI执行 started→completed | 89 | 20.231秒 |
+| completed→下一次observation.created | 89 | **600.501秒**，平均6.747秒 |
+| Computer open及首次观察 | 各1 | 5.598秒 |
+| 轨迹内其余调度 | — | 8.159秒 |
+| runner/清理等轨迹外间隔 | — | 3.228秒 |
+
+合计865.601秒。其中后观察包含画面settling/截屏、窗口及UIA/DOM读取、几何/身份核对、资产与观察生成；现有轨迹没有内部子阶段计时，不能再把600秒全称为DOM耗时。源码确有额外串行链路：桌面截图之后，读取前inventory、再采窗口图、读UIA/DOM、读取后inventory再投影。另外既有Windows全桌面settler默认最低等待1.5秒、250ms采样、名义最大3秒（原实现来自2026-10-07提交a9464d4），这是独立开销，不是本轮坐标修复新增。
+
+样本比较：T03下一观察有catalog的80次平均6.928秒，无catalog的9次平均5.142秒；M02无catalog的54次平均3.268秒。注意“无catalog”可能已经做过inventory或失败的采集，且两站页面/动作不同，不是严格grounding-off A/B，不能把两组均值差当UIA/DOM纯开销。当前可确认最大耗时在后观察，新增同步grounding采集是重要优化对象；完整归因需分别量截屏稳定、native inventory、窗口采图、UIA、DOM，不能凭此删除全部保护。应先修正确启动目标、减少无效重复，再优化重复采集/串行等待，不靠换快模型掩盖这600秒。
+
+配额复查：本轮单次最小 Ark `deepseek-v4.1-flash` / thinking disabled 请求返回 HTTP200，耗时944ms、7输入/2输出tokens；说明当下请求可用，不保证后续长任务配额充足。此前医院关闭组的配额失败证据仍保留，不追溯改判。
+
+验收分开记录：离线坐标与平台回归只证明转换机制；实机必须由真实模型通过 Harness 选择候选或坐标、实际点击输入，并交付业务成果。优先重测 T03 的携程/高德→微信文字链路，保持原 Goal、日期、精确“文件传输助手”目标及 Guard off；不把答案、坐标或网站特例送给模型。若任务仍失败，保留新记录并分析，不以单测或截图接线冒充业务通过。
+
+#### 采集开销取舍与 Preview 核对（2026-10-19）
+
+用户要求优先控制延迟，本轮全桌面默认纯视觉、结构化候选显式可选，而不是删除 UIA/DOM。已移除 factory 将 managed browser companion 强制转换成 hybrid 的行为；浏览器生命周期、登录复用和跨应用切换与 grounding 采集解耦。关闭模式不创建 DOM transport 或 grounding probe，实际跳过附加窗口截图、UIA/DOM 和 grounding 专属清单读取，不只是隐藏目录或工具。普通截图、坐标操作、输入、显式列窗/切窗保留；画面稳定等待属于另一项开销，不承诺关闭采集后消除全部等待。显式 DOM/hybrid、原单目标浏览器及 macOS 文档恢复合同保留；CLI 显式 auto 的目标选择语义未改，不能把本轮默认 off 说成全入口强制关闭。
+
+离线证据：三个 app-runtime 聚焦文件 106/106；CUA 适配器 422/422、受管浏览器 Host 66/66；Host 配置与风险规则 120/120，合计 714 个不同测试通过。首次根回归中新增 Host 审批测试因测试 double 未按 Provider 合同拆分 declaredEffect 而超时，已只修测试并独立复跑 120/120，未放宽业务逻辑。life-eval runner/prepare-batch/start 共45/45；全仓 tsc build 与 CUA spike 类型检查通过。off 集成用生产 ApplicationSession/Registry/CUA 适配器和 mock driver 验证：Host 按原 profile URL/label/root 启动，普通观察仅 get_desktop_state，无 DOM transport、verifyState、get_window_state 或自动 list_windows；显式列窗/切换的另一个完整回归在 off 下仍进行三次精确激活及四次桌面点击，观察保持 desktop。这里是离线调用证据，不冒充真实登录或业务任务重新通过；本轮没有调用真实 API 或操作桌面。
+
+个人浏览器问题与采集开关分开：受管浏览器创建后未确保成为初始前台，全桌面截图取得原本打开的个人 Edge，模型随后在该画面继续操作。不是 Harness 显式启动个人浏览器，也不是给个人浏览器授予 DOM 权限。后续启动修正需区分明确浏览器起点与原生应用起点，不能用每轮抢前台代替。
+
+Preview 本机只读检查：4318 无监听，先前 Host PID 已不存在，未发现匹配 Host 的 Node 进程；因此不能宣称 Preview 当前在线。本次没有启动、重启或替换服务。保存的启动记录为 GLM-5.3-Flash；源码 Host 默认 Plan 开启、Memory=facts/lexical、Batch=same-control-input-v1、Guard=layered、riskModel=same、Monitor=shadow、Context=recent/32。以上是启动记录及源码默认值，不是现存进程的有效配置证明；shadow 不注入主模型上下文，不能沿用源码旧注释把它说成 guidance。语音、手机无障碍及个性化仍需分别核对部署和客户端设置，未在此重新验收。
+
+PR41 暂不集成。先完成本地采集边界修复与回归，再处理其 Context 固定区超预算、桌面表格证据坐标/遮挡及对应测试问题，不能用它覆盖现有 Windows 输入、无障碍与坐标修复。
+
+Guard 历史追溯：`git show 6abe951:packages/risk-guard/src/index.ts` 确认，2026-09-16 的首次分层 Guard 提交 `6abe951` 已同时包含 unknown 效果转语义审查、动作/效果声明矛盾检查及关键词扫描，并非本轮采集修复新增。2026-09-23 的基线提交 `73412c8` 已包含 unknown 且缺控件证据直接审批的现存分支；该基线提交不能证明其内部最初开发时刻。另查 Host 配置历史：`riskModel=same` 默认值在 2026-10-07 的 `a9464d4` 引入；规则存在与产品默认启用模型是两件事，不能混说成用户始终在使用风险模型。Git 历史只证明何时入库，不证明用户明确批准过每项设计；本轮不据此擅自扩改 Guard。
+
+按用户随后明确要求，Host 默认现已改为 `riskGuard=layered / riskModel=off`：保留本地扫描、效果检查及必要人工审批，不创建风险 assessor、不增加风险模型请求。真实 ApplicationSession/Run 离线回归确认语义不明动作停在 waiting_approval、path=fallback、reasonCode=semantic_review_unavailable，riskModelRequestCount=0，Provider 总调用仅一次主决策。手机 Run 覆盖不含 riskModel，不能通过普通功能覆盖意外重新启用。现有模型预算字段不代表启用了模型，实际开关为 riskModel；未删除 Guard 审批、权限或未知副作用边界。源码修复不等于 Preview 已部署，本轮仍未启动或替换 Preview。
+
+Sol 最终只读审查 GO，未发现本轮新增阻塞性 P1/P2：确认 off 在 inventory/window capture 前早退；登录 Host 与实际切窗回归保留；companion 的起始目标语义未被 grounding 取代；Mac 恢复与单目标边界保持；关闭风险 assessor 后 layered 本地路由及人工审批仍在。根在最终测试修正后再次完成全仓 build 和 spike 类型检查。未借此放行 PR41、初始前台目标缺口或整轮真实业务效果。
+
+用户随后授权“测试通过后提 PR、备份并部署 Preview”。首次全量 2580 项为 2571 通过／9 失败，失败原样保留；确认一处 remote companion 断言仍假设 hybrid，按新合同改 off。两处 Web 测试在异步响应仅被调用而尚未完成时提前断言，改为等待最终状态，不改组件、断言内容或超时；Sol 另审三处测试修改通过。Remote84、TUI67、Web46逐文件均通过，四文件合跑仍有两项5秒超时。最后使用单线程／禁止文件并行重跑全量，**2580/2580通过**（141文件，未跳过或放宽超时），完整JSON保留在本机 `runs/life-daily-20261019/full-final.json`；这不抹去此前负载下的超时记录，也不提前宣称远端 CI 已通过。
+
+实机通过用户 Harness 的生产 ApplicationSession／CUA／方舟 DeepSeek，未用外部 Computer Use 代执行。第一次 helper 错读凭据变量，API401、0动作，保留失败后按私有配置指定变量修正；第二次模型因 Goal 要求列表未提供的“Host-owned”标签而保守退出，且起点没有记事本。该次实际发生一次打开 Edge profile 菜单的点击，与模型结尾“未点击”不一致，按轨迹记录失败，不采信自述。窗口标题的“个人”字样也不能独立证明是不是 Harness profile，Host 精确身份与通用浏览器标题不可混用。没有因此放宽 Guard 或修改生产目标判断。
+
+按用户允许改成微信切换后，off 验收 Run `run-1792379686388-4bc79fa6-0f1` 成功：5次主请求、2次切窗完成、0风险模型请求、0输入／发送／导航。Host 明确作用域只含已打开微信与本 Run 新受管浏览器，模型实际 list→switch 到携程确认登录，再 list→switch 到微信；3次观察均为2560×1600桌面、均无 grounding catalog，两个 Guard 决策均 local allow／modelRequestCount=0。根独立看动作后截图确认携程登录状态及微信已激活，不复述账户或聊天内容。这证明关闭采集时登录复用与受控跨 APP 切换可用，不代表任意窗口自动匹配已修，也不代替完整出行业务评测。原始失败与新 Run 分目录保留，不覆盖用户文件。
+
+开启 hybrid 的第一轮 `run-1792379824323-3cf15e07-970` 实际消费 DOM 候选并完成“政务公开”点击，但截图未确认内容变化，按 failed 保留；未查明该站链接行为，不将它归因成坐标错误或宣称整轮通过。后续携程控件验收 `run-1792380160480-f261f650-a1b` succeeded：4主请求、0风险模型请求、2动作完成（切窗及一次 click_element）、0失败。2560×1600桌面上的“出发城市”bbox 为 `[579.112,596.170,257.050,45.016]`，模型所选元素对应中心 `(707.638,618.678)`；coordinate coverage 命中当前 UIA 候选、containment／距离0，真实 CUA 回执为 SendInput 屏幕 `(707,618)`。动作后新截图明确显示城市下拉面板展开，控件 focused=true；根独立看图确认，不只依赖回执或模型自述。未输入、选择城市、搜索、下单或发送。采集开启时的当前 Windows 几何与真实执行验收通过，不代表所有缩放或 macOS 实机均已覆盖。
+
+两个成功 Run 后受测持久 profile 为 ready、无仍占用该 profile 的浏览器进程；原候选 CUA 二进制及哈希未替换。手机入口边界：全桌面＋跨 APP 默认 grounding off，原生窗口沿用 off 默认；独立受管浏览器目标在 RemoteRunApi 中仍显式请求 hybrid，保留原单窗口语义，不能写成所有入口强制关闭。CLI 显式 auto/DOM/hybrid 属于主动开启。Preview 默认风险模型关闭适用于 Host 默认配置，不限制开发者显式选择模型审查；本轮不改扫描规则或增加新审批字段。
+
+### 最小修复顺序
+
+1. 保留现版本与本日全部Run。先加Windows非1:1窗口capture→desktop回归：缩小capture、非零窗口origin、DOM与UIA同控件；明确local capture→native→desktop的转换。公开bbox与原桌面图对齐，producerViewport/dispatchBBox仍保留用于执行的窗口局部尺度。
+2. 同步核对遮挡判断和ref freshness使用的几何，保留macOS逻辑点/Retina的既有语义；不全平台删除缩放，也不加携程/华山特例。不改Provider坐标协议、普通桌面视觉执行、焦点保护或Surface切换。
+3. 离线回归通过后，在已授权的实机验证中核对desktop图、原生bounds、window capture尺寸和公开bbox，再让模型选择并输入。先证明几何一致，再复跑失败任务；不要直接重刷整套长任务。无法取得的原始元数据明确标为缺失，不用反推值代替实测。
+4. 连通复查通过后恢复真实API；完成几何修复验收后才继续Plan/Memory效果比较。Guard和工具示例各自独立修复/验证，不与几何修正揉成一次大改。实施及实机结果按新证据追加，旧失败不删除。
+
+## 2026-10-18 全桌面受管浏览器 grounding 实测
 
 本节更新下方当时“grounding尚待实机验收”的状态。全桌面截图、Host授权的受管Browser companion及 requested `grounding=off` → resolved `hybrid-catalog-v1` 的既有配置语义均保留；未启用普通桌面应用候选、未更改CLI/factory配置语义，也未连接个人浏览器。
 
@@ -458,3 +589,32 @@ Node env-file只用于明确live，key不进计划。既有可信代理如需要
 用户另授权的最小真实DeepSeek联通测试已完成：`deepseek-flash`、thinking关闭、1请求、HTTP200、总耗时1071ms，输入1265/output67 tokens，原生terminate响应解析成功。这只证明文本API及适配器连通，不证明截图、混合工具或九道业务任务已通过。随后用户授权打开已有travel登录profile供手动检查；该准备操作不属于正式业务评测，不调用模型。
 
 同日后续修题验收：移除未明确静态问题后，根独立回归16/16通过，新增社区/本人激活及可收短信场景边界测试；任务卡、Goal、checks与静态答案同步，Sol只读复核GO。无Runtime改动、API、桌面操作或部署。仅题面/评分范围收敛，旧包必须重建，不迁改原记录。
+
+## PR41增量审查
+
+审查日期：2026-10-19。结论：**暂不能接受当前 head 合并/发布**；先修默认 Host 启动回归及桌面表格证据投影，再以提交树实际 CI 验证。审查对象为 [PR41](https://github.com/wszkxlllll/Computer-Harness/pull/41)，固定 base `8742865fdc06a858296c9a3f79dfaf1fcf5cb3ce`、head `8caa75fcf97ffcd76b787b0554bf6b9d48e9bb07`，通过 `git diff HEAD...origin/pr-41-review` 与 `git show` 读取全部生产/测试改动，未 checkout、构建、调用模型或操作桌面。
+
+### 必须先修的问题
+
+1. **P1：固定提示膨胀使默认 all-on Host 在首次请求前失败。** `packages/context/src/projections.ts:134` 起新增字段账本、收敛、终止及各工具说明；Planning/Memory/terminate 的 schema 描述也同步膨胀。它们进入 `compiler.ts:165–177` 的不可裁剪 fixedBlocks，`:219` 固定块超过预算即抛出 `CONTEXT_INPUT_TOO_LARGE`。Host 默认文本预算仍为 `apps/host/src/glm-output-budget.ts` 的16384，未同步保证可运行。根读取的 Windows CI job `117709313300` 明确报告生产配置首次 all-on fixture 出现 `Context fixed blocks exceed maxInputTokens`；该测试使用生产 createRun、Context 和 Provider.prepare，原本必须在调用 fake HTTP 前成功准备。因此不能将此红项仅解释为旧 estimated=14839 数值过时。应压缩重复提示或把非必需指导改为预算内可省略投影，保留默认文本/线预算下首次请求成功的行为回归；不能只删测试或提高 expected 数值。
+
+2. **P2：新 visibleText 绕过桌面投影和原生遮挡过滤，不能按当前桌面可见证据对外发布。** `dom-grounding.ts:320` 把表格区域/格子投影到窗口截图局部像素，`:366` 保存该 bbox；`cua-driver-computer.ts:5570` 将 visibleText 整体带入 hybrid catalog。但桌面 `projectGroundingToDesktop` 的 `:5227` 原生遮挡及边界过滤只处理 catalog.elements，`:5244–5253` 随后通过展开 catalog 原样保留 visibleText。结果是桌面 observation 的表格 bbox 仍是窗口局部坐标；即使补上本地元素坐标修复，新字段也不会自动转换。还有独立的可见性错误：浏览器仍是 foreground、一个原生置顶且不激活的窗口覆盖表格，浏览器内 DOM hit-test 仍会通过；只要另一个未遮挡交互候选存活，整块被原生窗口挡住的表格文字仍可被 Context 当作当前可见证据发送。应使用同次桌面原生变换转换 region/cell bbox，并按桌面边界/原生遮挡整格过滤和降级 completeness；若当前不能证明这些条件，桌面模式暂不附带 visibleText。补非零窗口 origin、缩小 capture、部分越界及原生 overlay 的端到端投影测试。
+
+### 恢复预算与契约判断
+
+- 本轮未发现可以独立确认的 GUI 重放或 Abort 绕过。Runtime 在异步准备、retry、Guard、approval 和实际 execute 前增加关闭边界复查；未完成 GUI side effect 拒绝 Provider retry。request-count 最后一次与 wall-clock 收尾共同限制 terminate，输入纠正仍会丢弃旧决定；硬期限由 start 起计算。
+- 根提供的 provider-retry 红项不能直接当作实质超预算回归：旧 fixture 使用118001ms单次 reserve、2000ms Retry-After，并依赖旧固定120000ms窗口；PR明确把窗口改为 `2 * reserve + 500`，即236502ms。首请求快速失败时重试在新策略内合法。应重写测试覆盖新 decision 边界及显式 runTimeoutMs 不足的拒绝，而不是无依据恢复旧120秒规则。该 test 当前仍红，说明提交树回归未完成，不意味着所有预算逻辑均已验收。
+- `runTimeoutMs` 仅程序化 createRun 配置，文档明确没有新增 CLI flag；外部宿主未传入时 Runtime 不知宿主总期限。应在产品接线时显式传同一总期限，不能把本 PR 功能理解为所有现有 CLI/评测 Run 已获得墙钟收尾能力。等待用户/审批期间仍以硬取消为最终边界，未看到针对等待、异步准备跨收尾阈值和 Guard 竞态的新回归用例。
+- Protocol 新字段为 optional，Planning/Memory 业务字段没有变化，账本放入现有 description/value，不新增跨模块业务真值状态；此方向没有发现破坏旧数据形状的明确错误。但账本/导航/工具 schema 提示重复进入常驻上下文，已通过上面的预算失败表现出耦合成本。
+
+### 测试与发布证据
+
+新增原生表格采集约420行、materialize验证约123行以及墙钟/恢复控制大改，没有对应新增的表格可见性或墙钟行为测试；现有 diff 主要修改原重试期望、扩展 injected Provider fixture，并删去部分 Memory/Planning 提示断言及一个 native-window Context 断言。删除精确文案断言本身不等于掩盖功能错误，但应补稳定的语义/行为验证，而不是降低到 `expect.any(String)` 后就认为终止指令已覆盖。
+
+根读取的 Windows CI 实际还有 memory recall-regression 的 `source and inspected range` 精确文案失败、source-linked-finish 的默认 terminate 描述精确字符串失败。这两项可按更新后的合同修订测试，但必须保留业务语义断言。CI属于实际 FAIL，不是权限 action_required；作者十二轮实跑报告不能证明 PR 当前提交树全套测试、默认 Host 或新证据协议通过。本审查未独立执行测试，也未读取/复跑这些业务答案。
+
+### 与当前本地修复的合并边界
+
+PR41未包含本地未提交的 Windows 缩小窗口 capture→桌面坐标修复，也未包含 Browser startup loading+DOM/body 的观察就绪修复；相同文件可文本合并不代表语义完成。合并时保留本地 producerViewport/dispatchBBox 与 backing-scale 合同，并把新增 visibleText 纳入桌面投影/遮挡；startup readiness 变更也须保留。建议顺序为先修上述两项与回归，再核最终提交树 CI，最后独立构建并对真实观察/业务做有界验收。
+
+操作边界：仅追加本小节；未修改源码、前文或 PR，未评论/提交/合并，未调用付费 API、操作真实桌面或启动新任务。

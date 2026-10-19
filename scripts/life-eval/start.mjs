@@ -2,19 +2,21 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { MANAGED_BROWSER_LABEL_RE, ROOT, assertApiKeyEnvName, manifestPathForSuite, parseFlags, suiteDefinition } from "./common.mjs";
-import { createPlan } from "./prepare.mjs";
+import { createPlan, resolveRiskGuard } from "./prepare.mjs";
 
 export const LOCAL_CONFIG_PATH = join(ROOT, ".tools", "life-eval.local.json");
 
-const VALUE_FLAGS = new Set(["--task-id", "--variant", "--output-dir", "--profile-label", "--as-of-date", "--travel-date", "--cua-socket", "--suite", "--api-key-env"]);
+const VALUE_FLAGS = new Set(["--task-id", "--variant", "--output-dir", "--profile-label", "--as-of-date", "--travel-date", "--cua-socket", "--suite", "--api-key-env", "--risk-guard"]);
 const BOOLEAN_FLAGS = new Set(["--help"]);
 
 export function parseStartArgs(argv) {
-  return parseFlags(argv, {
+  const args = parseFlags(argv, {
     valueFlags: VALUE_FLAGS,
     booleanFlags: BOOLEAN_FLAGS,
     required: ["--task-id", "--variant"],
   });
+  if (args["--risk-guard"] !== undefined) args["--risk-guard"] = resolveRiskGuard(args["--risk-guard"]);
+  return args;
 }
 
 function addDays(isoDate, days) {
@@ -96,6 +98,7 @@ export function buildPrepareOptions(args, { now = new Date(), config, task } = {
     "--task-id": args["--task-id"],
     "--variant": args["--variant"],
     "--suite": suite.suiteId,
+    "--risk-guard": resolveRiskGuard(args["--risk-guard"]),
   };
   if (suite.provider === "ark") {
     const selectedApiKeyEnv = args["--api-key-env"] ?? config.arkApiKeyEnv ?? "ARK_API_KEY";
@@ -153,14 +156,14 @@ export async function prepareFromStartArgs(args, dependencies = {}) {
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write("Usage: node scripts/life-eval/start.mjs [--suite <suiteId>] --task-id <suite task id> --variant <variant for selected suite> [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--output-dir <absolute>] [--profile-label <label>] [--as-of-date YYYY-MM-DD] [--travel-date YYYY-MM-DD] [--cua-socket <existing-socket>]\nThe suite defaults to life-business-20261015. Output/profile/API-key environment-variable name/WeChat chat/existing CUA socket are read from ignored .tools/life-eval.local.json; supported values may be overridden. As-of date comes from Asia/Shanghai today and travel date defaults to tomorrow unless explicitly supplied. This creates an offline prepare package only.\n");
+    process.stdout.write("Usage: node scripts/life-eval/start.mjs [--suite <suiteId>] --task-id <suite task id> --variant <variant for selected suite> [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--risk-guard <layered|off>] [--output-dir <absolute>] [--profile-label <label>] [--as-of-date YYYY-MM-DD] [--travel-date YYYY-MM-DD] [--cua-socket <existing-socket>]\nThe suite defaults to life-business-20261015 and Risk Guard defaults to layered. Selecting off also freezes --risk-model off and requires --confirm-risk-guard-off in the prepared CLI argv. Output/profile/API-key environment-variable name/WeChat chat/existing CUA socket are read from ignored .tools/life-eval.local.json; supported values may be overridden. As-of date comes from Asia/Shanghai today and travel date defaults to tomorrow unless explicitly supplied. This creates an offline prepare package only.\n");
     return;
   }
   const args = parseStartArgs(argv);
   const prepared = await prepareFromStartArgs(args);
   const commands = buildNextCommands(prepared.packageDir, prepared.cuaSocket);
   process.stdout.write(`Prepared offline package: ${prepared.packageDir}\n`);
-  process.stdout.write(`Suite/task/variant: ${prepared.plan.suiteId}/${prepared.plan.task.id}/${prepared.plan.selection.variant}; model: ${prepared.plan.configuration.model}; profile: ${prepared.plan.selection.profileLabel}\n`);
+  process.stdout.write(`Suite/task/variant: ${prepared.plan.suiteId}/${prepared.plan.task.id}/${prepared.plan.selection.variant}; model: ${prepared.plan.configuration.model}; risk: ${prepared.plan.configuration.riskGuard}/${prepared.plan.configuration.riskModel}; profile: ${prepared.plan.selection.profileLabel}\n`);
   process.stdout.write(`Output folder for this attempt: ${prepared.outputAttemptDir}\n`);
   process.stdout.write(`Candidate CUA driver file: version ${prepared.plan.configuration.cuaDriver.version}, source ${prepared.plan.configuration.cuaDriver.sourceCommit}, SHA-256 ${prepared.plan.configuration.cuaDriver.sha256} (file only; running-daemon identity remains pending human preflight).\n`);
   process.stdout.write(`Review receipt remains pending: ${join(prepared.packageDir, "review.json")}\n`);

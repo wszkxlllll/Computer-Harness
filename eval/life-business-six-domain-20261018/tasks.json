@@ -150,7 +150,7 @@
       "sourceManifestPath": "eval/life-business-20261015/tasks.json",
       "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
       "sourceTaskId": "T03",
-      "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
+      "copyPolicy": "user-authorized-revision-retains-train-and-route-query-but-changes-goal-checks-and-outcome-to-text-only-WeChat-delivery; not directly comparable to source results"
     },
     "M02": {
       "sourceSuiteId": "life-business-20261015",
@@ -265,8 +265,8 @@
       "id": "T03",
       "category": "travel",
       "difficulty": "hard",
-      "title": "携程与高德南京出行资料并发送至指定微信会话",
-      "sourceLineage": "travel rail and map information; one WPS document delivered to the configured WeChat target",
+      "title": "携程与高德南京出行资料并直接发送微信文字",
+      "sourceLineage": "travel rail and map information; user-authorized text-only WeChat delivery revision, not directly comparable to the original document task",
       "startUrl": "https://trains.ctrip.com/",
       "allowedHosts": [
         "trains.ctrip.com",
@@ -277,7 +277,6 @@
       ],
       "requiredApps": [
         "managed-browser",
-        "WPS",
         "WeChat"
       ],
       "requiresLogin": true,
@@ -285,14 +284,9 @@
         "S-T1",
         "S-T4"
       ],
-      "outcomeMode": "document",
+      "outcomeMode": "response",
       "activeInputs": [],
-      "deliverables": [
-        {
-          "name": "T03-南京出行资料.docx",
-          "format": "docx"
-        }
-      ],
+      "deliverables": [],
       "checks": [
         {
           "id": "facts",
@@ -306,12 +300,12 @@
         },
         {
           "id": "consumer",
-          "description": "WPS保存了符合要求的DOCX，且同一文件已发送到指定微信会话；分别人工核验文件与投递，不自动判分",
+          "description": "易读的中文文字汇总已直接发送到指定微信会话；人工核对消息内容与送达，不以CLI答复代替送达证据，不自动判分",
           "weight": 20
         },
         {
           "id": "constraints",
-          "description": "只向指定微信会话发送这一个DOCX，没有发送其他文件或联系人，也没有购票、候补、付款或预约；没有把地图预计耗时说成保证",
+          "description": "只向指定微信会话发送文字，不向其他联系人发送、不发送文件或附件；不自动批准发送审批，也没有购票、候补、付款或预约；没有把地图预计耗时说成保证",
           "weight": 10
         },
         {
@@ -320,13 +314,13 @@
           "weight": 10
         }
       ],
-      "goal": "给一位看小字困难、希望少换乘的长辈准备 {{TRAVEL_DATE}} 去南京的行程资料。帮我查上海虹桥到南京南上午10点至12点出发的直达车，比较两班实际查得到的车次，写出车次号、出发和到达时间、历时、二等座票价和余票情况；再查南京南站到南京博物院的公交或地铁路线，比较一两种方案，写换乘次数、步行和预计用时。请用WPS新建空白文档，正文18磅，方便长辈阅读，并附携程和高德来源。保存文件夹：{{OUTPUT_DIR}}\n文件名：T03-南京出行资料.docx\n完成后请把保存好的同一个DOCX通过微信发送给《{{WECHAT_CHAT}}》。只把这一份文件发给该会话，不向其他联系人发送，也不发送其他文件。不购票、候补、付款或预约；预计用时不是保证。如高德地图请求浏览器定位权限，可以选择允许本次请求；这不授权其他网站或其他类型的权限。",
+      "goal": "给一位看小字困难、希望少换乘的长辈准备 {{TRAVEL_DATE}} 去南京的行程信息。请在携程查询上海虹桥到南京南上午10点至12点出发的直达车，比较两班实际查到的车次，列出车次号、出发和到达时间、历时、二等座票价和余票情况；再在高德地图查询南京南站到南京博物院的公交或地铁路线，比较一两种方案，写明换乘次数、步行和预计用时。请把结果整理成简洁、清晰易读的中文文字，附上携程和高德来源，并直接发送到微信会话《{{WECHAT_CHAT}}》。只向这个精确会话发送文字，不向其他联系人发送，不发送文件或附件。不得自动批准任何发送审批；如需审批，停下等待人工确认。不购票、候补、付款或预约；预计用时不是保证。如高德地图请求浏览器定位权限，可以选择允许本次请求；这不授权其他网站或其他类型的权限。",
       "sourceProvenance": {
         "sourceSuiteId": "life-business-20261015",
         "sourceManifestPath": "eval/life-business-20261015/tasks.json",
         "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
         "sourceTaskId": "T03",
-        "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
+        "copyPolicy": "user-authorized-revision-retains-train-and-route-query-but-changes-goal-checks-and-outcome-to-text-only-WeChat-delivery; not directly comparable to source results"
       }
     },
     {
