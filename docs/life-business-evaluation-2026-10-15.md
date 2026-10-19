@@ -124,6 +124,14 @@ Sol 最终只读审查 GO，未发现本轮新增阻塞性 P1/P2：确认 off �
 
 两个成功 Run 后受测持久 profile 为 ready、无仍占用该 profile 的浏览器进程；原候选 CUA 二进制及哈希未替换。手机入口边界：全桌面＋跨 APP 默认 grounding off，原生窗口沿用 off 默认；独立受管浏览器目标在 RemoteRunApi 中仍显式请求 hybrid，保留原单窗口语义，不能写成所有入口强制关闭。CLI 显式 auto/DOM/hybrid 属于主动开启。Preview 默认风险模型关闭适用于 Host 默认配置，不限制开发者显式选择模型审查；本轮不改扫描规则或增加新审批字段。
 
+#### PR42 CI 跟进（2026-10-19）
+
+首轮 CI `39195058744` 的 Windows 通过，macOS 与两组 Ubuntu 均在 Node 评测脚本的来源摘要断言失败，不是 GUI、Provider 或权限失败。根和 Luna 核对同一文本来源：Windows CRLF 原字节摘要 `fc6f…`，规范 LF 后 `c808…`，与 CI 读到的 LF 摘要一致。此前清单写入了 Windows 工作树字节摘要，因此跨平台不一致。
+
+修正只对 UTF-8 来源文本摘要规范 CRLF/CR 为 LF，并更新当前六域清单的顶层及任务副本来源摘要；Goal、评分答案及 CP02 真值隔离不变。保留原 sha256、冻结包原始字节／源码／构建指纹和驱动二进制哈希；既有冻结包须重新 prepare，原运行记录不改。来源测试现检查全部 manifest/task-cards/synthetic-inputs 路径和任务副本，另验证 LF/CRLF/CR 相同，但普通字符、尾空格和末尾换行变化仍改变摘要，未通过删断言绕过核验。
+
+Luna 14/14、根独立 14/14 通过，Sol 只读复审 GO；此修复不构建、不重启、不替换 Preview Host42184，也没有桌面或付费 API 调用。推送后实际 CI 状态另核对，不能把本地通过说成远端已绿。PR41 在独立 worktree 整改，保留 PR42 的输入／坐标、默认 off、无障碍和本地 Guard 边界；尚不合并或部署该候选。
+
 ### 最小修复顺序
 
 1. 保留现版本与本日全部Run。先加Windows非1:1窗口capture→desktop回归：缩小capture、非零窗口origin、DOM与UIA同控件；明确local capture→native→desktop的转换。公开bbox与原桌面图对齐，producerViewport/dispatchBBox仍保留用于执行的窗口局部尺度。

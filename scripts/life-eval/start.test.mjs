@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SIX_DOMAIN_SUITE_ID, SIX_DOMAIN_VARIANTS, SUITE_ID, manifestPathForSuite, sha256 } from "./common.mjs";
+import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SIX_DOMAIN_SUITE_ID, SIX_DOMAIN_VARIANTS, SUITE_ID, manifestPathForSuite, sha256, sha256CanonicalText } from "./common.mjs";
 import { createPlan, renderGoal } from "./prepare.mjs";
 import {
   beijingDate,
@@ -25,6 +25,15 @@ const fixtureConfig = {
   candidateDriverSource: "7852ab1",
   envFilePath: join(tmpdir(), "life-eval-private-fixture.env"),
 };
+
+test("canonical text fingerprints are stable across CRLF, CR, and LF checkouts", () => {
+  const lf = "first line\nsecond line\n";
+  assert.equal(sha256CanonicalText(lf.replace(/\n/gu, "\r\n")), sha256CanonicalText(lf));
+  assert.equal(sha256CanonicalText(lf.replace(/\n/gu, "\r")), sha256CanonicalText(lf));
+  assert.notEqual(sha256CanonicalText("First line\nsecond line\n"), sha256CanonicalText(lf));
+  assert.notEqual(sha256CanonicalText("first line \nsecond line\n"), sha256CanonicalText(lf));
+  assert.notEqual(sha256CanonicalText(lf.slice(0, -1)), sha256CanonicalText(lf));
+});
 
 test("start derives today's Beijing date and tomorrow independent of host timezone", () => {
   const justAfterBeijingMidnight = new Date("2026-10-14T16:30:00.000Z");
@@ -317,7 +326,21 @@ test("six-domain suite preserves source goals and provenance while isolating CP0
   const revisedT03 = manifest.tasks.find((task) => task.id === "T03");
   const originalT03 = oldManifest.tasks.find((task) => task.id === "T03");
   assert.equal(revisedT03.sourceProvenance.sourceSuiteId, oldManifest.suiteId);
-  assert.equal(revisedT03.sourceProvenance.sourceManifestSha256, sha256(await readFile(MANIFEST_PATH)));
+  for (const [taskId, provenance] of Object.entries(manifest.provenance)) {
+    const task = manifest.tasks.find((candidate) => candidate.id === taskId);
+    assert.ok(task, `${taskId} provenance must refer to a manifest task`);
+    for (const [pathField, hashField] of [
+      ["sourceManifestPath", "sourceManifestSha256"],
+      ["sourceTaskCardsPath", "sourceTaskCardsSha256"],
+      ["sourceSyntheticInputsPath", "sourceSyntheticInputsSha256"],
+    ]) {
+      const sourcePath = provenance[pathField];
+      if (typeof sourcePath !== "string") continue;
+      const expectedHash = sha256CanonicalText(await readFile(join(ROOT, sourcePath), "utf8"));
+      assert.equal(provenance[hashField], expectedHash, `${taskId} ${hashField} must fingerprint canonical UTF-8 text`);
+      assert.equal(task.sourceProvenance?.[hashField], expectedHash, `${taskId} task provenance must match the suite provenance`);
+    }
+  }
   assert.equal(manifest.provenance.T03.copyPolicy, revisedT03.sourceProvenance.copyPolicy);
   assert.match(revisedT03.sourceProvenance.copyPolicy, /user-authorized-revision/u);
   assert.match(revisedT03.sourceProvenance.copyPolicy, /not directly comparable/u);

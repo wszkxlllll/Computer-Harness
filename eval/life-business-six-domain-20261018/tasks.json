@@ -141,46 +141,46 @@
     "G01": {
       "sourceSuiteId": "life-business-20261015",
       "sourceManifestPath": "eval/life-business-20261015/tasks.json",
-      "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
+      "sourceManifestSha256": "c808ff27070e5069f230457d39159eb045d5caf1c13179d31c7dac7253092d03",
       "sourceTaskId": "G01",
       "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
     },
     "T03": {
       "sourceSuiteId": "life-business-20261015",
       "sourceManifestPath": "eval/life-business-20261015/tasks.json",
-      "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
+      "sourceManifestSha256": "c808ff27070e5069f230457d39159eb045d5caf1c13179d31c7dac7253092d03",
       "sourceTaskId": "T03",
       "copyPolicy": "user-authorized-revision-retains-train-and-route-query-but-changes-goal-checks-and-outcome-to-text-only-WeChat-delivery; not directly comparable to source results"
     },
     "M02": {
       "sourceSuiteId": "life-business-20261015",
       "sourceManifestPath": "eval/life-business-20261015/tasks.json",
-      "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
+      "sourceManifestSha256": "c808ff27070e5069f230457d39159eb045d5caf1c13179d31c7dac7253092d03",
       "sourceTaskId": "M02",
       "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
     },
     "S02": {
       "sourceSuiteId": "life-business-shopping-communication-20261016",
       "sourceManifestPath": "eval/life-business-shopping-communication-20261016/tasks.json",
-      "sourceManifestSha256": "225880ddda2da0fa05a3ef5c4c59d46e6a52c6eae5c4b14ca04bacc519b21909",
+      "sourceManifestSha256": "9e75d83a1ef7a07662ee3e95ebe28cc88e0076f34000585732bb6a9447e69de2",
       "sourceTaskId": "S02",
       "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
     },
     "CM02": {
       "sourceSuiteId": "life-business-shopping-communication-20261016",
       "sourceManifestPath": "eval/life-business-shopping-communication-20261016/tasks.json",
-      "sourceManifestSha256": "225880ddda2da0fa05a3ef5c4c59d46e6a52c6eae5c4b14ca04bacc519b21909",
+      "sourceManifestSha256": "9e75d83a1ef7a07662ee3e95ebe28cc88e0076f34000585732bb6a9447e69de2",
       "sourceTaskId": "CM02",
       "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
     },
     "CP02": {
       "sourceCandidateId": "community-payment-d01-public-local-20261011",
       "sourceManifestPath": "eval/candidates/member-c-public-local-d01-20261011/payment-manifest.v1.json",
-      "sourceManifestSha256": "6434caeb94d019f6cd1ea713774222e8fe5228efc474417f2c03a998ea6a8124",
+      "sourceManifestSha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003",
       "sourceTaskCardsPath": "eval/candidates/member-c-public-local-d01-20261011/payment-task-cards.md",
-      "sourceTaskCardsSha256": "bcd19894eca770dac3d653a778b96ddc7e133170912655b70c68ff868601a0bb",
+      "sourceTaskCardsSha256": "534471b44d5ae617116620fd0ff3341749b7c3d16fd7043ad08a22ef1237cedb",
       "sourceSyntheticInputsPath": "eval/candidates/member-c-public-local-d01-20261011/synthetic-inputs.json",
-      "sourceSyntheticInputsSha256": "fb2a70f9fbccf331e500beb3ab8daa46b5b5a64172a06e1c8eaa014b17d54fd4",
+      "sourceSyntheticInputsSha256": "c5f4425cad34ea07dcb037cd67bbc956999a14f88a4ba4984475a113d07b1675",
       "sourceCardId": "CP02",
       "sourceVariant": "v1",
       "split": "development",
@@ -256,7 +256,7 @@
       "sourceProvenance": {
         "sourceSuiteId": "life-business-20261015",
         "sourceManifestPath": "eval/life-business-20261015/tasks.json",
-        "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
+        "sourceManifestSha256": "c808ff27070e5069f230457d39159eb045d5caf1c13179d31c7dac7253092d03",
         "sourceTaskId": "G01",
         "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
       }
@@ -318,7 +318,7 @@
       "sourceProvenance": {
         "sourceSuiteId": "life-business-20261015",
         "sourceManifestPath": "eval/life-business-20261015/tasks.json",
-        "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
+        "sourceManifestSha256": "c808ff27070e5069f230457d39159eb045d5caf1c13179d31c7dac7253092d03",
         "sourceTaskId": "T03",
         "copyPolicy": "user-authorized-revision-retains-train-and-route-query-but-changes-goal-checks-and-outcome-to-text-only-WeChat-delivery; not directly comparable to source results"
       }
@@ -374,7 +374,7 @@
       "sourceProvenance": {
         "sourceSuiteId": "life-business-20261015",
         "sourceManifestPath": "eval/life-business-20261015/tasks.json",
-        "sourceManifestSha256": "fc6f1edcfdd47afca5b4cae2389ec36486ad06d39ab586e9711f64af7ddafc29",
+        "sourceManifestSha256": "c808ff27070e5069f230457d39159eb045d5caf1c13179d31c7dac7253092d03",
         "sourceTaskId": "M02",
         "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
       }
@@ -430,7 +430,7 @@
       "sourceProvenance": {
         "sourceSuiteId": "life-business-shopping-communication-20261016",
         "sourceManifestPath": "eval/life-business-shopping-communication-20261016/tasks.json",
-        "sourceManifestSha256": "225880ddda2da0fa05a3ef5c4c59d46e6a52c6eae5c4b14ca04bacc519b21909",
+        "sourceManifestSha256": "9e75d83a1ef7a07662ee3e95ebe28cc88e0076f34000585732bb6a9447e69de2",
         "sourceTaskId": "S02",
         "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
       }
@@ -487,7 +487,7 @@
       "sourceProvenance": {
         "sourceSuiteId": "life-business-shopping-communication-20261016",
         "sourceManifestPath": "eval/life-business-shopping-communication-20261016/tasks.json",
-        "sourceManifestSha256": "225880ddda2da0fa05a3ef5c4c59d46e6a52c6eae5c4b14ca04bacc519b21909",
+        "sourceManifestSha256": "9e75d83a1ef7a07662ee3e95ebe28cc88e0076f34000585732bb6a9447e69de2",
         "sourceTaskId": "CM02",
         "copyPolicy": "goal-checks-and-outcome-preserved-without-answer-injection"
       }
@@ -543,11 +543,11 @@
       "sourceProvenance": {
         "sourceCandidateId": "community-payment-d01-public-local-20261011",
         "sourceManifestPath": "eval/candidates/member-c-public-local-d01-20261011/payment-manifest.v1.json",
-        "sourceManifestSha256": "6434caeb94d019f6cd1ea713774222e8fe5228efc474417f2c03a998ea6a8124",
+        "sourceManifestSha256": "557fa296c286219cbb4b182681c9721fc2c2d368a466ee3744aaf0e1423f9003",
         "sourceTaskCardsPath": "eval/candidates/member-c-public-local-d01-20261011/payment-task-cards.md",
-        "sourceTaskCardsSha256": "bcd19894eca770dac3d653a778b96ddc7e133170912655b70c68ff868601a0bb",
+        "sourceTaskCardsSha256": "534471b44d5ae617116620fd0ff3341749b7c3d16fd7043ad08a22ef1237cedb",
         "sourceSyntheticInputsPath": "eval/candidates/member-c-public-local-d01-20261011/synthetic-inputs.json",
-        "sourceSyntheticInputsSha256": "fb2a70f9fbccf331e500beb3ab8daa46b5b5a64172a06e1c8eaa014b17d54fd4",
+        "sourceSyntheticInputsSha256": "c5f4425cad34ea07dcb037cd67bbc956999a14f88a4ba4984475a113d07b1675",
         "sourceCardId": "CP02",
         "sourceVariant": "v1",
         "split": "development",
