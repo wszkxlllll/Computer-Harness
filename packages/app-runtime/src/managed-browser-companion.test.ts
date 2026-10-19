@@ -70,7 +70,7 @@ interface FixtureOptions {
   readonly companion?: boolean;
   readonly initialTarget?: CuaWindowTarget;
   readonly allowedTargets?: readonly CuaWindowTarget[];
-  readonly initialGrounding?: "hybrid-catalog-v1";
+  readonly initialGrounding?: "uia-catalog-v1" | "hybrid-catalog-v1";
   readonly managedBrowserUrl?: string;
   readonly profileMode?: "ephemeral" | "persistent";
   readonly profileLabel?: string;
@@ -840,6 +840,75 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(observations[0]?.observation.surfaceRef.kind).toBe("desktop");
       expect(report.summary.grounding).toBe("off");
       expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["off", undefined, "off"],
+    ["UIA-only", "uia-catalog-v1", "uia-catalog-v1"],
+  ] as const)("keeps ordinary visual click, type, and Ctrl+L URL typing available after switching to the managed browser with grounding %s", async (_mode, initialGrounding, expectedGrounding) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-native-to-browser-visual-input-"));
+    const fixture = await createFixture(outputDir, {
+      companion: true,
+      initialTarget: NATIVE_TARGET,
+      allowedTargets: [NATIVE_TARGET, BROWSER_TARGET],
+      ...(initialGrounding === undefined ? {} : { initialGrounding }),
+      managedBrowserUrl: "https://fixture.example/visual-only",
+      steps: [
+        { kind: "list", callId: "visual-switch-list" },
+        { kind: "switch", callId: "visual-switch-to-browser", listCallId: "visual-switch-list", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "visual-browser-click", expectedEnabled: true },
+        { kind: "action", callId: "visual-browser-type", name: "type", arguments: { text: "visual input" } },
+        { kind: "action", callId: "visual-browser-address-shortcut", name: "hotkey", arguments: { keys: ["CTRL", "L"] } },
+        { kind: "action", callId: "visual-browser-address-type", name: "type", arguments: { text: "https://example.test/" } },
+        { kind: "finish" },
+      ],
+    });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
+      const report = await handle.report();
+      const events = handle.controller.getEvents();
+      expect(outcome).toBe("succeeded");
+      expect(fixture.metrics.delegateOptions[0]).toMatchObject({
+        windowTarget: NATIVE_TARGET,
+        browserTarget: { windowTarget: BROWSER_TARGET },
+        grounding: expectedGrounding,
+        windowSwitch: "opened-windows-v1",
+      });
+      expect(fixture.metrics.host.transports).toBe(0);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      expect(fixture.metrics.delegateCalls.filter((call) => call.name === "click")).toMatchObject([
+        { input: { target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId }, x: 20, y: 20 } },
+      ]);
+
+      const typeProposal = events.find((event) => event.type === "action.proposed" && event.callId === "visual-browser-type");
+      const typeTerminal = events.find((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") &&
+        typeProposal?.type === "action.proposed" && event.receipt.actionId === typeProposal.action.actionId);
+      expect(typeTerminal).toMatchObject({ type: "action.execution.completed", receipt: { status: "completed" } });
+      const addressTypeProposal = events.find((event) => event.type === "action.proposed" && event.callId === "visual-browser-address-type");
+      const addressTypeTerminal = events.find((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") &&
+        addressTypeProposal?.type === "action.proposed" && event.receipt.actionId === addressTypeProposal.action.actionId);
+      expect(addressTypeTerminal).toMatchObject({ type: "action.execution.completed", receipt: { status: "completed" } });
+      expect(fixture.metrics.delegateCalls.filter((call) => call.name === "type_text")).toMatchObject([
+        { input: { target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId }, text: "visual input" } },
+        { input: { target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId }, text: "https://example.test/" } },
+      ]);
+      const addressShortcuts = fixture.metrics.delegateCalls.filter((call) => call.name === "press_key" || call.name === "hotkey");
+      expect(addressShortcuts).toHaveLength(1);
+      const addressShortcut = addressShortcuts[0];
+      expect(addressShortcut?.input).toMatchObject({
+        target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        delivery_mode: "foreground",
+      });
+      if (addressShortcut?.name === "press_key") {
+        expect(addressShortcut.input).toMatchObject({ key: "L", modifiers: ["ctrl"] });
+      } else {
+        expect(addressShortcut?.input).toMatchObject({ keys: ["CTRL", "L"] });
+      }
+      expect(report.summary.grounding).toBe(expectedGrounding);
     } finally {
       await fixture.session.close();
       await rm(outputDir, { recursive: true, force: true });
