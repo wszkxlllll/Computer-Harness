@@ -57,6 +57,86 @@ export function assertFreezeMatches(plan, packageDir, manifestBytes, currentSour
   if (currentBuiltCli.sha256 !== plan.frozenState.builtCliFingerprint.sha256) throw new Error("built CLI fingerprint changed; prepare a new package");
 }
 
+function oneFrozenFlagValue(argv, flag) {
+  const indexes = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === flag) indexes.push(index);
+  }
+  if (indexes.length !== 1 || typeof argv[indexes[0] + 1] !== "string") {
+    throw new Error(`frozen CLI argv must contain exactly one ${flag} value`);
+  }
+  return argv[indexes[0] + 1];
+}
+
+export function assertRiskPolicy(plan) {
+  const configuration = plan.configuration;
+  const argv = plan.cli?.argvTemplate;
+  const riskGuard = configuration?.riskGuard;
+  if (riskGuard !== "off" && riskGuard !== "layered") throw new Error("frozen riskGuard must be off or layered");
+  if (!Array.isArray(argv)) throw new Error("plan does not contain the frozen CLI argv template");
+  const riskModel = riskGuard === "off" ? "off" : "same";
+  if (configuration.riskModel !== riskModel) throw new Error("frozen risk model does not match riskGuard");
+  const riskModelRequestsEnabled = riskModel !== "off";
+  if (configuration.riskModelRequestsEnabled !== undefined && configuration.riskModelRequestsEnabled !== riskModelRequestsEnabled) {
+    throw new Error("frozen risk-model request metadata does not match riskModel");
+  }
+  if (riskGuard === "off" && configuration.riskModelRequestsEnabled !== false) {
+    throw new Error("riskGuard off requires frozen risk-model requests to be disabled");
+  }
+  if (configuration.confirmRiskGuardOff === true && riskGuard !== "off") {
+    throw new Error("riskGuard-off confirmation is not applicable to layered mode");
+  }
+  if (riskGuard === "off" && configuration.confirmRiskGuardOff !== true) {
+    throw new Error("riskGuard off requires frozen confirmation metadata");
+  }
+  const limitStatus = configuration.riskModelRequestLimitStatus;
+  if (limitStatus !== undefined && limitStatus !== (riskModelRequestsEnabled ? "active" : "inactive_risk_model_off")) {
+    throw new Error("frozen risk request limit metadata does not match riskModel");
+  }
+  if (riskGuard === "off" && limitStatus !== "inactive_risk_model_off") {
+    throw new Error("riskGuard off requires the retained risk request cap to be marked inactive");
+  }
+
+  if (oneFrozenFlagValue(argv, "--risk-guard") !== riskGuard || oneFrozenFlagValue(argv, "--risk-model") !== riskModel) {
+    throw new Error("frozen CLI risk flags do not match the plan configuration");
+  }
+  const confirmationCount = argv.filter((value) => value === "--confirm-risk-guard-off").length;
+  if (confirmationCount !== (riskGuard === "off" ? 1 : 0)) {
+    throw new Error("frozen CLI Risk Guard confirmation does not match the plan configuration");
+  }
+
+  const limits = ["maxModelRequests", "maxRiskModelRequests", "combinedRequestCeiling", "maxActions", "riskTimeoutMs", "cleanupDeadlineMs"];
+  for (const key of limits) {
+    if (!Number.isSafeInteger(configuration[key]) || configuration[key] < 1) throw new Error(`frozen ${key} must be a positive integer`);
+  }
+  if (configuration.combinedRequestCeiling !== configuration.maxModelRequests + configuration.maxRiskModelRequests) {
+    throw new Error("frozen combined request ceiling does not match the main and risk request caps");
+  }
+  for (const [key, flag] of [
+    ["maxModelRequests", "--max-model-requests"],
+    ["maxRiskModelRequests", "--risk-max-model-requests"],
+    ["maxActions", "--max-steps"],
+    ["riskTimeoutMs", "--risk-timeout-ms"],
+    ["cleanupDeadlineMs", "--cleanup-deadline-ms"],
+  ]) {
+    if (oneFrozenFlagValue(argv, flag) !== String(configuration[key])) {
+      throw new Error(`frozen CLI ${flag} does not match the plan limits`);
+    }
+  }
+}
+
+export function riskPolicyMetadata(plan) {
+  const configuration = plan.configuration;
+  return {
+    riskGuard: configuration.riskGuard,
+    riskModel: configuration.riskModel,
+    confirmRiskGuardOff: configuration.confirmRiskGuardOff ?? false,
+    riskModelRequestsEnabled: configuration.riskModelRequestsEnabled ?? configuration.riskModel !== "off",
+    riskModelRequestLimitStatus: configuration.riskModelRequestLimitStatus ?? (configuration.riskModel === "off" ? "inactive_risk_model_off" : "active"),
+    maxRiskModelRequests: configuration.maxRiskModelRequests,
+  };
+}
+
 export async function verifyActiveInputs(activeInputs, manifestPath) {
   if (!Array.isArray(activeInputs)) throw new Error("plan activeInputs must be an array");
   const suiteDir = dirname(manifestPath);
@@ -87,6 +167,7 @@ export async function loadAndVerifyPackage(packageDir, { manifestPath, root = RO
     throw new Error("review.json package/profile does not match frozen plan");
   }
   if (review.planSha256 !== sha256(planBytes)) throw new Error("plan.json changed after prepare; prepare a new package");
+  assertRiskPolicy(plan);
   const selectedManifestPath = manifestPath ?? manifestPathForSuite(plan.suiteId, root);
   const manifestBytes = await readFile(selectedManifestPath);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -224,6 +305,7 @@ function printDryRun(plan, argv, socketPlaceholder) {
     outcomeMode: plan.task.outcomeMode,
     variant: plan.selection.variant,
     model: plan.configuration.model,
+    riskPolicy: riskPolicyMetadata(plan),
     deepseekEnabled: false,
     arkEnabled: false,
     providerEnabled: false,
@@ -234,6 +316,7 @@ function printDryRun(plan, argv, socketPlaceholder) {
     limits: {
       mainRequests: plan.configuration.maxModelRequests,
       riskRequests: plan.configuration.maxRiskModelRequests,
+      riskModelRequestsEnabled: plan.configuration.riskModelRequestsEnabled ?? plan.configuration.riskModel !== "off",
       combinedCeiling: plan.configuration.combinedRequestCeiling,
       actions: plan.configuration.maxActions,
       timeoutMs: plan.configuration.runTimeoutMs,
@@ -253,7 +336,22 @@ function consumerEvidence(plan, stdoutLog, stderrLog) {
     fullRawHttpWireCaptured: false,
   };
   if (plan.task.outcomeMode === "response") {
-    return { ...base, primaryEvidence: "ordinary CLI response/logs and run trajectory; human verifies content and visible browser result page" };
+    const wechatDelivery = Array.isArray(plan.task.requiredApps) && plan.task.requiredApps.includes("WeChat")
+      ? {
+          targetChat: plan.task.wechatChat,
+          fileName: null,
+          status: "pending_human_confirmation",
+          automaticScoring: false,
+          evidence: "Human verifies the text message was sent to the exact target; no attachment is expected and the runner does not inspect chats or send state.",
+        }
+      : null;
+    return {
+      ...base,
+      ...(wechatDelivery === null ? {} : { wechatDelivery }),
+      primaryEvidence: wechatDelivery === null
+        ? "ordinary CLI response/logs and run trajectory; human verifies content and visible browser result page"
+        : "ordinary CLI response/logs and run trajectory verify content only; human must separately confirm visible delivery of the text message to the exact WeChat target; CLI output alone is not send evidence",
+    };
   }
   if (plan.task.outcomeMode === "document") {
     const wechatDelivery = plan.task.requiredApps.includes("WeChat")
@@ -302,6 +400,7 @@ export function buildLiveAttemptRecord({ plan, review, attemptDir, cuaSocket, su
     shell: false,
     envFilePath: plan.cli.envFilePath ?? null,
     cuaDriver: plan.configuration.cuaDriver,
+    riskPolicy: riskPolicyMetadata(plan),
     cuaDaemonPreflight: review.preflight.cuaDaemon ?? null,
     envPolicy: suite.provider === "ark"
       ? `after live authorization, runner reads only frozen ${plan.configuration.environment.apiKeyEnvName} from the frozen env-file, maps it to ARK_API_KEY, and records no value or fallback; child CLI receives env-file for its existing settings`
@@ -774,6 +873,17 @@ export async function runPackage(options, { root = ROOT, manifestPath, confirm =
       envFileRead: false,
       providerEnabled: false,
       model: plan.configuration.model,
+      riskPolicy: riskPolicyMetadata(plan),
+      limits: {
+        mainRequests: plan.configuration.maxModelRequests,
+        riskRequests: plan.configuration.maxRiskModelRequests,
+        riskModelRequestsEnabled: plan.configuration.riskModelRequestsEnabled ?? plan.configuration.riskModel !== "off",
+        combinedCeiling: plan.configuration.combinedRequestCeiling,
+        actions: plan.configuration.maxActions,
+        timeoutMs: plan.configuration.runTimeoutMs,
+        outputTokens: plan.configuration.maxOutputTokens,
+        requestTimeoutMs: plan.configuration.requestTimeoutMs,
+      },
       cuaSocketPlaceholder: options["--cua-socket"] === undefined,
       argv,
     };

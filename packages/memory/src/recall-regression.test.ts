@@ -28,9 +28,13 @@ describe("Run Memory recall reliability", () => {
     const write = createMemoryRunModule(runId, new InMemoryMemoryStore(), { mode: "facts" }).tools.find((tool) => tool.name === "memory_write_fact");
     const schema = write?.inputSchema as { properties?: Record<string, { description?: string }> } | null | undefined;
     const valueDescription = schema?.properties?.value?.description;
-    expect(write?.description).toContain("source and inspected range");
+    expect(write?.description).toContain("source URL or unknown");
+    expect(write?.description).toContain("row/column/caption");
+    expect(write?.description).toContain("inspected range");
+    expect(write?.description).toContain("observation ID and verified or unknown with reason");
     expect(write?.description).toContain("Absence from one current view does not prove absence elsewhere");
-    expect(valueDescription).toContain("current screen/page/section");
+    expect(valueDescription).toContain("Limit absence claims to the inspected screen/page/section");
+    expect(valueDescription).toContain("absence from this view does not establish absence elsewhere");
   });
 
   it("supersedes a corrected fact and excludes facts after their entity is invalidated", async () => {

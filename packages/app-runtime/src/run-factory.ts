@@ -101,7 +101,6 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     validateDeepseekMaxOutputTokens(input.arkMaxOutputTokens);
   }
   const runId = input.runId ?? generatedRunId();
-  const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
   if (companionRequested && input.windowSwitch !== "opened-windows-v1") {
     throw new Error("managed browser companion requires the opened-windows-v1 Run opt-in");
@@ -119,11 +118,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       input.computer.hybridNativeWebDocumentTargets.recoveryTarget.windowId !== input.computer.recoveryWindowTarget.windowId)) {
     throw new Error("hybrid native-web recovery requires an ephemeral managed Browser, an explicit URL, and exact Host-authorized window targets");
   }
-  if (companionRequested && browserInitialGrounding && !hybridNativeWebDocumentRequested) {
-    throw new Error("managed browser companion cannot also be the initial browser target");
-  }
   const prepareManagedBrowserCompanion = companionRequested && input.windowSwitch === "opened-windows-v1";
-  const grounding = prepareManagedBrowserCompanion ? "hybrid-catalog-v1" : input.grounding ?? "off";
+  // The companion controls Host-owned Browser lifecycle and window scope; it
+  // must not silently opt a visual Run into UIA/DOM grounding.
+  const grounding = input.grounding ?? "off";
   const inputComputer = prepareManagedBrowserCompanion && input.computer.kind === "cua"
     ? {
       ...input.computer,

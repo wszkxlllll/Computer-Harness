@@ -75,10 +75,15 @@ export function prepareComputerRunAssembly(
 ): ComputerRunAssemblyPolicy {
   const effectiveConfig = effectiveComputerConfig(config, grounding, windowSwitch);
   validateComputerGrounding(effectiveConfig, grounding);
-  validateWindowSwitch(effectiveConfig, windowSwitch, grounding);
+  validateWindowSwitch(effectiveConfig, windowSwitch);
+  if (effectiveConfig.kind === "cua" && effectiveConfig.managedBrowserCompanion === true &&
+      grounding !== "dom-catalog-v1" && grounding !== "hybrid-catalog-v1") {
+    validateManagedBrowserConfig(effectiveConfig);
+  }
 
   const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
-  const windowScoped = effectiveConfig.kind === "cua" && (effectiveConfig.windowTarget !== undefined || managedGrounding);
+  const windowScoped = effectiveConfig.kind === "cua" &&
+    (effectiveConfig.windowTarget !== undefined || managedGrounding || windowSwitch === "opened-windows-v1");
   const groundingTools = grounding === "off"
     ? []
     : groundingComputerTools({ includeSelectOption: managedGrounding });
@@ -142,18 +147,13 @@ function effectiveComputerConfig(
 function validateWindowSwitch(
   config: ComputerBackendConfig,
   windowSwitch: NonNullable<import("./config.js").ResolvedRunConfig["windowSwitch"]>,
-  grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
 ): void {
   if (windowSwitch === "off") return;
   if (windowSwitch !== "opened-windows-v1") throw new Error("windowSwitch must be off or opened-windows-v1");
   if (config.kind !== "cua") throw new Error("windowSwitch opened-windows-v1 requires the CUA Computer");
   // An unbound CUA screen session is a supported starting mode too. Its
-  // inventory is still host-scoped, and model switching binds to an exact
-  // opened window before any targeted action is delivered.
-  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
-  if (config.managedBrowserCompanion === true && !managedGrounding) {
-    throw new Error("managed browser companion requires hybrid DOM grounding");
-  }
+  // inventory remains available without grounding, and switching binds to an
+  // exact opened window before any targeted action is delivered.
 }
 
 function validateComputerGrounding(
@@ -180,7 +180,7 @@ function validateManagedBrowserConfig(
   config: Extract<ComputerBackendConfig, { kind: "cua" }>,
   grounding?: "dom-catalog-v1" | "hybrid-catalog-v1",
 ): void {
-  const label = grounding === undefined ? "DOM/hybrid grounding" : `grounding ${grounding}`;
+  const label = grounding === undefined ? "managed browser Host" : `grounding ${grounding}`;
   if (!isManagedBrowserUrl(config.managedBrowserUrl)) {
     throw new Error(`${label} requires a credential-free http(s) managedBrowserUrl or exact about:blank`);
   }
@@ -286,10 +286,14 @@ export async function createComputer(
     });
   }
 
-  const managedBrowser = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
-  if (managedBrowser) validateManagedBrowserConfig(config);
-  const desktopCompanionGrounding = managedBrowser && config.managedBrowserCompanion === true &&
-    config.windowSwitch === "opened-windows-v1";
+  const managedGroundingMode = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1"
+    ? config.grounding
+    : undefined;
+  const managedGrounding = managedGroundingMode !== undefined;
+  const managedBrowserLifecycle = managedGrounding || config.managedBrowserCompanion === true;
+  if (managedBrowserLifecycle) validateManagedBrowserConfig(config, managedGroundingMode);
+  const desktopCompanionGrounding = config.grounding === "hybrid-catalog-v1" &&
+    config.managedBrowserCompanion === true && config.windowSwitch === "opened-windows-v1";
 
   const relationshipProbe = dependencies.windowRelationshipProbe !== undefined
     ? dependencies.windowRelationshipProbe ?? undefined
@@ -317,7 +321,7 @@ export async function createComputer(
     );
   }
 
-  if (!managedBrowser) {
+  if (!managedBrowserLifecycle) {
     return new cuaModule.CuaDriverComputer({
       socketPath: config.socketPath,
       screenshotDir: config.screenshotDir,
@@ -417,7 +421,9 @@ class ManagedBrowserComputer implements Computer {
         socketPath: this.options.config.socketPath,
         screenshotDir: this.options.config.screenshotDir,
         browserTarget: record.target,
-        domGroundingTransport: host.createTransport(),
+        ...(this.options.config.grounding === "dom-catalog-v1" || this.options.config.grounding === "hybrid-catalog-v1"
+          ? { domGroundingTransport: host.createTransport() }
+          : {}),
         ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
         ...(this.options.config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: this.options.config.recoveryWindowTarget }),
         ...(this.options.config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: this.options.config.recoverBoundWindowMissing }),

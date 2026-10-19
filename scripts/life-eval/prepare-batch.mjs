@@ -15,11 +15,27 @@ import {
   verifyCuaDriverBinary,
 } from "./common.mjs";
 import { loadLocalConfig, parseStartArgs, prepareFromStartArgs } from "./start.mjs";
+import { resolveRiskGuard } from "./prepare.mjs";
 
 export const SIX_DOMAIN_TASK_ORDER = Object.freeze(["G01", "T03", "M02", "S02", "CM02", "CP02"]);
 export const SIX_DOMAIN_ARM_CYCLE = Object.freeze(["A", "C", "D", "B"]);
-const VALUE_FLAGS = new Set(["--suite", "--output-dir", "--profile-label", "--as-of-date", "--travel-date", "--api-key-env", "--cua-socket"]);
+const VALUE_FLAGS = new Set(["--suite", "--output-dir", "--profile-label", "--as-of-date", "--travel-date", "--api-key-env", "--cua-socket", "--task-ids", "--risk-guard"]);
 const BOOLEAN_FLAGS = new Set(["--help"]);
+
+export function parseBatchTaskIds(value) {
+  const taskIds = value === undefined
+    ? [...SIX_DOMAIN_TASK_ORDER]
+    : Array.isArray(value)
+      ? [...value]
+      : typeof value === "string"
+        ? value.split(",")
+        : [];
+  if (taskIds.length === 0 || taskIds.some((taskId) => typeof taskId !== "string" || taskId.trim() !== taskId || !SIX_DOMAIN_TASK_ORDER.includes(taskId))) {
+    throw new Error(`--task-ids must be a comma-separated subset of ${SIX_DOMAIN_TASK_ORDER.join(",")}`);
+  }
+  if (new Set(taskIds).size !== taskIds.length) throw new Error("--task-ids must not contain duplicates");
+  return taskIds;
+}
 
 export function parseBatchArgs(argv) {
   const args = parseFlags(argv, {
@@ -30,11 +46,15 @@ export function parseBatchArgs(argv) {
   if ((args["--suite"] ?? SIX_DOMAIN_SUITE_ID) !== SIX_DOMAIN_SUITE_ID) {
     throw new Error(`prepare-batch only supports ${SIX_DOMAIN_SUITE_ID}`);
   }
+  args["--task-ids"] = parseBatchTaskIds(args["--task-ids"]);
+  args["--risk-guard"] = resolveRiskGuard(args["--risk-guard"]);
   return args;
 }
 
 export function buildInterleavedOrder(taskIds = SIX_DOMAIN_TASK_ORDER) {
-  return taskIds.flatMap((taskId, taskIndex) => {
+  const selectedTaskIds = parseBatchTaskIds(taskIds);
+  return selectedTaskIds.flatMap((taskId) => {
+    const taskIndex = SIX_DOMAIN_TASK_ORDER.indexOf(taskId);
     const rotation = taskIndex % SIX_DOMAIN_ARM_CYCLE.length;
     const armOrder = [
       ...SIX_DOMAIN_ARM_CYCLE.slice(rotation),
@@ -53,7 +73,8 @@ function assertSharedDateWindow(asOfDate, travelDate) {
   }
 }
 
-function createInitialBatch({ batchId, suiteId, outputRoot, asOfDate, travelDate, order }) {
+function createInitialBatch({ batchId, suiteId, outputRoot, asOfDate, travelDate, taskIds, riskGuard, order }) {
+  const riskModel = riskGuard === "off" ? "off" : "same";
   return {
     schemaVersion: 1,
     kind: "life-eval-offline-batch",
@@ -72,10 +93,17 @@ function createInitialBatch({ batchId, suiteId, outputRoot, asOfDate, travelDate
     outputRoot,
     asOfDate,
     travelDate,
-    taskOrder: [...SIX_DOMAIN_TASK_ORDER],
+    taskOrder: [...taskIds],
     armCycle: [...SIX_DOMAIN_ARM_CYCLE],
-    interleavePolicy: "For each task, rotate A-C-D-B by task index; adjacent transitions change one of supervision or Plan/Memory where possible.",
-    packages: order.map(({ taskId, variant }, index) => ({ index: index + 1, taskId, variant, packageId: null, packageDir: null, outputAttemptDir: null, humanPreflight: "pending" })),
+    interleavePolicy: "For each selected task, rotate A-C-D-B by its canonical index in the full six-task order; adjacent transitions change one of supervision or Plan/Memory where possible.",
+    riskPolicy: {
+      riskGuard,
+      riskModel,
+      confirmRiskGuardOff: riskGuard === "off",
+      riskModelRequestsEnabled: riskModel !== "off",
+      riskRequestCapBehavior: riskModel === "off" ? "positive per-task CLI cap is retained but no risk-model requests are made" : "risk-model requests use the frozen per-task cap",
+    },
+    packages: order.map(({ taskId, variant }, index) => ({ index: index + 1, taskId, variant, packageId: null, packageDir: null, outputAttemptDir: null, humanPreflight: "pending", riskPolicy: null })),
   };
 }
 
@@ -88,6 +116,9 @@ export async function prepareSixDomainBatch(args, dependencies = {}) {
   const suite = suiteDefinition(suiteId);
   if (suiteId !== SIX_DOMAIN_SUITE_ID) throw new Error(`prepare-batch only supports ${SIX_DOMAIN_SUITE_ID}`);
   assertSharedDateWindow(args["--as-of-date"], args["--travel-date"]);
+  const taskIds = parseBatchTaskIds(args["--task-ids"]);
+  const riskGuard = resolveRiskGuard(args["--risk-guard"]);
+  const riskModel = riskGuard === "off" ? "off" : "same";
 
   const config = dependencies.config ?? await loadLocalConfig(dependencies.configPath);
   const outputRootInput = args["--output-dir"] ?? config.outputDir;
@@ -109,11 +140,11 @@ export async function prepareSixDomainBatch(args, dependencies = {}) {
   if (sourceManifest.suiteId !== suiteId || !Array.isArray(sourceManifest.tasks)) {
     throw new Error(`task manifest must contain the selected suite ${suiteId}`);
   }
-  for (const taskId of SIX_DOMAIN_TASK_ORDER) {
+  for (const taskId of taskIds) {
     if (!sourceManifest.tasks.some((task) => task.id === taskId)) throw new Error(`task manifest is missing required task ${taskId}`);
   }
-  const t03 = sourceManifest.tasks.find((task) => task.id === "T03");
-  if (t03.requiredApps?.includes("WeChat") && t03.goal?.includes("{{WECHAT_CHAT}}")) {
+  const t03 = taskIds.includes("T03") ? sourceManifest.tasks.find((task) => task.id === "T03") : undefined;
+  if (t03?.requiredApps?.includes("WeChat") && t03.goal?.includes("{{WECHAT_CHAT}}")) {
     const chat = config.wechatChat;
     if (typeof chat !== "string" || chat.trim().length === 0 || chat.length > 120 || chat.trim() !== chat || /[\u0000-\u001f\u007f]/u.test(chat)) {
       throw new Error("six-domain batch requires the exact configured local WeChat target before any package is created");
@@ -122,13 +153,13 @@ export async function prepareSixDomainBatch(args, dependencies = {}) {
 
   const outputRoot = resolve(outputRootInput);
   const batchId = `six-domain-${args["--as-of-date"].replaceAll("-", "")}-${args["--travel-date"].replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
-  const order = buildInterleavedOrder();
+  const order = buildInterleavedOrder(taskIds);
   const root = dependencies.root ?? ROOT;
   const batchDir = join(outputRoot, suiteId, "_batches", batchId);
   const batchFile = join(batchDir, "batch.json");
   await mkdir(join(outputRoot, suiteId, "_batches"), { recursive: true });
   await mkdir(batchDir, { recursive: false });
-  const batch = createInitialBatch({ batchId, suiteId, outputRoot, asOfDate: args["--as-of-date"], travelDate: args["--travel-date"], order });
+  const batch = createInitialBatch({ batchId, suiteId, outputRoot, asOfDate: args["--as-of-date"], travelDate: args["--travel-date"], taskIds, riskGuard, order });
   await writeBatchManifest(batchFile, batch);
 
   const prepareOne = dependencies.prepareOne ?? ((startArgs) => prepareFromStartArgs(startArgs, {
@@ -147,6 +178,7 @@ export async function prepareSixDomainBatch(args, dependencies = {}) {
         "--profile-label", args["--profile-label"] ?? config.profileLabel,
         "--as-of-date", args["--as-of-date"],
         "--travel-date", args["--travel-date"],
+        "--risk-guard", riskGuard,
       ];
       for (const flag of ["--api-key-env", "--cua-socket"]) {
         if (args[flag] !== undefined) rawArgs.push(flag, args[flag]);
@@ -158,6 +190,17 @@ export async function prepareSixDomainBatch(args, dependencies = {}) {
       item.outputAttemptDir = prepared.outputAttemptDir;
       item.humanPreflight = prepared.review?.preflight?.status === "pending" ? "pending_human_review" : "check_package_review";
       item.supervision = prepared.plan?.configuration?.supervision ?? null;
+      if (prepared.plan?.configuration?.riskGuard !== undefined) {
+        item.riskPolicy = {
+          riskGuard: prepared.plan.configuration.riskGuard,
+          riskModel: prepared.plan.configuration.riskModel,
+          confirmRiskGuardOff: prepared.plan.configuration.confirmRiskGuardOff,
+          riskModelRequestsEnabled: prepared.plan.configuration.riskModelRequestsEnabled,
+          riskModelRequestLimitStatus: prepared.plan.configuration.riskModelRequestLimitStatus,
+          maxRiskModelRequests: prepared.plan.configuration.maxRiskModelRequests,
+          combinedRequestCeiling: prepared.plan.configuration.combinedRequestCeiling,
+        };
+      }
       item.planSha256 = prepared.review?.planSha256 ?? null;
       await writeBatchManifest(batchFile, batch);
     }
@@ -179,13 +222,13 @@ export async function prepareSixDomainBatch(args, dependencies = {}) {
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write(`Usage: node scripts/life-eval/prepare-batch.mjs --as-of-date YYYY-MM-DD --travel-date YYYY-MM-DD [--suite ${SIX_DOMAIN_SUITE_ID}] [--output-dir <absolute>] [--profile-label <label>] [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY>] [--cua-socket <existing-socket>]\nCreates 24 offline packages in a recorded interleaved order. It does not run them, inspect .env contents, start a GUI, or connect to CUA.\n`);
+    process.stdout.write(`Usage: node scripts/life-eval/prepare-batch.mjs --as-of-date YYYY-MM-DD --travel-date YYYY-MM-DD [--suite ${SIX_DOMAIN_SUITE_ID}] [--task-ids ${SIX_DOMAIN_TASK_ORDER.join(",")}] [--risk-guard <layered|off>] [--output-dir <absolute>] [--profile-label <label>] [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY>] [--cua-socket <existing-socket>]\nDefaults to all 24 packages. --task-ids selects a comma-separated subset; arm rotation keeps each task's position in the full suite order. Risk Guard defaults to layered; off freezes --risk-model off and --confirm-risk-guard-off, with the positive risk request cap retained but inactive. Preparation does not run packages, inspect .env contents, start a GUI, or connect to CUA.\n`);
     return;
   }
   const args = parseBatchArgs(argv);
   const result = await prepareSixDomainBatch(args);
   process.stdout.write(`Offline batch manifest: ${result.batchFile}\n`);
-  process.stdout.write(`Status: ${result.batch.status}; dates: ${result.batch.asOfDate}/${result.batch.travelDate}; live readiness: GUI preflight pending\n`);
+  process.stdout.write(`Status: ${result.batch.status}; packages: ${result.batch.packages.length}; dates: ${result.batch.asOfDate}/${result.batch.travelDate}; risk: ${result.batch.riskPolicy.riskGuard}/${result.batch.riskPolicy.riskModel}; live readiness: GUI preflight pending\n`);
   for (const item of result.batch.packages) {
     process.stdout.write(`${String(item.index).padStart(2, "0")} ${item.taskId}/${item.variant} ${item.packageDir} [${item.humanPreflight}]\n`);
   }

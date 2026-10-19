@@ -31,6 +31,7 @@ import {
 import {
   assertFreezeMatches,
   assertLiveAuthorization,
+  assertRiskPolicy,
   buildLiveAttemptRecord,
   buildLiveChildEnvironment,
   concreteArgv,
@@ -607,9 +608,12 @@ test("actual prepare package produces a default dry-run and cleans only its own 
     assert.equal(prepared.plan.task.id, "G03");
     assert.equal(prepared.plan.task.outcomeMode, "document");
     assert.equal(prepared.plan.configuration.windowSwitch, "opened-windows-v1");
-    assert.equal(prepared.plan.configuration.grounding, "hybrid-catalog-v1");
+    assert.equal(prepared.plan.configuration.grounding, "off");
     assert.equal(prepared.plan.configuration.requestedGrounding, "off");
     assert.equal(prepared.plan.configuration.managedBrowserCompanion, true);
+    const groundingArg = prepared.plan.cli.argvTemplate.indexOf("--grounding");
+    assert.notEqual(groundingArg, -1);
+    assert.equal(prepared.plan.cli.argvTemplate[groundingArg + 1], "off");
     assert.equal(prepared.plan.configuration.initialCapture, "primary-desktop");
     assert.deepEqual(prepared.plan.task.activeInputs, []);
     assert.deepEqual(prepared.review.preflight.activeInputs, []);
@@ -715,7 +719,7 @@ test("six-task package freezes Ark in its own suite path and dry-run does not re
   }
 });
 
-test("T03 prepares one DOCX plus an exact WeChat delivery target without authorizing or sending", async () => {
+test("legacy nine-task T03 prepares one DOCX plus an exact WeChat delivery target without authorizing or sending", async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-t03-wechat-test-"));
   let packageDir;
   let packageId;
@@ -790,6 +794,198 @@ test("T03 prepares one DOCX plus an exact WeChat delivery target without authori
   } finally {
     if (packageDir !== undefined && packageId !== undefined) {
       const ownedPackage = join(ROOT, "runs", SUITE_ID, packageId);
+      assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
+      await rm(ownedPackage, { recursive: true, force: false });
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("six-domain T03 prepares text-only WeChat delivery and records content/send evidence without authorizing or sending", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-six-t03-text-wechat-test-"));
+  let packageDir;
+  let packageId;
+  const manifestPath = manifestPathForSuite(SIX_DOMAIN_SUITE_ID);
+  const manifestSnapshotPath = join(tempRoot, "six-domain-tasks.json");
+  await writeFile(manifestSnapshotPath, await readFile(manifestPath));
+  try {
+    const prepared = await createPlan({
+      "--suite": SIX_DOMAIN_SUITE_ID,
+      "--api-key-env": "HUOSHAN_API_KEY",
+      "--output-dir": tempRoot,
+      "--profile-label": "LifeEval-Temporary",
+      "--as-of-date": "2026-10-18",
+      "--travel-date": "2026-10-20",
+      "--task-id": "T03",
+      "--variant": "A",
+      "--wechat-chat": "文件传输助手",
+    }, {
+      root: ROOT,
+      manifestPath: manifestSnapshotPath,
+      now: () => new Date("2026-10-18T10:00:00.000Z"),
+    });
+    packageDir = prepared.packageDir;
+    packageId = prepared.packageId;
+    assert.equal(prepared.plan.task.outcomeMode, "response");
+    assert.deepEqual(prepared.plan.task.requiredApps, ["managed-browser", "WeChat"]);
+    assert.deepEqual(prepared.plan.task.deliverables, []);
+    assert.equal(prepared.plan.task.wechatChat, "文件传输助手");
+    assert.match(prepared.plan.task.goal, /微信会话《文件传输助手》/u);
+    assert.match(prepared.plan.task.goal, /只向这个精确会话发送文字/u);
+    assert.equal(prepared.review.preflight.wechatChat, "文件传输助手");
+    assert.equal(prepared.review.preflight.wechatTestChatAuthorized, false);
+    assert.deepEqual(prepared.review.preflight.requiredApps, [
+      { app: "managed-browser", status: "pending" },
+      { app: "WeChat", status: "pending" },
+    ]);
+    assert.deepEqual(prepared.review.deliverableReviews, []);
+    assert.deepEqual(prepared.review.consumerReview.wechatDelivery, {
+      targetChat: "文件传输助手",
+      fileName: null,
+      status: "pending",
+      reviewedAt: null,
+      notes: "Human must verify that the text message was sent to the exact target; no attachment is expected and delivery is not auto-scored.",
+    });
+
+    const result = await runPackage({ "--package": packageDir }, { root: ROOT, manifestPath: manifestSnapshotPath });
+    assert.equal(result.mode, "dry-run");
+    assert.equal(result.report.spawned, false);
+    assert.equal(result.report.desktopAccess, false);
+    assert.equal(result.report.modelAccess, false);
+    assert.equal(result.report.networkAccess, false);
+    const dryRunFiles = await readdir(join(packageDir, "dry-runs"));
+    const dryRun = JSON.parse(await readFile(join(packageDir, "dry-runs", dryRunFiles[0]), "utf8"));
+    assert.equal(dryRun.argv.includes("--window-switch"), true);
+    const goalIndex = dryRun.argv.indexOf("--goal");
+    assert.match(dryRun.argv[goalIndex + 1], /微信会话《文件传输助手》/u);
+
+    const attemptRecord = buildLiveAttemptRecord({
+      plan: prepared.plan,
+      review: prepared.review,
+      attemptDir: join(packageDir, "attempts", "live-offline-fixture"),
+      cuaSocket: "offline-cua-fixture",
+      supervised: true,
+      startedAt: "2026-10-18T10:00:00.000Z",
+      argv: dryRun.argv,
+    });
+    assert.equal(Object.hasOwn(attemptRecord.consumerEvidence, "expectedDeliverables"), false);
+    assert.deepEqual(attemptRecord.consumerEvidence.wechatDelivery, {
+      targetChat: "文件传输助手",
+      fileName: null,
+      status: "pending_human_confirmation",
+      automaticScoring: false,
+      evidence: "Human verifies the text message was sent to the exact target; no attachment is expected and the runner does not inspect chats or send state.",
+    });
+    assert.match(attemptRecord.consumerEvidence.primaryEvidence, /visible delivery of the text message to the exact WeChat target/u);
+    assert.match(attemptRecord.consumerEvidence.primaryEvidence, /CLI output alone is not send evidence/u);
+
+    const changedManifest = JSON.parse(await readFile(manifestSnapshotPath, "utf8"));
+    changedManifest.tasks.find((task) => task.id === "T03").goal += " stale revision";
+    await writeFile(manifestSnapshotPath, `${JSON.stringify(changedManifest, null, 2)}\n`, { encoding: "utf8" });
+    await assert.rejects(
+      runPackage({ "--package": packageDir }, { root: ROOT, manifestPath: manifestSnapshotPath }),
+      /manifest changed/u,
+      "prepared package must not be reusable after the six-domain T03 definition changes",
+    );
+  } finally {
+    if (packageDir !== undefined && packageId !== undefined) {
+      const ownedPackage = join(ROOT, "runs", SIX_DOMAIN_SUITE_ID, packageId);
+      assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
+      await rm(ownedPackage, { recursive: true, force: false });
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("six-domain Risk Guard off is frozen in config, argv, limits, dry-run, and live-attempt metadata", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "life-eval-risk-off-test-"));
+  let packageDir;
+  let packageId;
+  const manifestPath = manifestPathForSuite(SIX_DOMAIN_SUITE_ID);
+  try {
+    const prepared = await createPlan({
+      "--suite": SIX_DOMAIN_SUITE_ID,
+      "--api-key-env": "HUOSHAN_API_KEY",
+      "--output-dir": tempRoot,
+      "--profile-label": "LifeEval-Risk-Off",
+      "--as-of-date": "2026-10-19",
+      "--travel-date": "2026-10-22",
+      "--task-id": "M02",
+      "--variant": "A",
+      "--risk-guard": "off",
+    }, {
+      root: ROOT,
+      manifestPath,
+      now: () => new Date("2026-10-18T17:00:00.000Z"),
+    });
+    packageDir = prepared.packageDir;
+    packageId = prepared.packageId;
+    const configuration = prepared.plan.configuration;
+    const argvTemplate = prepared.plan.cli.argvTemplate;
+    assert.equal(configuration.riskGuard, "off");
+    assert.equal(configuration.riskModel, "off");
+    assert.equal(configuration.confirmRiskGuardOff, true);
+    assert.equal(configuration.riskModelRequestsEnabled, false);
+    assert.equal(configuration.riskModelRequestLimitStatus, "inactive_risk_model_off");
+    assert.equal(configuration.maxRiskModelRequests, 24);
+    assert.equal(configuration.combinedRequestCeiling, 144);
+    assert.equal(argvTemplate[argvTemplate.indexOf("--risk-guard") + 1], "off");
+    assert.equal(argvTemplate.includes("--confirm-risk-guard-off"), true);
+    assert.equal(argvTemplate[argvTemplate.indexOf("--risk-model") + 1], "off");
+    assert.equal(argvTemplate[argvTemplate.indexOf("--risk-max-model-requests") + 1], "24");
+    assert.doesNotThrow(() => assertRiskPolicy(prepared.plan));
+    assert.throws(() => assertRiskPolicy({
+      ...prepared.plan,
+      configuration: { ...configuration, riskModel: "same" },
+    }), /risk model does not match riskGuard/u);
+
+    const cli = await loadCliModule();
+    const concrete = argvTemplate.map((value) => value === token ? "offline-cua-placeholder" : value);
+    const parsed = cli.parseArgs(concrete);
+    const resolved = cli.toResolvedRunConfig(parsed, parsed.goal);
+    assert.equal(parsed.risk.riskGuard, "off");
+    assert.equal(parsed.riskModel, "off");
+    assert.equal(resolved.riskGuard, "off");
+    assert.equal(resolved.riskModel, "off");
+    assert.equal(resolved.riskMaxModelRequests, 24);
+
+    const dryRun = await runPackage({ "--package": packageDir, "--suite": SIX_DOMAIN_SUITE_ID }, { root: ROOT, manifestPath });
+    assert.equal(dryRun.mode, "dry-run");
+    assert.equal(dryRun.report.spawned, false);
+    assert.equal(dryRun.report.networkAccess, false);
+    assert.deepEqual(dryRun.report.riskPolicy, {
+      riskGuard: "off",
+      riskModel: "off",
+      confirmRiskGuardOff: true,
+      riskModelRequestsEnabled: false,
+      riskModelRequestLimitStatus: "inactive_risk_model_off",
+      maxRiskModelRequests: 24,
+    });
+    const dryRunFiles = await readdir(join(packageDir, "dry-runs"));
+    const savedDryRun = JSON.parse(await readFile(join(packageDir, "dry-runs", dryRunFiles[0]), "utf8"));
+    assert.equal(savedDryRun.argv.includes("--confirm-risk-guard-off"), true);
+    assert.equal(savedDryRun.limits.riskModelRequestsEnabled, false);
+
+    const attempt = buildLiveAttemptRecord({
+      plan: prepared.plan,
+      review: prepared.review,
+      attemptDir: join(packageDir, "attempts", "live-risk-off-fixture"),
+      cuaSocket: "offline-risk-off-socket",
+      supervised: false,
+      startedAt: "2026-10-18T17:00:00.000Z",
+      argv: dryRun.report.argv,
+    });
+    assert.deepEqual(attempt.riskPolicy, {
+      riskGuard: "off",
+      riskModel: "off",
+      confirmRiskGuardOff: true,
+      riskModelRequestsEnabled: false,
+      riskModelRequestLimitStatus: "inactive_risk_model_off",
+      maxRiskModelRequests: 24,
+    });
+  } finally {
+    if (packageDir !== undefined && packageId !== undefined) {
+      const ownedPackage = join(ROOT, "runs", SIX_DOMAIN_SUITE_ID, packageId);
       assert.equal(packageDir, ownedPackage, "cleanup target must be this test's exact generated package");
       await rm(ownedPackage, { recursive: true, force: false });
     }

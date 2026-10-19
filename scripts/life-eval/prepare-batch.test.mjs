@@ -27,11 +27,15 @@ async function fixtureConfigFor(outputRoot) {
 }
 
 test("batch requires an explicit shared date window and only accepts the new six-domain suite", async () => {
+  const defaults = parseBatchArgs(["--as-of-date", "2026-10-18", "--travel-date", "2026-10-19"]);
+  assert.deepEqual(defaults["--task-ids"], SIX_DOMAIN_TASK_ORDER);
+  assert.equal(defaults["--risk-guard"], "layered");
   assert.throws(() => parseBatchArgs(["--travel-date", "2026-10-19"]), /--as-of-date is required/u);
   assert.throws(() => parseBatchArgs(["--as-of-date", "2026-10-18"]), /--travel-date is required/u);
   assert.throws(() => parseBatchArgs(["--suite", SUITE_ID, "--as-of-date", "2026-10-18", "--travel-date", "2026-10-19"]), /only supports/u);
   const invalidWindow = parseBatchArgs(["--as-of-date", "2026-10-18", "--travel-date", "2026-10-18"]);
   await assert.rejects(prepareSixDomainBatch(invalidWindow, { config: fixtureConfig }), /1 to 7 days/u);
+  assert.throws(() => parseBatchArgs(["--as-of-date", "2026-10-18", "--travel-date", "2026-10-19", "--risk-guard", "disabled"]), /risk-guard must be off or layered/u);
 });
 
 test("interleaved order contains each task-arm pair exactly once and rotates the arm cycle", () => {
@@ -49,6 +53,82 @@ test("interleaved order contains each task-arm pair exactly once and rotates the
     { taskId: "T03", variant: "A" },
   ]);
   assert.equal(new Set(order.map(({ taskId, variant }) => `${taskId}/${variant}`)).size, 24);
+});
+
+test("selected batches keep canonical arm rotation and propagate Risk Guard off to every package", async () => {
+  const outputRoot = await mkdtemp(join(tmpdir(), "life-eval-selected-batch-test-"));
+  const seen = [];
+  try {
+    const config = await fixtureConfigFor(outputRoot);
+    const taskIds = ["T03", "M02", "S02", "CM02", "CP02"];
+    const args = parseBatchArgs([
+      "--as-of-date", "2026-10-19",
+      "--travel-date", "2026-10-22",
+      "--output-dir", outputRoot,
+      "--profile-label", "travel",
+      "--task-ids", taskIds.join(","),
+      "--risk-guard", "off",
+    ]);
+    const result = await prepareSixDomainBatch(args, {
+      root: ROOT,
+      manifestPath: manifestPathForSuite(SIX_DOMAIN_SUITE_ID),
+      config,
+      prepareOne: async (startArgs) => {
+        seen.push(startArgs);
+        const riskModel = startArgs["--risk-guard"] === "off" ? "off" : "same";
+        return {
+          packageId: `${startArgs["--task-id"]}-${startArgs["--variant"]}`,
+          packageDir: join(outputRoot, `${startArgs["--task-id"]}-${startArgs["--variant"]}`),
+          outputAttemptDir: join(outputRoot, SIX_DOMAIN_SUITE_ID, startArgs["--variant"], startArgs["--task-id"]),
+          review: { preflight: { status: "pending" }, planSha256: "fixture-plan-hash" },
+          plan: {
+            configuration: {
+              riskGuard: startArgs["--risk-guard"],
+              riskModel,
+              confirmRiskGuardOff: riskModel === "off",
+              riskModelRequestsEnabled: riskModel !== "off",
+              riskModelRequestLimitStatus: riskModel === "off" ? "inactive_risk_model_off" : "active",
+              maxRiskModelRequests: 24,
+              combinedRequestCeiling: 144,
+              supervision: SIX_DOMAIN_VARIANTS[startArgs["--variant"]].supervision,
+            },
+          },
+        };
+      },
+    });
+
+    const order = buildInterleavedOrder(taskIds);
+    assert.equal(result.batch.packages.length, 20);
+    assert.deepEqual(result.batch.taskOrder, taskIds);
+    assert.deepEqual(seen.map((item) => `${item["--task-id"]}/${item["--variant"]}`), order.map((item) => `${item.taskId}/${item.variant}`));
+    assert.deepEqual(order.slice(0, 8), [
+      { taskId: "T03", variant: "C" },
+      { taskId: "T03", variant: "D" },
+      { taskId: "T03", variant: "B" },
+      { taskId: "T03", variant: "A" },
+      { taskId: "M02", variant: "D" },
+      { taskId: "M02", variant: "B" },
+      { taskId: "M02", variant: "A" },
+      { taskId: "M02", variant: "C" },
+    ]);
+    assert.ok(seen.every((item) => item["--risk-guard"] === "off"));
+    assert.deepEqual(result.batch.riskPolicy, {
+      riskGuard: "off",
+      riskModel: "off",
+      confirmRiskGuardOff: true,
+      riskModelRequestsEnabled: false,
+      riskRequestCapBehavior: "positive per-task CLI cap is retained but no risk-model requests are made",
+    });
+    assert.ok(result.batch.packages.every((item) => item.riskPolicy.riskModel === "off" && item.riskPolicy.confirmRiskGuardOff === true && item.riskPolicy.riskModelRequestsEnabled === false));
+    assert.throws(() => parseBatchArgs([
+      "--as-of-date", "2026-10-19", "--travel-date", "2026-10-22", "--task-ids", "T03,G99",
+    ]), /comma-separated subset/u);
+    assert.throws(() => parseBatchArgs([
+      "--as-of-date", "2026-10-19", "--travel-date", "2026-10-22", "--task-ids", "T03,T03",
+    ]), /duplicates/u);
+  } finally {
+    await rm(outputRoot, { recursive: true, force: true });
+  }
 });
 
 test("batch rejects a relative output path before creating its report directory", async () => {

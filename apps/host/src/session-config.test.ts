@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ActionReceipt, ComputerSessionDescriptor, SurfaceId, Viewport } from "@computer-harness/protocol";
+import type { ActionReceipt, ComputerSessionDescriptor, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import type { Computer, ModelInput, ProviderAdapter } from "@computer-harness/runtime";
 import { DefaultContextCompiler } from "../../../packages/context/src/index.js";
 import { ApplicationSession } from "../../../packages/app-runtime/src/application-session.js";
@@ -23,6 +23,20 @@ const hostArguments: HostArguments = {
 };
 
 describe("Host-local Run profile configuration", () => {
+  it("keeps the layered local Guard on while disabling semantic risk review by default", () => {
+    const config = createHostSessionConfig(hostArguments, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {});
+
+    expect(config).toMatchObject({
+      riskProfile: "live-interactive",
+      riskGuard: "layered",
+      riskModel: "off",
+      riskMaxModelRequests: 1,
+    });
+  });
+
   it("isolates DeepSeek settings from GLM thinking and budgets without exposing the private key", () => {
     const config = createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", {
       profileLabel: "fixture",
@@ -77,7 +91,7 @@ describe("Host-local Run profile configuration", () => {
     });
     expect(config).toMatchObject({
       model: "deepseek-v4.1-flash",
-      riskModel: "same",
+      riskModel: "off",
       arkEndpoint: "https://ark.cn-beijing.volces.com/api/plan/v3",
       arkRequestTimeoutMs: 180000,
       arkMaxOutputTokens: 8192,
@@ -243,11 +257,106 @@ describe("Host-local Run profile configuration", () => {
       await rm(outputDir, { recursive: true, force: true });
     }
   });
+
+  it("keeps semantic review disabled while the layered Guard still requires approval for unclear actions", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-host-risk-review-off-"));
+    const sessionConfig = createHostSessionConfig(hostArguments, outputDir, {
+      profileLabel: "host-risk-fixture",
+      profileRoot: join(outputDir, "profile"),
+    }, {});
+    const viewport: Viewport = { width: 1, height: 1, coordinateSpace: "physical" };
+    const surfaceRef = { surfaceId: "host-risk-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
+    const computerSession: ComputerSessionDescriptor = {
+      id: "host-risk-computer-session" as ComputerSessionDescriptor["id"],
+      backend: "fixture-cua",
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-10-07T00:00:00.000Z",
+    };
+    const computer: Computer = {
+      async open() { return computerSession; },
+      async observe() {
+        return {
+          capturedAt: "2026-10-07T00:00:01.000Z",
+          viewport,
+          surfaceRef,
+          screenshot: {
+            mediaType: "image/png",
+            data: new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jp6kAAAAASUVORK5CYII=", "base64")),
+          },
+        };
+      },
+      async execute(_session, action) { return { actionId: action.actionId, status: "completed" } satisfies ActionReceipt; },
+      async close() {},
+    };
+    const providerInputs: ModelInput[] = [];
+    let providerRequestCount = 0;
+    const provider: ProviderAdapter = {
+      id: "glm-5.3-flash",
+      async generate(input) {
+        providerRequestCount += 1;
+        providerInputs.push(input);
+        return {
+          type: "tool_calls",
+          calls: [{
+            id: "host-risk-unclear-action" as ToolCallId,
+            name: "click",
+            arguments: { x: 0, y: 0 },
+            declaredEffect: { effects: ["unknown"], target: "Fixture button", summary: "Click the fixture button" },
+          }],
+        };
+      },
+    };
+    const session = new ApplicationSession({
+      config: sessionConfig,
+      owner: new InProcessEnvironmentOwner(),
+      dependencies: {
+        createProvider: () => provider,
+        createComputer: async () => computer,
+      },
+    });
+    try {
+      const handle = await session.startRun("Check the Host default risk review boundary.");
+      await waitForRunApproval(handle);
+
+      const guardEvent = handle.controller.getEvents().find((event) => event.type === "action.guard.evaluated");
+      expect(sessionConfig).toMatchObject({ riskGuard: "layered", riskModel: "off" });
+      expect(providerInputs).toHaveLength(1);
+      expect(providerRequestCount).toBe(1);
+      expect(handle.controller.getSnapshot().riskModelRequestCount).toBe(0);
+      expect(guardEvent).toMatchObject({
+        type: "action.guard.evaluated",
+        decision: "require_approval",
+        path: "fallback",
+        reasonCode: "semantic_review_unavailable",
+        modelRequestCount: 0,
+      });
+      expect(handle.controller.getSnapshot().status).toBe("waiting_approval");
+      expect(handle.controller.getSnapshot().pendingApproval).toBeDefined();
+      expect(providerInputs[0]?.tools.find((tool) => tool.name === "click")?.inputSchema.required).toContain("_harnessEffect");
+    } finally {
+      session.activeRun?.controller.cancel("Host risk-review regression cleanup");
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
 });
 async function waitForRunFinish(handle: Awaited<ReturnType<ApplicationSession["startRun"]>>): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (handle.controller.getSnapshot().status !== "finished") {
     if (Date.now() >= deadline) throw new Error("fixture ApplicationSession Run did not finish within five seconds");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForRunApproval(handle: Awaited<ReturnType<ApplicationSession["startRun"]>>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (handle.controller.getSnapshot().status !== "waiting_approval") {
+    if (Date.now() >= deadline) {
+      const snapshot = handle.controller.getSnapshot();
+      const eventTypes = handle.controller.getEvents().map((event) => event.type).join(", ");
+      throw new Error(`fixture ApplicationSession Run did not request approval within five seconds (status=${snapshot.status}; events=${eventTypes})`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
