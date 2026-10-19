@@ -49,6 +49,18 @@ function desktopProjection(catalog: GroundingCatalog | undefined): string {
 }
 
 describe("runtime projections for action effects and desktop grounding", () => {
+  it("requires same-Run evidence before claiming a requested mutation was completed", () => {
+    const text = composeSystemPrompt("Base prompt", {
+      planning: "off",
+      memory: "off",
+      batching: "off",
+    });
+    expect(text).toContain("an already-present matching result is prior state, not proof this Run made the change");
+    expect(text).toContain("this Run's matching action/receipt and a fresh post-action Observation support it");
+    expect(text).toContain("if it was not executed, do not say it was");
+    expect(text).toContain("report it as uncompleted or unknown with the evidence gap");
+  });
+
   it("defines ordinary navigation/edit effects and prevents approval claims without Runtime evidence", () => {
     const text = composeSystemPrompt("Base prompt", {
       planning: "off",
