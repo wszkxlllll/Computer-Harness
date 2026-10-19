@@ -757,6 +757,8 @@ export interface CuaDriverComputerOptions {
   grounding?: CuaGroundingMode;
   /** Explicit host-owned managed browser target for the DOM transport gate. */
   browserTarget?: ManagedBrowserTarget;
+  /** Host-only opt-in: activate the exact managed-browser window target once at open without changing desktop scope. */
+  activateManagedBrowserOnOpen?: boolean;
   /** Explicit per-Run permission to discover and switch among opened windows. */
   windowSwitch?: CuaWindowSwitchMode;
   /**
@@ -1126,6 +1128,16 @@ export class CuaDriverComputer implements Computer {
         recoveryWindowIdentity = matches[0];
       }
       if (this.options.windowTarget === undefined) {
+        if (this.options.activateManagedBrowserOnOpen === true && this.options.browserTarget !== undefined) {
+          // This is only a one-time startup focus assist. Keep the full desktop
+          // Surface and continue visually if activation is refused or unknown.
+          try {
+            await bringWindowToFrontOnce(driver, label, this.options.browserTarget.windowTarget, signal);
+          } catch {
+            signal.throwIfAborted();
+            process.stderr.write("Managed-browser startup activation was not confirmed; continuing with full-desktop capture and manual window switching.\n");
+          }
+        }
         const size = await callTool(driver, "get_screen_size", { session: label }, signal);
         const dimensions = readStructuredDimensions(size);
         if (dimensions === undefined) {

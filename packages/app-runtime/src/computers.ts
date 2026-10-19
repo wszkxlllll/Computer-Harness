@@ -362,6 +362,16 @@ function isManagedBrowserUrl(value: string | undefined): value is string {
   }
 }
 
+function isExplicitHttpManagedBrowserUrl(value: string | undefined): boolean {
+  if (value === undefined || value === "about:blank") return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 interface ManagedBrowserComputerOptions {
   readonly config: Extract<ComputerBackendConfig, { kind: "cua" }>;
   readonly createHost: (options: ManagedBrowserHostOptions) => ManagedBrowserHost;
@@ -408,6 +418,8 @@ class ManagedBrowserComputer implements Computer {
       const companionMode = this.options.config.managedBrowserCompanion === true &&
         this.options.config.windowSwitch === "opened-windows-v1";
       const initialTarget = companionMode ? this.options.config.windowTarget : record.target.windowTarget;
+      const activateManagedBrowserOnOpen = companionMode && initialTarget === undefined &&
+        isExplicitHttpManagedBrowserUrl(this.options.config.managedBrowserUrl);
       const allowedTargets = this.options.config.windowSwitchAllowedTargets;
       const hybridCapability = this.options.config.hybridNativeWebDocumentTargets;
       const scopedTargets = allowedTargets === undefined
@@ -421,6 +433,7 @@ class ManagedBrowserComputer implements Computer {
         socketPath: this.options.config.socketPath,
         screenshotDir: this.options.config.screenshotDir,
         browserTarget: record.target,
+        ...(activateManagedBrowserOnOpen ? { activateManagedBrowserOnOpen: true } : {}),
         ...(this.options.config.grounding === "dom-catalog-v1" || this.options.config.grounding === "hybrid-catalog-v1"
           ? { domGroundingTransport: host.createTransport() }
           : {}),

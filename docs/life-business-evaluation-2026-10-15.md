@@ -16,6 +16,10 @@
 
 收敛修复已通过独立离线验收：输入工具及Host foreground-caret说明明确submit-on-Enter控件使用单段文字、发送单独一步；layered Guard对五种受支持换行符在派发前本地审批，不增加风险请求，不以elementRef猜测literal保证，与原high/protected审批合并一次，forbidden deny优先、Guard off保持原行为。中文原因与语音消费复用既有reasonCode/context，不新增协议字段。Context精确定义普通聚焦／可逆编辑的local_edit语义，并禁止从截图看不到审批就声称没有审批。Luna定向193/193、根独立TypeScript／spike类型检查与完整Vitest **2589/2589**、Sol最终GO；Runtime回归确认批准前零派发、批准后仅一次、拒绝零派发、关闭Guard沿原行为。此边界也会对其他平台/编辑器的layered多行输入增加一次审批，不改变其底层输入能力。尚待新一轮真实任务确认实际模型遵循与最终消息形态。
 
+第三次尝试 `glm-02`（Run `run-1792431677172-b4a096b4-cce`，冻结 `7156fc4`）：约140秒、13请求、8次已完成动作，根主动取消，未发送新消息。显式网站起点启动后，上一轮微信仍盖在受管浏览器上；模型先误点/滚动，随后已自行通过switch_window恢复到浏览器并查到指定车次。因此不把它写成“跨窗口不能切”或完整业务失败，而是因启动状态与演示效率问题主动中断的部分完成。另一次Memory与isolated switch同轮被Runtime拒绝，后续分轮记录，不重写此事实；原片和完整轨迹保留。
+
+启动收敛：工厂仅在全桌面、companion、明确HTTP(S)起点且无预选native目标时，生产Host-only布尔提示`activateManagedBrowserOnOpen`；CUA open消费现有受信browserTarget的精确身份，首次桌面观察前只尝试激活一次，不另存身份、不绑定窗口局部Surface、不增加每步抢焦点。about:blank仅准备浏览器、手选原生应用、默认未开启均不改变。普通激活失败记录固定诊断后仍可桌面观察/模型切换，Abort继续中止。Luna定向30项通过；根首次构建发现新测试fixture漏协议字段，已补齐真实类型而非cast，随后独立TypeScript／spike及完整Vitest **2593/2593**通过，Sol增量GO。下一轮仍用同一个Goal实机确认初始画面、输入、审批及送达，不用离线测试替代。
+
 > 当前六题活动 suite 的 T03 已按用户授权从 WPS/DOCX 附件改为直接发送微信文字；完整新 Goal 与评分边界见[六题 suite README](../eval/life-business-six-domain-20261018/README.md#t03--携程与高德南京出行资料并直接发送微信文字)。此前已保存的准备包和运行结果仍是旧 WPS/DOCX 题面，只能按旧题解释，不是新题实测，二者不可直接比较。
 
 ## 2026-10-19 复测收口与定位结果

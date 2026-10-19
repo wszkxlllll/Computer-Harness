@@ -33,6 +33,89 @@ const ONE_BY_ONE_PNG = Buffer.from(
 
 installFakeCuaSdkModuleForTests();
 
+describe("managed-browser desktop startup activation", () => {
+  it.each(["confirmed", "refused"] as const)("uses one exact startup activation for %s and retains the full desktop Surface", async (activation) => {
+    const directory = await mkdtemp(join(tmpdir(), `harness-managed-browser-startup-${activation}-`));
+    const fake = windowDriver();
+    if (activation === "refused") fake.setActivationRefusal(true);
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "host-profile",
+      tabId: "host-tab",
+      generation: "host-generation",
+      windowTarget: fake.target,
+      delivery: "loopback-cdp",
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture",
+      screenshotDir: directory,
+      browserTarget,
+      activateManagedBrowserOnOpen: true,
+      windowSwitch: "opened-windows-v1",
+      windowSwitchAllowedTargets: [fake.target],
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const activationCall = fake.calls.findIndex((call) => call.name === "bring_to_front");
+      const desktopSizeCall = fake.calls.findIndex((call) => call.name === "get_screen_size");
+      expect(activationCall).toBeGreaterThanOrEqual(0);
+      expect(activationCall).toBeLessThan(desktopSizeCall);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toMatchObject([
+        { input: { pid: fake.target.pid, window_id: fake.target.windowId } },
+      ]);
+
+      const first = await computer.observe(session, "startup-desktop-first" as ObservationId, signal);
+      const second = await computer.observe(session, "startup-desktop-second" as ObservationId, signal);
+      expect(first.surfaceRef.kind).toBe("desktop");
+      expect(second.surfaceRef).toEqual(first.surfaceRef);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("propagates cancellation during the startup activation attempt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-managed-browser-startup-abort-"));
+    const fake = windowDriver();
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium",
+      browser: "chromium",
+      profileId: "host-profile",
+      tabId: "host-tab",
+      generation: "host-generation",
+      windowTarget: fake.target,
+      delivery: "loopback-cdp",
+    };
+    const controller = new AbortController();
+    const callTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, input, signal) => {
+      const result = await callTool(name, input, signal);
+      if (name === "bring_to_front") controller.abort(new DOMException("fixture startup abort", "AbortError"));
+      return result;
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture",
+      screenshotDir: directory,
+      browserTarget,
+      activateManagedBrowserOnOpen: true,
+      grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    try {
+      await expect(computer.open({}, controller.signal)).rejects.toThrow(/CUA open failed: fixture startup abort/iu);
+      expect(controller.signal.aborted).toBe(true);
+      expect(fake.calls.some((call) => call.name === "get_screen_size")).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("F045 strict completed bound-window missing boundary", () => {
   it("keeps explicit list_windows available in confirm-v1 after a completed action with no missing target", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-confirm-explicit-list-windows-")));
