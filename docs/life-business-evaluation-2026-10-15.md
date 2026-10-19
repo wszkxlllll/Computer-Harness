@@ -130,7 +130,11 @@ Sol 最终只读审查 GO，未发现本轮新增阻塞性 P1/P2：确认 off �
 
 修正只对 UTF-8 来源文本摘要规范 CRLF/CR 为 LF，并更新当前六域清单的顶层及任务副本来源摘要；Goal、评分答案及 CP02 真值隔离不变。保留原 sha256、冻结包原始字节／源码／构建指纹和驱动二进制哈希；既有冻结包须重新 prepare，原运行记录不改。来源测试现检查全部 manifest/task-cards/synthetic-inputs 路径和任务副本，另验证 LF/CRLF/CR 相同，但普通字符、尾空格和末尾换行变化仍改变摘要，未通过删断言绕过核验。
 
-Luna 14/14、根独立 14/14 通过，Sol 只读复审 GO；此修复不构建、不重启、不替换 Preview Host42184，也没有桌面或付费 API 调用。推送后实际 CI 状态另核对，不能把本地通过说成远端已绿。PR41 在独立 worktree 整改，保留 PR42 的输入／坐标、默认 off、无障碍和本地 Guard 边界；尚不合并或部署该候选。
+Luna 14/14、根独立 14/14 通过，Sol 只读复审 GO；此修复不构建、不重启、不替换 Preview Host42184，也没有桌面或付费 API 调用。修复 head `0327bd0` 的实际 CI `39196629974` 四矩阵与 ci-required 均已通过，不将此状态套用到后续提交。PR41 在独立 worktree 整改，保留 PR42 的输入／坐标、默认 off、无障碍和本地 Guard 边界；尚不合并或部署该候选。
+
+随后补查原生窗口起点→切到受管浏览器的 off 路径，生产 fixture 先红：click 完成后普通 type 被 DOM_INPUT_FOCUS_MISMATCH 拒绝，因为 lifecycle 中的 browserTarget 被误当成 DOM 能力授权。最小修复只限定 execute 内部用于 DOM 输入／地址栏专用处理的局部 browserTarget：必须明确 DOM/hybrid 且有 Host transport；current 中的浏览器身份仍保留，原窗口、foreground、Abort 和 unknown/replay 检查不变。off/UIA-only 的原生输入不再依赖无法产生的 DOM 目录，也不额外引入 UIA 地址栏准入或新协议字段。
+
+新增两种模式的 native→browser→视觉 click/type→Ctrl+L→URL（不 Enter）回归，检查实际原生输入目标和无 DOM transport；根独立 CUA 422/422及 companion19/19通过，原 DOM/hybrid 焦点及地址栏拒绝测试保留。中间新增快捷键断言因CTRL/ctrl大小写期望不符而失败，最终按驱动规范修正后19/19通过；未修改热键实现。Sol 小diff复审GO。此为离线合同验证，不冒称已完成该分支实机；Preview仍运行前述903048d构建，本轮未重建或替换。
 
 ### 最小修复顺序
 

@@ -4270,8 +4270,16 @@ export class CuaDriverComputer implements Computer {
     }
     const privateGrounding = action.groundingRef === undefined ? undefined : this.groundings.get(String(action.basedOn));
     const resolvedGrounding = action.groundingRef === undefined ? undefined : privateGrounding?.elements.get(action.groundingRef);
-    const browserTarget = privateGrounding?.browserTarget ?? current.browserTarget;
     const domTransport = this.options.domGroundingTransport;
+    // Managed-browser identity is retained for target reconciliation, but it
+    // enables DOM-specific dispatch/focus gates only when this Run has an
+    // authorized DOM catalog and its Host transport. A companion Host alone
+    // must not turn ordinary foreground typing into a DOM-dependent action.
+    const domGroundingAvailable = domTransport !== undefined &&
+      (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1");
+    const browserTarget = domGroundingAvailable
+      ? privateGrounding?.browserTarget ?? current.browserTarget
+      : undefined;
     if (action.kind === "click" && privateGrounding?.catalog.source === "hybrid"
       && resolvedGrounding?.element.source === "uia"
       && isManagedBrowserContainerRole(resolvedGrounding.element.role)) {
