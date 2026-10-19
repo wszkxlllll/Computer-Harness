@@ -423,6 +423,9 @@ function approvalVoiceText(context: ApprovalNoticeVoiceContext | undefined): str
 }
 
 function approvalRiskVoiceText(context: ApprovalNoticeVoiceContext): string | undefined {
+  if (context.reasonCode === "multiline_type_enter_boundary") {
+    return "文字包含换行，部分输入框会将其作为回车并触发发送或提交；请确认目标控件和完整文字后审批。";
+  }
   const categoryLabels: Readonly<Record<RiskCategory, string>> = {
     external_commitment: "对外发送或提交内容",
     financial: "付款或财务操作",

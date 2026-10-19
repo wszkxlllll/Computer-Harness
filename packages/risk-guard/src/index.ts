@@ -224,15 +224,44 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   }
   const allEffects = uniqueEffects(declarations.flatMap((item) => item?.effects ?? []));
   const high = allEffects.filter((item) => highRiskEffects.has(item));
+  const multilineTypeWarning = hasMultilineTypeAction(context)
+    ? "文字包含换行。当前输入路线可能把换行作为回车；在某些输入框中会触发发送或提交。派发前需审批，请先核对目标控件和完整文字。"
+    : undefined;
   if (high.length > 0) {
     const categories = categoriesForEffects(high);
     if (hasProtectedInput(context) && !categories.includes("privacy_account")) categories.push("privacy_account");
-    return { route: "require_approval", categories, reasonCode: "declared_high_impact", reason: `The action declares a protected effect: ${high.join(", ")}.` };
+    if (multilineTypeWarning !== undefined && !categories.includes("external_commitment")) categories.push("external_commitment");
+    return {
+      route: "require_approval",
+      categories,
+      reasonCode: "declared_high_impact",
+      reason: [`The action declares a protected effect: ${high.join(", ")}.`, ...(multilineTypeWarning === undefined ? [] : [multilineTypeWarning])].join(" "),
+    };
   }
   // Protected values are a local, non-negotiable execution boundary. Check
   // them before any signal that can enter semantic review so a reviewer can
   // never turn a mandatory approval into an allow decision.
-  if (hasProtectedInput(context)) return { route: "require_approval", categories: ["privacy_account"], reasonCode: "protected_input", reason: "The action may enter protected credentials or financial data." };
+  if (hasProtectedInput(context)) {
+    return {
+      route: "require_approval",
+      categories: multilineTypeWarning === undefined ? ["privacy_account"] : ["privacy_account", "external_commitment"],
+      reasonCode: "protected_input",
+      reason: ["The action may enter protected credentials or financial data.", ...(multilineTypeWarning === undefined ? [] : [multilineTypeWarning])].join(" "),
+    };
+  }
+  // A multiline type call can deliver Enter-like input to a submit-on-Enter
+  // control. There is currently no trusted action field that proves literal
+  // text insertion, so require one local approval before any such dispatch.
+  // This intentionally precedes unknown-effect semantic review: no extra
+  // model request can replace the deterministic execution boundary.
+  if (multilineTypeWarning !== undefined) {
+    return {
+      route: "require_approval",
+      categories: ["external_commitment"],
+      reasonCode: "multiline_type_enter_boundary",
+      reason: multilineTypeWarning,
+    };
+  }
   if (allEffects.includes("unknown")) {
     if (groundingEvidenceUnavailable(context)) {
       return {
@@ -249,6 +278,11 @@ function routeCandidate(context: ActionPolicyContext, forbidden: ReadonlySet<str
   const textSignal = scanDeclarationText(context, declarations as ActionEffectDeclaration[]);
   if (textSignal !== undefined) return { route: "semantic_review", categories: textSignal.categories, reasonCode: textSignal.code, reason: textSignal.reason };
   return { route: "allow", categories: [], reasonCode: "declared_low_impact", reason: "The current action declares only low-impact effects and has no escalation signal." };
+}
+
+function hasMultilineTypeAction(context: ActionPolicyContext): boolean {
+  return context.candidate.actions.some((action) =>
+    action.kind === "type" && /[\r\n\u0085\u2028\u2029]/u.test(action.text));
 }
 
 function isRunScopedWindowSwitch(context: ActionPolicyContext): boolean {

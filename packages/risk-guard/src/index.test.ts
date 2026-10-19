@@ -237,7 +237,11 @@ describe("LayeredRiskGuard", () => {
     else if (scenario === "enter") candidate.candidate.actions[0] = { actionId: "enter" as ActionId, basedOn: current.id, kind: "keypress", keys: ["ENTER"] };
     else if (scenario === "batch") candidate.candidate.actions = [...candidate.candidate.actions, { actionId: "enter" as ActionId, basedOn: current.id, kind: "keypress", keys: ["ENTER"] }];
     else if (scenario === "risky-target") candidate.candidate.calls[0]!.declaredEffect!.target = "Submit order";
-    await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "fallback", reasonCode: "semantic_review_unavailable" });
+    if (scenario === "newline") {
+      await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", reasonCode: "multiline_type_enter_boundary", modelRequestCount: 0 });
+    } else {
+      await expect(new LayeredRiskGuard().evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "fallback", reasonCode: "semantic_review_unavailable" });
+    }
   });
 
   it("retains mandatory declared-high and protected-input boundaries with the disclaimer", async () => {
@@ -247,6 +251,42 @@ describe("LayeredRiskGuard", () => {
     const protectedInput = focusedTyping();
     protectedInput.candidate.actions[0] = { actionId: "protected" as ActionId, basedOn: observation.id, kind: "type", text: "password=SYNTHETIC_ONLY" };
     await expect(new LayeredRiskGuard().evaluate(protectedInput, new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", reasonCode: "protected_input" });
+  });
+
+  it("requires one local approval for untrusted multiline type before semantic review or dispatch", async () => {
+    let reviewerCalls = 0;
+    const assessor = {
+      id: "must-not-run",
+      async classify() {
+        reviewerCalls += 1;
+        return { effects: ["local_edit"] as const, alignment: "aligned" as const, evidence: "Synthetic low-risk review" };
+      },
+    };
+    const guard = new LayeredRiskGuard({ assessor });
+    for (const separator of ["\r", "\n", "\u0085", "\u2028", "\u2029"]) {
+      const candidate = context("local_edit", "Draft", "Enter two lines", "type", "current-uia-ref");
+      candidate.candidate.actions[0] = { ...candidate.candidate.actions[0]!, text: `first${separator}second` };
+      const decision = await guard.evaluate(candidate, new AbortController().signal);
+      expect(decision).toMatchObject({
+        decision: "require_approval",
+        path: "local",
+        reasonCode: "multiline_type_enter_boundary",
+        categories: ["external_commitment"],
+        modelRequestCount: 0,
+      });
+      expect(decision.reason).toContain("文字包含换行");
+      expect(decision.reason).toContain("作为回车");
+      expect(decision.reason).toContain("发送或提交");
+      expect(decision.reason).toContain("核对目标控件和完整文字");
+    }
+    expect(reviewerCalls).toBe(0);
+
+    const high = context("external_commitment", "Send message", "Send the message", "type");
+    high.candidate.actions[0] = { ...high.candidate.actions[0]!, text: "first\nsecond" };
+    const highDecision = await guard.evaluate(high, new AbortController().signal);
+    expect(highDecision).toMatchObject({ decision: "require_approval", path: "local", reasonCode: "declared_high_impact" });
+    expect(highDecision.reason).toContain("作为回车");
+    expect(reviewerCalls).toBe(0);
   });
 
   it("allows declared low-impact actions and requires approval for declared financial actions without a reviewer", async () => {

@@ -617,6 +617,11 @@ describe("RuntimeEvent to RunNotice projection", () => {
       currentApproval: { requestId: "approval-current", voiceContext: { categories: ["privacy_account"], reasonCode: "protected_input", actionKind: "type" } },
     });
     expect(privacy?.text).toBe("可能涉及隐私、账户或凭据的输入操作，请核对后审批。 还不能确定具体对象和影响，请先不要批准。");
+
+    const multiline = new RunNoticeProjector(runId, { dynamicContentEnabled: true }).project(approvalEvent, {
+      currentApproval: { requestId: "approval-current", voiceContext: { categories: ["external_commitment"], reasonCode: "multiline_type_enter_boundary", actionKind: "type" } },
+    });
+    expect(multiline?.text).toBe("文字包含换行，部分输入框会将其作为回车并触发发送或提交；请确认目标控件和完整文字后审批。 还不能确定具体对象和影响，请先不要批准。");
   });
 
   it("speaks the exact pending call plan only with opt-in and labels it as unexecuted and unverified", () => {

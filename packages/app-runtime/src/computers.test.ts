@@ -64,6 +64,8 @@ describe("prepareComputerRunAssembly", () => {
     if (process.platform === "win32") {
       expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("intended to insert at the current caret or replace the current selection");
       expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("driver completion does not verify the resulting content");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("use a single paragraph in submit-on-Enter controls");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("perform any send/submit as a separate deliberate action");
       expect(caretProfile.toolPresentationOverrides[0]?.description).not.toContain("preserves the current caret or selection");
       expect(caretProfile.toolPresentationOverrides[0]?.inputPropertyDescriptions.elementRef).toContain("append-to-end");
     }
