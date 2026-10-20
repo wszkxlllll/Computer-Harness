@@ -2,6 +2,27 @@
 
 本页承接根目录 README 的通用安装步骤，集中放置平台准备和排查；它不把真实桌面、模型或 OSWorld VM 当作安装后的默认依赖。
 
+## 手机连接与平台交付状态
+
+Lightspeaker的手机Web、Relay协议与Node Host由Windows和macOS共用；桌面驱动、权限和输入实现按平台适配。支持两端架构不表示两端已有同等完整的安装与实机验收。
+
+| 部分 | 当前入口 | 尚需核验/补齐 |
+| --- | --- | --- |
+| Windows电脑 | [本地启动器](./local-launcher.md)、[手机指南](./mobile-control-guide-2026-09-26.md)，`scripts/mobile.ps1` | 在准备发布的固定版本做另一台电脑冷安装；特殊输入修复必须核对实际driver，不把官方同版本号当作包含候选修复 |
+| macOS电脑 | 本页依赖/CUA准备、下方通用Host命令；历史Mac记录保存在history | Mac成员提供经过真机执行的完整手机上手步骤、准确driver来源/版本/校验、系统权限对象和恢复方法，验证配对、输入、切窗、登录状态及停止清理 |
+| 手机端 | [手机指南](./mobile-control-guide-2026-09-26.md)，经HTTPS访问共用Web | 语音输入须配置Host识别服务；系统播报、旁白和权限在真实手机上分别确认 |
+| Relay服务 | [服务器部署](../apps/relay/README.md) | 在同一冻结版本核对构建、TLS/WSS/SSE、私有凭据、备份回滚；服务器系统不等于被操控电脑的平台支持范围 |
+
+macOS没有现成的一键手机启动脚本；不要把`mobile.ps1`改成`sh`运行。依赖和Web/Host构建完成、对应平台CUA daemon已在用户桌面会话启动后，可使用公共入口：
+
+```sh
+node apps/host/dist/index.js --env-file .env --socket "<actual-cua-socket>" --model glm-5.3-flash --output runs/mobile-host
+```
+
+这里的socket必须替换为实际daemon地址；这是源码参数已核对的入口，不是本轮在Mac上重新验收过的命令。私有env还需配置模型凭据及[Relay部署说明](../apps/relay/README.md)列出的四项连接设置。Host默认页面为电脑本机`http://localhost:4317`；手机使用Relay的HTTPS地址，经电脑确认配对后操作，不连接手机自己的localhost。Host不会自动安装或启动CUA daemon。
+
+Mac成员补齐时应从一个干净checkout记录：安装→匹配driver与权限→Host启动→手机扫码确认→真实输入/浏览器与应用切换→暂停/审批/停止→重启复用登录状态。附固定源码SHA、driver校验与脱敏结果；不提交个人路径、密钥、profile或仅凭离线CI宣布手机链路可用。
+
 ## 1. 选择代码版本并安装
 
 本文描述开发预览能力。先确认目标功能所在的开发分支或待审 PR，再执行：
