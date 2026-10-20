@@ -1,6 +1,10 @@
-# Computer Harness：项目交接入口
+# Lightspeaker / Computer Harness：项目交接入口
 
-更新：2026-10-13。PR22 已集成 PR25、PR28、修正后的 PR29 和 PR26，保留 Windows 输入、语音及手机无障碍；Win/Mac 私有机制拆分、工具合同统一和实验入口隔离完成。代码 `aaac0f5` 完整 Vitest 2324/2324，交付提交 `b58cc4c` 的 CI 全部通过；Preview 未切版。详细证据见[集成与审计记录](./pr26-integration-audit-2026-10-11.md)，后续任务见[产品待办](./product-next-stage-task-list-2026-09-27.md)。下方旧检查点保留为历史，不代表当前部署或本轮实机结果。
+状态补充：2026-10-20。用户确认对外产品名 **Lightspeaker**、技术内核名 **Computer Harness**；仓库、包名与接口不迁移。当前主线为真实任务可靠性、人机控制与无障碍体验；[材料入口](./project-materials.md)第8节给出正式技术报告结构，第9节记录今晚由用户准备后重录，不自动占用桌面。官方报名/缴费/初赛提交已延至10月30日20:00。
+
+独立分支 `codex/demo-crossapp-20261020` 含PR41/42集成候选及三项Demo修复；GLM04冻结代码`8872bfc`，独立2594项回归通过，真实携程→微信送达已核验，含1次日期纠正、2次审批。PR41/42仍开放，不能写成main已合并；原Preview未随本轮改动切版。版本与业务证据见[真实验收记录](./life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)，部署以[实际部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)为准。
+
+历史集成检查点（2026-10-13）：PR22集成PR25/28/修正后29/26，代码`aaac0f5`的2324项回归与交付`b58cc4c`的CI通过，见[原记录](./pr26-integration-audit-2026-10-11.md)。下方机制与旧阶段检查点按其日期阅读，不把旧测试数当作当前版本结果；后续待办与实际完成状态须以[当前索引](./DOCS-INDEX.md)和源码核对。
 
 ## 1. 项目目标
 

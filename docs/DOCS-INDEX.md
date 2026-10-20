@@ -1,4 +1,38 @@
-# Computer Harness 文档索引
+# Lightspeaker / Computer Harness 文档索引
+
+更新：2026-10-20。**Lightspeaker**是对外产品，**Computer Harness**是技术内核；包名、接口与仓库地址不变。当前按下面入口阅读；折叠日志只代表记录时点，不是同时生效的开发指令。
+
+## 产品、报告与展示
+
+- [产品首页](../README.md)：定位、手机主入口、核心设计及开放边界。
+- [项目材料与报告大纲](./project-materials.md)：名称/价值主线、第8节正式技术报告结构及材料清单、第9节今晚重录准备。
+- [官方赛程调整](https://www.aicomp.cn/notice/notice-3/5435.html)：AI+开源报名/缴费/初赛提交截止 **2026-10-30 20:00**；旧10月15日说明不再适用，格式与评分按当前附件。
+
+## 当前工程与使用入口
+
+| 要做什么 | 权威入口 |
+| --- | --- |
+| 了解项目交接与实际状态 | [PROJECT-HANDOFF](./PROJECT-HANDOFF.md) |
+| 安装、配置模型与驱动 | [getting-started](./getting-started.md) |
+| 查看系统关系与可替换组件 | [架构与装配合同](./ARCHITECTURE-AND-COMPOSITION.md) |
+| 查看模块能力、默认值和限制 | [模块与能力状态](./MODULES-AND-CAPABILITY-STATUS.md) |
+| 查看协议、事件、准入和失败处理 | [Runtime与安全合同](./RUNTIME-AND-SAFETY-CONTRACTS.md) |
+| 使用手机、语音与Relay | [手机指南](./mobile-control-guide-2026-09-26.md)、[Relay部署](../apps/relay/README.md) |
+| 确认实际Preview版本与回退 | [部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)；源码已变不代表服务已变 |
+| 查无障碍实施与真机待验项 | [无障碍体验记录](./mobile-accessibility-experience-review-2026-10-08.md) |
+| 核对许可、自研与上游边界 | [LICENSE](../LICENSE)、[第三方声明](../THIRD_PARTY_NOTICES.md)、[项目材料](./project-materials.md) |
+
+## 当前验证与下一步
+
+- [真实任务与Demo验收](./life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)：GLM04完成携程→微信新消息送达；13请求、9完成动作、含1次日期纠正/2次审批；独立2594项回归通过。不把单次Demo算总体成功率。
+- [活动六题与评分](../eval/life-business-six-domain-20261018/README.md)、[新增购物/通信任务准备](./life-business-shopping-communication-preflight-2026-10-16.md)：任务集合与历史结果分别解释，不把候选直接计作成功样本。
+- Demo修复保存在独立`codex/demo-crossapp-20261020`分支，PR41/42仍开放，原Preview未随本轮改动切版。今晚先由用户准备展示初态；再次明确开始后重录双端和真实声音，不在白天自动占用桌面。
+- 文档维护遵循[开发文档规范](./development-documentation-standard.md)。不要通过删除失败、重写成绩或修改队友分支“清理状态”。
+
+## 历史阶段入口
+
+<details>
+<summary>展开历次更新与旧阶段导航（按日期阅读，不作为当前状态）</summary>
 
 2026-10-20 当前：[跨 APP Demo 收敛与真实验收](./life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)。PR41/42集成基线上，三项通用修复与完整2594项回归通过；GLM04已真实完成携程查询→微信文件传输助手新消息送达，根和Sol独立核验通过。原片约223秒，含1次日期纠正、2次审批，不冒称无人干预；此前失败/部分完成与假完成全部留档。展示片只缩短明确等待并遮挡个人信息，未录手机/声音。独立分支与Run运行，原Preview未替换；剩余日期/否定语句误审批及部署边界见记录。
 
@@ -232,3 +266,5 @@ A 线推送说明：[A 线阶段改动推送说明](./a-line-delivery-note-2026-
 - [2026-09-17 路线整合归档](./history/2026-09-17-roadmap-consolidation/README.md)：旧设计、审计、实验结论及外部审计包。
 
 历史报告中的“当前”“下一步”和命令只代表记录时点；当前执行顺序、验证事实和能力承诺以上述五份主文档及当前源码为准。
+
+</details>
