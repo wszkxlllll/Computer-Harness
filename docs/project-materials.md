@@ -43,7 +43,7 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 | Planning / Run Memory | Planning维护阶段进度；Memory保存继续任务所需事实及适用范围，通过工具写入、状态更新、召回和Context消费 | `packages/planning`、`packages/memory`；不是跨Run长期用户画像 |
 | 视觉与结构化定位 | 视觉坐标操作与UIA/DOM元素工具共存；结构候选由适配层产生，受当前观察/窗口约束；DOM依赖受管浏览器 | `packages/computer-cua`；截图完整性、缩放、候选失效和弹层仍需实机检查 |
 | Guard / Monitor | Guard负责动作准入和人工确认；Monitor结合执行/观察信号及可选模型assessment提供后续提示 | `packages/risk-guard`、`packages/runtime`；不等于全风险识别或业务成功证明 |
-| 手机、语音、个性化 | 手机经中继使用同一Runtime；通知从已提交事件投影；语音识别经Host；偏好冻结到新Run并进入Context | `apps/host`、`apps/relay`、`apps/web`、`packages/voice*`；[手机指南](./mobile-control-guide-2026-09-26.md)、[语音记录](./voice-streaming-and-notices-implementation-2026-09-28.md)、[偏好记录](./assistant-preferences-p1-implementation-2026-09-29.md) |
+| 手机、语音、个性化 | 手机经中继使用同一Runtime；通知从已提交事件投影；语音识别经Host；偏好冻结到新Run并进入Context | `apps/host`、`apps/relay`、`apps/web`、`packages/voice*`；[手机指南](./mobile-control-guide-2026-09-26.md)、[语音记录](./history/2026-10-20-release-convergence/voice-streaming-and-notices-implementation-2026-09-28.md)、[偏好记录](./history/2026-10-20-release-convergence/assistant-preferences-p1-implementation-2026-09-29.md) |
 
 团队自主内容主要是上述协议、Runtime与装配、策略和状态模块、Provider/Computer适配、终端及手机产品入口和测试。CUA提供底层输入/截图能力，模型服务提供理解和决策，第三方库提供通用功能；不将这些底层能力算作团队自行实现。
 
@@ -175,7 +175,7 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 | 二、需求分析与系统总体方案 | 1.5页 | 六类生活任务说明适用范围；用一个代表流程串起手机、模型、Runtime与桌面。区分普通用户控制需求、低数字素养负担与非视觉访问需求。提供真实访谈/使用反馈，未做就写实践观察，不捏造调研。 |
 | 三、人工智能技术与开源基础设施选型 | 1.5页 | 解释多模态模型负责理解/决策，CUA负责观察/输入/窗口能力，本项目Runtime承接状态与执行；选择云API的成本/延迟权衡、自研与上游边界、固定版本及许可。正式技术子目见下表。 |
 | 四、系统设计与关键技术实现 | 3.5页 | 按“交互请求→上下文构建→模型工具调用→准入→执行→回执/再观察→事件与用户控制”的数据流讲协议和模块，说明为什么这样设计、怎样处理故障。挑2—3个有真实记录的关键机制展开，不逐个贴包名。 |
-| 五、成果展示与效果验证 | 3页 | 首先给完整跨应用案例，再列六类已实际运行的样本、独立业务评分、人工参与和失败原因；报告版本化成功/部分/失败及成本。精选Demo不是总体成功率；无留出对照就不宣称模块净收益。 |
+| 五、成果展示与真实任务迭代 | 3页 | 以完整Demo呈现手机发起、实际桌面操作、关键确认及最终成果；说明六类真实任务如何推动问题发现、回归与体验完善。正文不列尚未形成统一口径的统计，不填成功率、模块增益或用户收益占位值。确需核验的原始记录留附录索引，真实人工参与不隐藏；Demo不代替全部工程与许可材料。 |
 | 六、创新性、开放成果与复用价值 | 1页 | 对比“直接模型+输入工具”与我们的状态/控制/恢复承接；来源基于实际代码与公开设计，不泛称所有竞品都没有。给源码、组合接口、任务/测试与上游贡献的可核验链接。 |
 | 七、风险控制、隐私保护与合规 | 1.5页 | 操作范围、动作effects及本地扫描、审批/纠正/Abort、unknown不重放；截图与候选/语音的处理链，哪些出本机、哪些留本地、如何撤销与脱敏；许可、AI辅助开发及权属说明。明确保护措施不是安全沙箱或零风险保证。 |
 | 八、总结与后续工作 | 0.5页 | 完成的核心能力和真实未达项；优先稳定性、人本体验、独立复现。长期Memory/Subagent等只列展望，不冒充已实现成果。 |
@@ -185,14 +185,14 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 
 | 技术子目 | 必须讲清楚的工程内容 | 源码/证据入口 |
 | --- | --- | --- |
-| 基于CUA的桌面感知与执行适配 | SDK/daemon配对及通信生命周期；截图、输入、窗口枚举与激活如何映射到ComputerSession；Windows/macOS平台差异如何私有化。区分本项目Adapter修复、候选driver与上游已合并内容。 | `packages/computer-cua`；[平台与装配合同](./ARCHITECTURE-AND-COMPOSITION.md)、[输入与窗口历史](./window-popup-regression-2026-10-04.md)。 |
-| 视觉—结构化混合定位与坐标一致性 | 视觉坐标与click_element共存；UIA/DOM候选的生产、筛选、身份/几何校验和执行；窗口局部坐标、采样缩放与桌面物理坐标的映射；无候选仍可视觉操作。DOM只来自授权受管浏览器，采集并非默认全开。 | `packages/computer-cua`；[真实候选与坐标定位记录](./life-business-evaluation-2026-10-15.md)。 |
+| 基于CUA的桌面感知与执行适配 | SDK/daemon配对及通信生命周期；截图、输入、窗口枚举与激活如何映射到ComputerSession；Windows/macOS平台差异如何私有化。区分本项目Adapter修复、候选driver与上游已合并内容。 | `packages/computer-cua`；[平台与装配合同](./ARCHITECTURE-AND-COMPOSITION.md)、[输入与窗口历史](./history/2026-10-20-release-convergence/window-popup-regression-2026-10-04.md)。 |
+| 视觉—结构化混合定位与坐标一致性 | 视觉坐标与click_element共存；UIA/DOM候选的生产、筛选、身份/几何校验和执行；窗口局部坐标、采样缩放与桌面物理坐标的映射；无候选仍可视觉操作。DOM只来自授权受管浏览器，采集并非默认全开。 | `packages/computer-cua`；[真实候选与坐标定位记录](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md)。 |
 | 面向工具调用的多模态Agent编排 | ToolRegistry统一工具定义；Provider投影各API的schema和历史；结构化返回、参数校验、调用隔离、状态工具与GUI调用的同轮规则及失败反馈。说明模型可选能力，不硬称每轮都有Plan/Memory/Batch。 | `packages/runtime`、`packages/provider-*`；[模块状态](./MODULES-AND-CAPABILITY-STATUS.md)。 |
 | 任务级Session与动态Surface管理 | Session维持任务生命周期；SurfaceId/generation管理实际操作对象及旧引用失效；peer显式切换、可靠关系下child处理、无法确定时用户参与。只管理影响下一步动作正确性的已使用界面，不做完整桌面世界模型。 | `packages/protocol`、`packages/computer-cua`；[共享合同](./RUNTIME-AND-SAFETY-CONTRACTS.md)。 |
 | 上下文构建与运行期状态维护 | 稳定工具/指令前缀与动态Goal/截图/历史/纠正的组织、预算和裁剪、provider continuation；TaskState记录进度，Run Memory记录事实/适用条件/证据及召回准入。说明缓存友好设计不等于已测得缓存收益；区分事实陈旧与正确召回。 | `packages/context`、`packages/planning`、`packages/memory`；真实GLM04中日期事实未更新，作为失败分析而非可靠性成果。 |
-| 可观测执行与不确定结果恢复 | ActionIntent→准入→逐动作执行→Receipt→新Observation；明确未派发/拒绝、completed、partial、unknown的区别。重试与副作用范围、用户纠正使旧决定失效；新Run成果不能由历史相似画面替代。 | `packages/runtime`、`packages/trajectory`；[10月20日实际修复和新消息证据](./life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)。 |
+| 可观测执行与不确定结果恢复 | ActionIntent→准入→逐动作执行→Receipt→新Observation；明确未派发/拒绝、completed、partial、unknown的区别。重试与副作用范围、用户纠正使旧决定失效；新Run成果不能由历史相似画面替代。 | `packages/runtime`、`packages/trajectory`；[10月20日实际修复和新消息证据](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)。 |
 | 风险准入与人机协作控制 | 本地规则和effects路由、可选语义模型、必要审批、撤销后续执行的边界；全桌面共享前台、窗口范围及权限的差异。区分非阻断Monitor提示与Guard准入，不把业务答题核对写成安全判定。 | `packages/risk-guard`、`packages/runtime`、`apps/host`；演示风险模型关闭、本地扫描/审批保留，误审批如实列出。 |
-| 手机远程控制与无障碍交互 | Web/Relay/Host如何把goal、暂停、纠正和审批送回同一Run；配对与连接权限、任务单占用、断线恢复。语音识别/系统播报、事件到通知、读屏语义、焦点/完整句及偏好Context投影的生产/消费链。 | `apps/web`、`apps/host`、`apps/relay`、`packages/voice*`；[无障碍验收](./mobile-accessibility-experience-review-2026-10-08.md)、[手机技术说明](./mobile-control-technical-report-2026-09-26.md)。 |
+| 手机远程控制与无障碍交互 | Web/Relay/Host如何把goal、暂停、纠正和审批送回同一Run；配对与连接权限、任务单占用、断线恢复。语音识别/系统播报、事件到通知、读屏语义、焦点/完整句及偏好Context投影的生产/消费链。 | `apps/web`、`apps/host`、`apps/relay`、`packages/voice*`；[无障碍验收](./mobile-accessibility-experience-review-2026-10-08.md)、[手机技术说明](./history/2026-10-20-release-convergence/mobile-control-technical-report-2026-09-26.md)。 |
 
 每个技术子目遵循“问题→所用底层能力→本项目设计与数据流→失败/失效处理→测试与实际证据”，而不是“我们使用了某库，因此实现了某能力”。协议字段只展示有生产者、消费者和生命周期的核心字段。代码存在、离线通过、业务实机通过、用户收益得到验证分别标注。
 
@@ -211,7 +211,7 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 | 上游贡献与AI辅助说明 | commit/PR及本文件链接，10月20日状态核验 | 截取对应贡献范围与社区反馈，保留作者；说明团队的需求/设计/审查/实测以及AI辅助，不泛化为全部手写或独占。 |
 | 报告、正式视频与PPT | 本节大纲、格式约束与素材位置已就绪 | 先冻结证据再成稿；报告≤10MB、视频3—5分钟≤300MB；PPT用于后续通知要求，不把72秒素材充正式视频。 |
 
-仓库核对（2026-10-20）：本轮在独立分支 `codex/demo-crossapp-20261020` 整理；main核到`8742865`，PR41/42仍开放，候选分支含二者集成与Demo修复，不能写成main已合并。真实GLM04基于`8872bfc`，后续是记录整理；本轮文档更新不代表服务切版。不清理或合并队友分支，不删除旧Run、个人文件、profile或历史证据。
+仓库核对（2026-10-20）：在核对原head审查与CI后，PR42、PR41已依次合入main `937380a`，该head完整CI通过；独立分支 `codex/demo-crossapp-20261020` 已同步main，并保留已验收Demo修复。本轮发布文案不列零散实跑数字，详细记录归档保存。原Preview不随Git合并或文档更新切版；不删除队友分支、旧Run、个人文件或profile。
 
 ## 9. 10月20日晚重录安排（等待用户准备和通知）
 
@@ -224,3 +224,20 @@ RuntimeEvent / Trajectory → 状态、截图、结果、可选语音通知
 5. **剪辑与公开检查。** 优先使用无敏感内容的原画面；必要遮挡采用与界面一致的小范围遮挡/柔和模糊，在开场、切换前后和片尾逐帧核对，不用大黑块盖核心过程。只压缩等待并标明，不伪装无人干预；最终停留真实新成果，不停在浏览器关闭后的空桌面。正式3—5分钟视频由问题/使用场景、双端实录、关键技术与开放成果构成，保留原始材料供核验。
 
 本条是准备清单，不等于已预约或设置自动提醒。今晚用户准备好并再次明确开始后才占用桌面、调用模型和录制。
+
+## 10. 产品发布表达依据与采用原则
+
+本节是发布编辑准则，不是新的技术能力或商业验证结果。2026-10-20直接读取以下产品官网和仓库，再对照[AIC当前规则](https://www.aicomp.cn/tracks/tracks-5/4924.html)。
+
+| 官方参考 | 观察到的表达方式 | 本项目采用什么、不采用什么 |
+| --- | --- | --- |
+| [CUA官网](https://cua.ai/)及[仓库](https://github.com/trycua/cua) | 首屏先说明用户得到什么，按核心体验展开，再解释底层及上手路径。 | 用清晰定位、主Demo、少量技术支撑与真实体验入口；不照搬其沙箱、并行光标、托管与认证能力。 |
+| [OpenClaw官网](https://openclaw.ai/) | 一句话定位紧接具体日常用途与启动入口。 | 先让读者理解能委托怎样的生活任务，再引出Runtime；不移植客户评价、规模、成熟度或其集成能力。 |
+| [Hermes官网](https://hermes-agent.nousresearch.com/)及[仓库](https://github.com/NousResearch/hermes-agent) | 明确产品记忆点，能力围绕定位展开，安装/模型选择分层呈现。 | 保持一个鲜明产品承诺和可组合内核；没有实际成果的长期记忆、自进化、Subagent不进入已实现亮点。 |
+| [Be My Eyes官网](https://www.bemyeyes.com/) | 先说明使用者及日常生活价值，再展示使用方式、支持与信任边界。 | 人本价值通过手机、语音、读屏、纠正和确认落地；不借用其用户数量、匿名保证、服务时段或成效。 |
+
+README顺序固定为：**产品承诺→生活用途→用户价值→技术支撑→上手入口→真实任务迭代→开放生态与必要边界**。主标题沿用“轻松托付、全程知情、关键把关、隐私有界”。技术报告则按第8节正式结构，讲清CUA底层利用、Agent开发技术与系统设计，不把技术名称当产品卖点的全部。
+
+对外正文只写已有能力、真实工作方式与能够展示的成果；没有统一结果就不写数字，不虚构用户评价、合作方、商业规模、性能领先或目标人群成效。研发中暴露的问题、失败与实际测试结果保留历史记录供核验，不通过删除或改成绩包装成功。安全/隐私的必要使用前提仍需公开，不能为了发布气势隐去模型数据传输和前台操作范围。
+
+本轮共96份旧阶段文档移入[历史目录](./history/2026-10-20-release-convergence/README.md)，原导航另存；脚本仍直接消费的任务卡与当前系统合同保留原位。归档只机械调整链接，记录事实不改写。当前主入口为[文档导航](./DOCS-INDEX.md)，不要求新成员先读历史审计流水账。

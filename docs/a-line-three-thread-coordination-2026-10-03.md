@@ -53,10 +53,10 @@
 
 - [修复方已接收协议并交接源码](./a-line-sync/fixes/F-20261003-002.md)：（8）报告源码指纹与初始交接一致、维持 `ready_for_retest`；（10）已确认收到。此 ACK 不代表新实机验收通过。
 - [修复与实机测试事件协议](./a-line-collaboration-sync-2026-10-03.md)
-- [P0 焦点、DOM 指纹与工具合同修复](./a-line-p0-focus-fingerprint-fix-2026-10-03.md)
-- [A 线进度与优化方向](./a-line-progress-review-2026-10-03.md)
-- [A 线实际任务计划](./a-line-runtime-delivery-plan-2026-09-27.md)
-- [Windows 兼容与验收边界](./windows-compatibility-audit-2026-10-01.md)
-- [已准备提交的交付说明](./a-line-delivery-note-2026-10-01.md)
+- [P0 焦点、DOM 指纹与工具合同修复](./history/2026-10-20-release-convergence/a-line-p0-focus-fingerprint-fix-2026-10-03.md)
+- [A 线进度与优化方向](./history/2026-10-20-release-convergence/a-line-progress-review-2026-10-03.md)
+- [A 线实际任务计划](./history/2026-10-20-release-convergence/a-line-runtime-delivery-plan-2026-09-27.md)
+- [Windows 兼容与验收边界](./history/2026-10-20-release-convergence/windows-compatibility-audit-2026-10-01.md)
+- [已准备提交的交付说明](./history/2026-10-20-release-convergence/a-line-delivery-note-2026-10-01.md)
 
 本次已向（8）、（10）发送职责同步消息；未新增业务代码、操作桌面、部署、提交或推送。

@@ -33,6 +33,8 @@ docs/history/*
 !docs/history/2026-09-26-handoff-convergence/
 !docs/history/2026-09-26-handoff-convergence/**
 !docs/history/2026-09-26-readme-before-refresh.md
+!docs/history/2026-10-20-release-convergence/
+!docs/history/2026-10-20-release-convergence/**
 scripts/history/
 
 .stage4-qwen38-fixture-alpha

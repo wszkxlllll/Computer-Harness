@@ -13,7 +13,7 @@
 
 ### 验证与保留范围
 
-全量 Vitest 单线程2580/2580、类型构建与spike检查通过，评测脚本45/45；Sol 审查生产改动和三处测试修改通过。并发下旧预期及超时失败保留，不延长测试超时或跳过用例。真实用户 Harness＋方舟 DeepSeek 验证两组：关闭采集时携程登录可见并实际切到微信（5主请求、0风险请求）；开启 hybrid 后选“出发城市”，CUA SendInput 屏幕 `(707,618)` 点击并展开城市列表（4主请求、0风险请求）。根独立检查截图和轨迹，没有发送、输入、搜索、购票或付款。成功切窗限定 Host 明确授权的两个目标，不宣称任意自动选窗或完整业务任务均已通过；此前无页面变化的点击失败仍保留。Windows 当前几何已实测，macOS 此轮只有合同回归。详见[完整验证记录](./life-business-evaluation-2026-10-15.md#采集开销取舍与-preview-核对2026-10-19)。
+全量 Vitest 单线程2580/2580、类型构建与spike检查通过，评测脚本45/45；Sol 审查生产改动和三处测试修改通过。并发下旧预期及超时失败保留，不延长测试超时或跳过用例。真实用户 Harness＋方舟 DeepSeek 验证两组：关闭采集时携程登录可见并实际切到微信（5主请求、0风险请求）；开启 hybrid 后选“出发城市”，CUA SendInput 屏幕 `(707,618)` 点击并展开城市列表（4主请求、0风险请求）。根独立检查截图和轨迹，没有发送、输入、搜索、购票或付款。成功切窗限定 Host 明确授权的两个目标，不宣称任意自动选窗或完整业务任务均已通过；此前无页面变化的点击失败仍保留。Windows 当前几何已实测，macOS 此轮只有合同回归。详见[完整验证记录](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md#采集开销取舍与-preview-核对2026-10-19)。
 
 本机旧 Host 本来已退出，此次启动新 Host PID42184，核对命令指向本 checkout 的 host dist；4318连接页200、Host到8443的WSS established，Preview及正式health200、匿名Preview任务API401。直接读取同构建默认配置确认 riskModel=off、riskGuard=layered、grounding=off；不是只检查 TypeScript 源码。没有调用真实模型去复验手机配对后的 Run，真实机制验收在相同生产构建的 ApplicationSession 中完成。
 
@@ -32,7 +32,7 @@
 - 新Host进程和8443 Relay连接已核对，本地连接页、公网页面与health均HTTP200。未替换正式443服务；没有清理持久登录资料，手机交互/声音需用户后续体验。
 - 本机旧构建备份位于本次checkout的 `runs/preview-desktop-grounding-20261018/backup/`，保留Host、App Runtime、CUA原dist及旧启动配置副本；本轮未改变CUA daemon二进制。部署操作记录和日志保留在同一忽略目录。回退时先确认无活动Run，再关闭本次Host、恢复这三个旧dist目录，并使用原启动入口；不要清理profile或重放旧动作。
 
-本轮原始失败和成功Run都保留，详见[实测记录](./life-business-evaluation-2026-10-15.md)。
+本轮原始失败和成功Run都保留，详见[实测记录](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md)。
 
 ## 2026-10-18：生活任务修复与无障碍／审批朗读版本
 
@@ -178,7 +178,7 @@ node .\apps\host\dist\index.js --env-file .env.preview --socket '\\.\pipe\comput
 
 ### 本轮收尾更新
 
-当前源码、审查、CI 与真实任务边界见[统一收尾记录](./window-popup-regression-2026-10-04.md)。源码 `3f234c6` 本地 111 文件／1655 项通过，四组 CI 及 `ci-required` 全绿；服务器从已验证 Git commit 构建，Web asset 为 `index-D8bCuibX.js`。Preview health／asset 200，匿名任务 API 401，stable health 200。本机 Host 已对齐构建并监听 4318、连接 8443，日志／新任务目录 `runs/voice-preview-popup-closeout-20261004/`。
+当前源码、审查、CI 与真实任务边界见[统一收尾记录](./history/2026-10-20-release-convergence/window-popup-regression-2026-10-04.md)。源码 `3f234c6` 本地 111 文件／1655 项通过，四组 CI 及 `ci-required` 全绿；服务器从已验证 Git commit 构建，Web asset 为 `index-D8bCuibX.js`。Preview health／asset 200，匿名任务 API 401，stable health 200。本机 Host 已对齐构建并监听 4318、连接 8443，日志／新任务目录 `runs/voice-preview-popup-closeout-20261004/`。
 
 现在在电脑打开 `http://localhost:4318/connect`，手机重新扫码，使用 `https://47.108.197.221:8443`。不需要重新配置 Node／API key，不要求重新登录已保存的网站，但网站自身登录是否过期仍以实际页面为准。没有操作桌面或重跑本轮未通过的任务；下方旧部署与测试数量是历史，不代表当前端到端放行。
 

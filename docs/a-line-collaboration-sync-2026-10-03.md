@@ -3,7 +3,7 @@
 日期：2026-10-03  
 文档角色：入口 / 交接  
 状态：当前执行  
-当前入口：[A 线实际任务计划](./a-line-runtime-delivery-plan-2026-09-27.md)  
+当前入口：[A 线实际任务计划](./history/2026-10-20-release-convergence/a-line-runtime-delivery-plan-2026-09-27.md)
 基线：`codex/a-line-macos-compat-20260928`，HEAD `2fd5074`，存在未提交修改  
 范围：两个指定 Codex 聊天共享问题、修复、版本和实机结果；不新建 Git 分支，不自动合并聊天历史。
 

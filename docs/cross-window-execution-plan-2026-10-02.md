@@ -1,6 +1,6 @@
 # 跨窗口执行与生活任务 Demo 实施方案（已批准；后续验收范围）
 
-日期：2026-10-02。状态：通用跨窗口能力、Host-owned managed-browser companion、Web/TUI/CLI 接线及定向离线回归已完成并经代码审查。此前已有合成窗口上的 Provider API 探针和真实 SDK/managed-browser 往返证据；最近 compact tool descriptions 尚未重跑真实 API。完整生活任务、真实模型按目标选窗、其余 native 窗口恢复边界及公开页面部署仍未验收。用户要求本轮实现先闭环；在用户再次明确“现在开始”之前不开展新的真实 API、桌面或录像任务。详细证据见[实施与验证记录](./cross-window-implementation-and-validation-2026-10-02.md)。
+日期：2026-10-02。状态：通用跨窗口能力、Host-owned managed-browser companion、Web/TUI/CLI 接线及定向离线回归已完成并经代码审查。此前已有合成窗口上的 Provider API 探针和真实 SDK/managed-browser 往返证据；最近 compact tool descriptions 尚未重跑真实 API。完整生活任务、真实模型按目标选窗、其余 native 窗口恢复边界及公开页面部署仍未验收。用户要求本轮实现先闭环；在用户再次明确“现在开始”之前不开展新的真实 API、桌面或录像任务。详细证据见[实施与验证记录](./history/2026-10-20-release-convergence/cross-window-implementation-and-validation-2026-10-02.md)。
 
 ## 1. 当前事实与真正缺口
 
@@ -91,7 +91,7 @@ Computer 提供可选只读 `listWindows(session, signal)`。只有 Run 明确�
 
 ## 7. 开发与验收顺序
 
-1–3. Runtime/Computer 生命周期、Context 与共享 Registry、Host/Web/TUI/CLI/profile 设置的实现和定向离线测试已完成；各阶段证据与独立复核范围见[实施与验证记录](./cross-window-implementation-and-validation-2026-10-02.md)。
+1–3. Runtime/Computer 生命周期、Context 与共享 Registry、Host/Web/TUI/CLI/profile 设置的实现和定向离线测试已完成；各阶段证据与独立复核范围见[实施与验证记录](./history/2026-10-20-release-convergence/cross-window-implementation-and-validation-2026-10-02.md)。
 4. 已通过的真实 SDK scripted 往返只验证 native↔自有 managed browser binding、DOM 来源切换和 Host 清理，不等价于真实模型选择或生活任务。仍待明确授权后的真实模型任务、native↔native、项目 CUA 对最小化/resize/关闭旧引用的验证，以及桌面/多窗口高风险场景的有界验收。
 5. 完整生活任务 Demo 尚未执行；不得把工具链和模拟通过描述为“全自动跨应用”业务成功。政务批次仍暂停。
 

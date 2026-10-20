@@ -2,9 +2,9 @@
 
 状态补充：2026-10-20。用户确认对外产品名 **Lightspeaker**、技术内核名 **Computer Harness**；仓库、包名与接口不迁移。当前主线为真实任务可靠性、人机控制与无障碍体验；[材料入口](./project-materials.md)第8节给出正式技术报告结构，第9节记录今晚由用户准备后重录，不自动占用桌面。官方报名/缴费/初赛提交已延至10月30日20:00。
 
-独立分支 `codex/demo-crossapp-20261020` 含PR41/42集成候选及三项Demo修复；GLM04冻结代码`8872bfc`，独立2594项回归通过，真实携程→微信送达已核验，含1次日期纠正、2次审批。PR41/42仍开放，不能写成main已合并；原Preview未随本轮改动切版。版本与业务证据见[真实验收记录](./life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)，部署以[实际部署记录](./voice-preview-deploy-phone-test-2026-09-29.md)为准。
+PR42、PR41已按依赖顺序合入main `937380a`，该head的完整CI通过。工作分支 `codex/demo-crossapp-20261020` 已同步main，并保留此前跨应用Demo修复。当前围绕真实生活任务推进可靠性和体验完善；详细研发结果移入[历史验收记录](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md#2026-10-20-跨-app-demo-收敛与验收)，不在产品入口发布零散统计。原Preview未随本轮合并或文档整理切版，部署以[实际记录](./voice-preview-deploy-phone-test-2026-09-29.md)为准。
 
-历史集成检查点（2026-10-13）：PR22集成PR25/28/修正后29/26，代码`aaac0f5`的2324项回归与交付`b58cc4c`的CI通过，见[原记录](./pr26-integration-audit-2026-10-11.md)。下方机制与旧阶段检查点按其日期阅读，不把旧测试数当作当前版本结果；后续待办与实际完成状态须以[当前索引](./DOCS-INDEX.md)和源码核对。
+历史集成检查点（2026-10-13）：PR22集成PR25/28/修正后29/26，代码`aaac0f5`的2324项回归与交付`b58cc4c`的CI通过，见[原记录](./history/2026-10-20-release-convergence/pr26-integration-audit-2026-10-11.md)。下方机制与旧阶段检查点按其日期阅读，不把旧测试数当作当前版本结果；后续待办与实际完成状态须以[当前索引](./DOCS-INDEX.md)和源码核对。
 
 ## 1. 项目目标
 
@@ -40,17 +40,17 @@ Pi 式改造的重点是薄应用入口、明确组合根和可替换策略，�
 
 - 2026-10-13：独立集成类型/构建、Web 生产构建和完整离线回归通过；Sol 源码与最后测试增量审查 GO，独立25项通过。下一步是 Windows/macOS 真实跨应用与弹窗、手机语音/VoiceOver验收；本轮没有真实 API、桌面输入或部署。以下为前期检查点。
 
-- 2026-09-27：PR #15 已合并；`4215599` 的桌面与 Node 兼容 CI 及总检查全部通过。此前 Windows 单测审批等待竞态已改为提交事件同步。新版 Web 公网资源与本地 Host 配对注册通过；详见[当前界面与审批记录](./mobile-accessible-ui-implementation-2026-09-26.md)。下列为历史检查点，不代表当前 CI 仍失败。
+- 2026-09-27：PR #15 已合并；`4215599` 的桌面与 Node 兼容 CI 及总检查全部通过。此前 Windows 单测审批等待竞态已改为提交事件同步。新版 Web 公网资源与本地 Host 配对注册通过；详见[当前界面与审批记录](./history/2026-10-20-release-convergence/mobile-accessible-ui-implementation-2026-09-26.md)。下列为历史检查点，不代表当前 CI 仍失败。
 
-- staging 修复后新增复验：Windows Node 24 与中继服务器 Node 24 均通过 736 项 Vitest，公网模拟链路切换前后通过；服务器已切换 release `2026-09-26-02`。修复纳入 PR #14 更新，GitHub CI 以最新 head 的检查为准。准确版本、依赖补齐过程及未覆盖项见[修复与发布记录](./mobile-staging-fixes-2026-09-26.md)。以下 725 项记录保留为先前检查点。
+- staging 修复后新增复验：Windows Node 24 与中继服务器 Node 24 均通过 736 项 Vitest，公网模拟链路切换前后通过；服务器已切换 release `2026-09-26-02`。修复纳入 PR #14 更新，GitHub CI 以最新 head 的检查为准。准确版本、依赖补齐过程及未覆盖项见[修复与发布记录](./history/2026-10-20-release-convergence/mobile-staging-fixes-2026-09-26.md)。以下 725 项记录保留为先前检查点。
 
-- 归档后提交前复验：Node 24.19.0 / pnpm 11.19.0，根构建及 Web 构建通过，74 个 Vitest 文件、725 项在低并发下通过，TAP 19 通过、1 项权限跳过。默认并发曾有一次 Relay 联合测试 5 秒超时，单独和低并发全量复测通过；未修改断言/超时，也未声称冷安装或远端 CI 已通过。详见[复验记录](./mobile-control-technical-report-2026-09-26.md#9-归档与分支提交前复验)。
-- Sol 独立复核了 Host/Relay、恢复锁、审批预览和 CUA 诊断等定向内容；准确范围见[审查记录](./mobile-control-review-2026-09-26.md)，不是本轮重新审完所有业务模块。
+- 归档后提交前复验：Node 24.19.0 / pnpm 11.19.0，根构建及 Web 构建通过，74 个 Vitest 文件、725 项在低并发下通过，TAP 19 通过、1 项权限跳过。默认并发曾有一次 Relay 联合测试 5 秒超时，单独和低并发全量复测通过；未修改断言/超时，也未声称冷安装或远端 CI 已通过。详见[复验记录](./history/2026-10-20-release-convergence/mobile-control-technical-report-2026-09-26.md#9-归档与分支提交前复验)。
+- Sol 独立复核了 Host/Relay、恢复锁、审批预览和 CUA 诊断等定向内容；准确范围见[审查记录](./history/2026-10-20-release-convergence/mobile-control-review-2026-09-26.md)，不是本轮重新审完所有业务模块。
 - 真实 Host→GLM→CUA 只读记事本 Run 通过。携程→高德经一次人工纠正取得主要结果；12306 经一次人工关闭弹层后取得车次结果，但完整排序证据不足。均不能标为完全自主、完整业务验收通过。
 - 原生应用整体门槛未过：WPS 另存为失败；记事本整段输入错字、独立逐字对照正确；浏览器下拉框打开时精确窗口捕获可能失败。不能把工具 completed 当成业务成功。
-- 此前队友报告已完成公网 TLS、安卓 Chrome 真机扫码与换网等测试，执行后端为 fake Computer/Provider；iPhone、真审批和公网到 Windows 实机全链路未验收。当时 CI 的失败已修复；旧归因见[进度与 CI 复核](./mobile-staging-ci-audit-2026-09-26.md)，最新状态见本节首条。
+- 此前队友报告已完成公网 TLS、安卓 Chrome 真机扫码与换网等测试，执行后端为 fake Computer/Provider；iPhone、真审批和公网到 Windows 实机全链路未验收。当时 CI 的失败已修复；旧归因见[进度与 CI 复核](./history/2026-10-20-release-convergence/mobile-staging-ci-audit-2026-09-26.md)，最新状态见本节首条。
 
-本轮详细指标、隐私边界和私有证据引用见[技术报告](./mobile-control-technical-report-2026-09-26.md)。历史 benchmark 与新实机实验分开，不混算一个成功率。
+本轮详细指标、隐私边界和私有证据引用见[技术报告](./history/2026-10-20-release-convergence/mobile-control-technical-report-2026-09-26.md)。历史 benchmark 与新实机实验分开，不混算一个成功率。
 
 ## 5. 当前问题与优先顺序
 
@@ -63,11 +63,11 @@ Pi 式改造的重点是薄应用入口、明确组合根和可替换策略，�
 | P2 | 模型格式、答案证据和延迟 | 有真实失败/较慢任务；不能全部归因基础设施 | 脱敏请求对照、严格合同、固定任务指标与人工评分 |
 | 发布门槛 | 手机公网使用 | 新版已部署且CI通过；此前安卓主体矩阵为模拟后端；实机全链路尚待验收 | 补 Windows 真后端、手机审批及无障碍验收 |
 
-详细故障归因见[问题清单](./mobile-control-issues-2026-09-26.md)。先修可靠性再扩大效果承诺。不要为了 Jev 或新模块添加无消费者字段和任务专用规则。
+详细故障归因见[问题清单](./history/2026-10-20-release-convergence/mobile-control-issues-2026-09-26.md)。先修可靠性再扩大效果承诺。不要为了 Jev 或新模块添加无消费者字段和任务专用规则。
 
 ## 6. 后续路线与非当前承诺
 
-本节保留方向概览；具体近期/随后/研究顺序、完整任务和验收标准以[下一阶段清单](./product-next-stage-task-list-2026-09-27.md)为准。语音基础链路已提升为近期候选，长期研究不因此全部提前。
+本节保留方向概览；具体近期/随后/研究顺序、完整任务和验收标准以[下一阶段清单](./history/2026-10-20-release-convergence/product-next-stage-task-list-2026-09-27.md)为准。语音基础链路已提升为近期候选，长期研究不因此全部提前。
 
 1. **可靠性与体验**：窗口/输入/弹层、配置透明度、TUI/Web 可读性和可诊断性；小步实现、真实复测。
 2. **受控效果实验**：冻结代码、任务和策略版本，分别比较 Planning、Context、Memory、Batch/Monitor 等，不一次改变全部变量。真实生活任务和 OSWorld 分工互补。

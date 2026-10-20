@@ -27,9 +27,9 @@
 | [qwen-flat-source-audit-and-migration-2026-09-15.md](qwen-flat-source-audit-and-migration-2026-09-15.md) | Qwen strict 固定 `calls[]` 源码复审、提示词边界与协议迁移证据 |
 | [real-api-conformance-2026-09-15.md](real-api-conformance-2026-09-15.md) | 真实 API 的详细请求、响应与历史失败证据 |
 | [harness-development-validation-candidates-2026-09-10.json](../../harness-development-validation-candidates-2026-09-10.json) | G0 修订3候选 manifest：20开发/20验证/11备用；V19由R10替代，主集动态预检已回填、预算未定，不可直接当正式 runner 输入 |
-| [g0-preflight-progress-2026-09-10.md](../../g0-preflight-progress-2026-09-10.md) | G0 主集动态预检：Development 20/20、Validation 20/20（V19由R10替代）；evaluator正例校准和预算冻结未完成 |
-| [osworld-environment-implementation.md](../../osworld-environment-implementation.md) | OSWorld/VM、Bridge、官方评分和真实任务环境 |
-| [stage-5-osworld-reproducibility.md](../../stage-5-osworld-reproducibility.md) | OSWorld artifact、快照、显示校准和复现实验入口 |
+| [g0-preflight-progress-2026-09-10.md](../2026-10-20-release-convergence/g0-preflight-progress-2026-09-10.md) | G0 主集动态预检：Development 20/20、Validation 20/20（V19由R10替代）；evaluator正例校准和预算冻结未完成 |
+| [osworld-environment-implementation.md](../2026-10-20-release-convergence/osworld-environment-implementation.md) | OSWorld/VM、Bridge、官方评分和真实任务环境 |
+| [stage-5-osworld-reproducibility.md](../2026-10-20-release-convergence/stage-5-osworld-reproducibility.md) | OSWorld artifact、快照、显示校准和复现实验入口 |
 
 ## 全局设计与规范
 

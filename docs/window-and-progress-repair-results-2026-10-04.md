@@ -1,6 +1,6 @@
 # 窗口与中途播报修复验收
 
-> 本文件保留 2026-10-04 早期窄路径证据。当前完整任务、输入修复及最终部署状态以[本轮收尾入口](./window-popup-regression-2026-10-04.md)为准，不能用本文件的菜单／快捷键样本认定 WPS 保存或跨应用报告已通过。
+> 本文件保留 2026-10-04 早期窄路径证据。当前完整任务、输入修复及最终部署状态以[本轮收尾入口](./history/2026-10-20-release-convergence/window-popup-regression-2026-10-04.md)为准，不能用本文件的菜单／快捷键样本认定 WPS 保存或跨应用报告已通过。
 
 ## 结论
 
@@ -21,7 +21,7 @@
 - Node 24 根构建通过。全量回归 107 文件、1312 项通过；脚本测试 31 通过、1 项因 Windows 符号链接能力跳过。最终唯一旧措辞断言已修正，Qwen 28/28 通过后重跑全量。
 - Notepad File 菜单 → Esc：同一 Session 内 child_push → child_pop，两动作 completed，Run 成功，owner/lease 清理成功。证据：`runs/diagnostics/notepad-menu-surface-1791046755524`。
 - WPS：由模型工具 list_windows 获取 22 个有名称的候选，选择 WPS，switch_window → Ctrl+A → Esc，三动作 completed；没有人工接管或运行错误，清理成功。证据：`runs/diagnostics/wps-ctrl-a-escape-1791049643262`。没有写入、改格式或保存用户文件。
-- 真实 GLM 进度探针共 6 次调用。最后一轮 Notepad 返回 milestone，经通知投影和调度器实际消费；携程结果页仍漏掉 assessment，未产生中途通知。详见 [API 探针记录](observation-assessment-live-probe-2026-10-04.md)。不能宣称每轮都会播报。
+- 真实 GLM 进度探针共 6 次调用。最后一轮 Notepad 返回 milestone，经通知投影和调度器实际消费；携程结果页仍漏掉 assessment，未产生中途通知。详见 [API 探针记录](./history/2026-10-20-release-convergence/observation-assessment-live-probe-2026-10-04.md)。不能宣称每轮都会播报。
 
 ## 下一轮用户测试
 

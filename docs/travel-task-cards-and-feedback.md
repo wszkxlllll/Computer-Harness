@@ -3,7 +3,7 @@
 日期：2026-09-20
 文档角色：任务说明 / 人工操作手册
 状态：草稿走查；非正式成绩
-当前入口：[出行试点准备](./travel-pilot-preparation-2026-09-20.md)
+当前入口：[出行试点准备](./history/2026-10-20-release-convergence/travel-pilot-preparation-2026-09-20.md)
 任务源：[manifest](../eval/travel/travel-candidate-manifest.v0.json)。第2节先列任务摘要，第2.1节给出全部20段可复制的完整goal；第0节是唯一TUI操作步骤，不需要从JSON中提取文字。
 
 ## 0. 你现在照这个顺序做
@@ -495,4 +495,4 @@ goal 必须能由队友直接复制执行。对于会随日期、库存、价格
 
 向我提供具体Run目录、`report.md`、`metrics.json`和填写后的`manual-review.md`即可；本地目录可直接用于后续分析。`report.md`是模型原文，不是核验后的真值；metrics是程序统计，人工表才记录你的判断。不要先上传完整截图、Provider交换内容或真实账号页面到GitHub。报告和goal也可能包含隐私，自动记录不代表已脱敏；分享前仍需检查。
 
-面向用户的TUI启动命令统一在本文第0节，完整goal在第2.1节；[实施入口](./travel-pilot-preparation-2026-09-20.md)保留技术说明、离线验收及异常后的补收集命令。
+面向用户的TUI启动命令统一在本文第0节，完整goal在第2.1节；[实施入口](./history/2026-10-20-release-convergence/travel-pilot-preparation-2026-09-20.md)保留技术说明、离线验收及异常后的补收集命令。

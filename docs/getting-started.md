@@ -146,7 +146,7 @@ node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --mod
 
 Host 示例里的 `--model` 可换为以上任一模型名。凭据仍留在 Host 私有环境，Web 不接收 key；同一私有 env 文件可分别设置 `ARK_API_KEY` 与 `DEEPSEEK_API_KEY`，选择渠道不会覆盖另一条渠道的配置。
 
-火山方舟渠道的完整配置、Run 级 low 与产品默认值的区别，以及 Windows 接入 smoke、两轮 disabled／两轮 low 的脱敏运行结果，见[火山方舟 Agent Plan 接入与运行记录](./volcengine-ark-agent-plan-2026-10-16.md)。历史样本使用既有 Windows 修复候选，不是对本提交树重新部署或实跑；不要把 Runtime 成功或启用开关当作业务成功。
+火山方舟渠道的完整配置、Run 级 low 与产品默认值的区别，以及 Windows 接入 smoke、两轮 disabled／两轮 low 的脱敏运行结果，见[火山方舟 Agent Plan 接入与运行记录](./history/2026-10-20-release-convergence/volcengine-ark-agent-plan-2026-10-16.md)。历史样本使用既有 Windows 修复候选，不是对本提交树重新部署或实跑；不要把 Runtime 成功或启用开关当作业务成功。
 
 Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 官方/方舟请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
 
@@ -180,7 +180,7 @@ OSWorld Python、VM、磁盘和快照在仓库外维护。先阅读：
 
 - [OSWorld upstream](https://github.com/xlang-ai/OSWorld)
 - [本仓库 Bridge 指南](../integrations/osworld/README.md)
-- [固定环境和 Gate 2 说明](./stage-5-osworld-reproducibility.md)
+- [固定环境和 Gate 2 说明](./history/2026-10-20-release-convergence/stage-5-osworld-reproducibility.md)
 
 在 Bridge 前准备与团队约定一致的 OSWorld checkout、Python 环境和 VM artifact；使用无模型 Gate 2 验证 `DesktopEnv`、loopback RPC、显示尺寸和快照，再启动模型。不要复制别人的绝对路径、VMX、快照名或 `vmrun.exe` 路径。
 

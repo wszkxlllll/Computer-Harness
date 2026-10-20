@@ -12,4 +12,4 @@ All six tasks use only public pages and do not require account login. They do no
 
 See [the manifest](tasks.json), [task cards](../../docs/life-business-task-cards-2026-10-15.md), and [source preflight](../../docs/life-business-shopping-communication-preflight-2026-10-16.md).
 
-For comparison setup and commands, see [evaluation instructions](../../docs/life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续). No real GUI or API run is implied by offline runner integration.
+For comparison setup and commands, see [evaluation instructions](../../docs/history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续). No real GUI or API run is implied by offline runner integration.

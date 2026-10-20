@@ -1,6 +1,6 @@
 # 首批真实生活任务：完整用户需求
 
-更新：2026-10-16。已删去无法明确的银行代理、区级额外材料和无短信替代核验要求，当前静态必答项都有官方依据。本页只放准备条件和给Agent的真实需求；评分、真值核验及实验参数在[评测操作说明](life-business-evaluation-2026-10-15.md)，不混入用户prompt。原九题程序题面唯一来源：[tasks.json](../eval/life-business-20261015/tasks.json)；2026-10-16新增六题唯一来源：[独立候选 tasks.json](../eval/life-business-shopping-communication-20261016/tasks.json)。已授权的八题历史运行只覆盖原九题，实际结果见[运行报告](life-business-eight-task-results-2026-10-16.md)，不等于八题已通过。
+更新：2026-10-16。已删去无法明确的银行代理、区级额外材料和无短信替代核验要求，当前静态必答项都有官方依据。本页只放准备条件和给Agent的真实需求；评分、真值核验及实验参数在[评测操作说明](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md)，不混入用户prompt。原九题程序题面唯一来源：[tasks.json](../eval/life-business-20261015/tasks.json)；2026-10-16新增六题唯一来源：[独立候选 tasks.json](../eval/life-business-shopping-communication-20261016/tasks.json)。已授权的八题历史运行只覆盖原九题，实际结果见[运行报告](./history/2026-10-20-release-convergence/life-business-eight-task-results-2026-10-16.md)，不等于八题已通过。
 
 历史题面说明：本页下方 T03 仍是原九题中的 WPS/DOCX + 微信文件任务，不代表当前六题活动套题的最新版。当前活动 T03 已按用户授权改为查询携程/高德后直接向精确微信会话发送易读文字，不制作或发送附件；完整新 Goal 见[六题 suite README](../eval/life-business-six-domain-20261018/README.md#t03--携程与高德南京出行资料并直接发送微信文字)。旧题卡和旧运行结果保留，不能与新题直接比较。
 
@@ -155,7 +155,7 @@
 
 ## 购物售后与通信日程（2026-10-16，待GUI验收）
 
-这六题来自独立套件，不属于上文历史授权的八题运行范围。机器题面见[独立 tasks.json](../eval/life-business-shopping-communication-20261016/tasks.json)，来源可读性与限制见[来源预检说明](life-business-shopping-communication-preflight-2026-10-16.md)。通过`--suite life-business-shopping-communication-20261016`接入同一准备/启动脚本，使用方舟模型并按variant选择Plan/Memory，具体命令及离线验收见[操作说明最新节](life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)；尚未通过真实Harness业务执行。默认只查公开页面，不登录、不读真实订单/聊天/日历，不发送消息、邀请或共享日历。S03与CM03仅要求新建指定DOCX。社区缴费不在本轮新增范围。
+这六题来自独立套件，不属于上文历史授权的八题运行范围。机器题面见[独立 tasks.json](../eval/life-business-shopping-communication-20261016/tasks.json)，来源可读性与限制见[来源预检说明](life-business-shopping-communication-preflight-2026-10-16.md)。通过`--suite life-business-shopping-communication-20261016`接入同一准备/启动脚本，使用方舟模型并按variant选择Plan/Memory，具体命令及离线验收见[操作说明最新节](./history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md#新六题方舟对照准备2026-10-16接续)；尚未通过真实Harness业务执行。默认只查公开页面，不登录、不读真实订单/聊天/日历，不发送消息、邀请或共享日历。S03与CM03仅要求新建指定DOCX。社区缴费不在本轮新增范围。
 
 ### S01 · 确认 iPhone 15 适用的充电器
 
