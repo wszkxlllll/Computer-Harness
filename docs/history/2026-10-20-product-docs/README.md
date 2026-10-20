@@ -47,3 +47,5 @@
 | `docs/window-and-progress-repair-results-2026-10-04.md` | [window-and-progress-repair-results-2026-10-04.md](./window-and-progress-repair-results-2026-10-04.md) |
 
 当前正文见[文档入口](../../DOCS-INDEX.md)。详细任务题面仍由原启动脚本读取对应归档文件；案例正文不代替冻结Goal或向执行模型提供评分答案。这里的诊断脚本仅作历史源文件保留，不是用户安装步骤，也不自动执行。
+
+2026-10-20报告复审：上一版两张示意图已从正文撤下，源文件仅放入`retired-figures/`保留，不再作为现行技术图展示；新图位置留空。

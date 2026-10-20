@@ -4,7 +4,7 @@ Lightspeaker是手机操作电脑的生活任务产品，Computer Harness是支�
 
 ## 总体结构
 
-![Lightspeaker总体架构](./assets/system-architecture.svg)
+<!-- 总体架构图暂留空，待正式制作。 -->
 
 手机网页通过HTTPS连接Relay，电脑Host主动建立经鉴权的WSS连接。Relay负责设备路由、转发和有界缓冲，不执行任务。Host将用户目标、审批和纠正交给ApplicationSession；每个任务建立独立Run，由同一RunController驱动，不在手机入口重建一套Agent循环。
 
@@ -14,7 +14,7 @@ Lightspeaker是手机操作电脑的生活任务产品，Computer Harness是支�
 
 ## 执行闭环与事实来源
 
-![运行执行流程](./assets/execution-flow.svg)
+<!-- 执行流程图暂留空，待正式制作。 -->
 
 ComputerSession描述本任务操作的执行环境；ObservationFrame描述一次观察及其坐标范围。模型产生的ToolCall经统一ToolRegistry验证，Computer工具再转换为ActionIntent。动作根据当前观察进行校验和风险准入，执行后形成ActionReceipt，再取得新观察。
 
