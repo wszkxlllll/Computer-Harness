@@ -10,7 +10,9 @@
 
 ## 1. 准备源码与依赖
 
-在 Windows 原生 PowerShell 5.1 或 PowerShell 7 中，从仓库根目录执行。本文使用 `pnpm.cmd`，不依赖 PowerShell 7 才有的 `$IsWindows`。建议 checkout 和 CUA driver 放在只含 ASCII 字符的路径，避免把中文路径交给 Node 或 daemon 时出现编码差异。
+先在电脑安装[Git for Windows](https://git-scm.com/downloads/win)和[Node.js](https://nodejs.org/en/download)，安装后重新打开终端，确认`git --version`、`node --version`及`npm.cmd --version`可用。Node至少为22.13.0，团队已使用24.19.0验证开发环境；已有满足要求的安装无需覆盖。受管浏览器还需要本机已安装并能正常打开Microsoft Edge。
+
+在 Windows 原生 PowerShell 5.1 或 PowerShell 7 中，先切到准备存放代码的父目录，再执行下方克隆命令；后续命令均在克隆得到的仓库根目录运行。本文使用 `pnpm.cmd`，不依赖 PowerShell 7 才有的 `$IsWindows`。建议 checkout 和 CUA driver 放在只含 ASCII 字符的路径，避免外部程序的中文路径编码问题。
 
 ```powershell
 git clone https://github.com/wszkxlllll/Computer-Harness.git
