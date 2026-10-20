@@ -752,32 +752,49 @@ describe("managed browser host pilot", () => {
     expect(selectManagedBrowserStartupActivity([{ ...activity, visibilityState: "unloaded" as const }], "current-target", true)).toBeUndefined();
   });
 
-  it("waits for the explicit startup target to leave blank and expose a ready redirected document", async () => {
+  it("accepts the exact redirected HTTP(S) target for observation while document.readyState is still loading", async () => {
     const target = { id: "startup-target", type: "page" };
     const readiness = vi.fn()
       .mockResolvedValueOnce({ url: "about:blank", readyState: "complete", hasDocumentElement: true, hasBody: true })
-      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true })
-      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "interactive", hasDocumentElement: true, hasBody: true });
+      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true });
 
     await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 1_000))
-      .resolves.toMatchObject({ url: "https://redirected.example/path", readyState: "interactive" });
-    expect(readiness).toHaveBeenCalledTimes(3);
+      .resolves.toMatchObject({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true });
+    expect(readiness).toHaveBeenCalledTimes(2);
     expect(readiness.mock.calls.every(([page]) => page.id === "startup-target")).toBe(true);
   });
 
-  it("does not treat a blank, non-http, loading, or bodyless page as navigation ready", async () => {
+  it("continues waiting for a missing target, blank/error URL, or missing DOM/body", async () => {
     const target = { id: "startup-target", type: "page" };
-    const readiness = vi.fn().mockResolvedValue({
-      url: "about:blank",
-      readyState: "complete",
-      hasDocumentElement: true,
-      hasBody: true,
-    });
-    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 20)).resolves.toBeUndefined();
-    expect(readiness).toHaveBeenCalled();
+    const readiness = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ url: "about:blank", readyState: "complete", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "chrome-error://chromewebdata/", readyState: "complete", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "https://example.test/", readyState: "loading", hasDocumentElement: false, hasBody: false })
+      .mockResolvedValueOnce({ url: "https://example.test/", readyState: "loading", hasDocumentElement: true, hasBody: false })
+      .mockResolvedValueOnce({ url: "https://example.test/", readyState: "loading", hasDocumentElement: true, hasBody: true });
+
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 1_000))
+      .resolves.toMatchObject({ url: "https://example.test/", readyState: "loading", hasDocumentElement: true, hasBody: true });
+    expect(readiness).toHaveBeenCalledTimes(6);
   });
 
-  it("bounds a navigation readiness reader that never resolves and aborts its signal", async () => {
+  it("aborts a startup observation readiness wait when the caller aborts", async () => {
+    const target = { id: "startup-target", type: "page" };
+    const controller = new AbortController();
+    let readerSignal: AbortSignal | undefined;
+    const readiness = vi.fn((_page, signal: AbortSignal) => {
+      readerSignal = signal;
+      return new Promise<undefined>((resolve) => signal.addEventListener("abort", () => resolve(undefined), { once: true }));
+    });
+    const pending = waitForManagedBrowserNavigationReady(target, readiness, controller.signal, 5_000);
+    controller.abort(new Error("run cancelled"));
+
+    await expect(pending).rejects.toThrow("run cancelled");
+    expect(readerSignal?.aborted).toBe(true);
+  });
+
+  it("bounds a startup observation readiness reader that never resolves and aborts its signal", async () => {
     const target = { id: "startup-target", type: "page" };
     let readerSignal: AbortSignal | undefined;
     const readiness = vi.fn((_page, signal: AbortSignal) => {

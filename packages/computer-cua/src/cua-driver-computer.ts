@@ -923,6 +923,8 @@ interface PrivateGrounding {
   readonly windowBinding?: CuaWindowBinding;
   /** Producer-local image viewport when public bounds are projected onto the desktop frame. */
   readonly producerViewport?: Viewport;
+  /** Native-window to desktop-physical scale, retained for explicit-ref freshness checks. */
+  readonly nativeToDesktopScale?: number;
   /** Current host-attested tab/generation, retained only by the Adapter. */
   readonly browserTarget?: ManagedBrowserTarget;
   /** Trusted physical browser content rect derived from the same observation's UIA Document. */
@@ -4268,8 +4270,16 @@ export class CuaDriverComputer implements Computer {
     }
     const privateGrounding = action.groundingRef === undefined ? undefined : this.groundings.get(String(action.basedOn));
     const resolvedGrounding = action.groundingRef === undefined ? undefined : privateGrounding?.elements.get(action.groundingRef);
-    const browserTarget = privateGrounding?.browserTarget ?? current.browserTarget;
     const domTransport = this.options.domGroundingTransport;
+    // Managed-browser identity is retained for target reconciliation, but it
+    // enables DOM-specific dispatch/focus gates only when this Run has an
+    // authorized DOM catalog and its Host transport. A companion Host alone
+    // must not turn ordinary foreground typing into a DOM-dependent action.
+    const domGroundingAvailable = domTransport !== undefined &&
+      (this.options.grounding === "dom-catalog-v1" || this.options.grounding === "hybrid-catalog-v1");
+    const browserTarget = domGroundingAvailable
+      ? privateGrounding?.browserTarget ?? current.browserTarget
+      : undefined;
     if (action.kind === "click" && privateGrounding?.catalog.source === "hybrid"
       && resolvedGrounding?.element.source === "uia"
       && isManagedBrowserContainerRole(resolvedGrounding.element.role)) {
@@ -5084,7 +5094,7 @@ async function readAuthorizedDesktopGrounding(
 
     const after = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
     if (!sameForegroundWindowSnapshot(before, after, target)) return undefined;
-    return projectGroundingToDesktop(grounding, capture, desktopViewport, target, after);
+    return projectGroundingToDesktop(grounding, capture, desktopViewport, target, after, input.platform);
   } catch (error) {
     if (signal.aborted) signal.throwIfAborted();
     // Desktop capture remains usable when an optional authorized grounding
@@ -5148,17 +5158,21 @@ async function revalidateDesktopManagedGrounding(input: DesktopGroundingFreshnes
       windowIdentityKey(binding.target) !== windowIdentityKey(browserTarget.windowTarget)) return false;
   const authorized = new Map<string, CuaWindowTarget>([[windowIdentityKey(hostTarget.windowTarget), hostTarget.windowTarget]]);
   const bbox = candidate.element.bbox;
-  const scaleX = viewport.width / binding.bounds.width;
-  const scaleY = viewport.height / binding.bounds.height;
+  const transform = desktopGroundingCoordinateTransform(
+    viewport,
+    binding.bounds,
+    input.platform,
+    grounding.nativeToDesktopScale,
+  );
   if (bbox === undefined || bbox.coordinateSpace !== "physical" ||
-      ![bbox.x, bbox.y, bbox.width, bbox.height, scaleX, scaleY].every(Number.isFinite) ||
-      bbox.width <= 0 || bbox.height <= 0 || scaleX <= 0 || scaleY <= 0 ||
-      Math.abs(scaleX - scaleY) > Math.max(scaleX, scaleY) * 0.01) return false;
+      transform === undefined ||
+      ![bbox.x, bbox.y, bbox.width, bbox.height].every(Number.isFinite) ||
+      bbox.width <= 0 || bbox.height <= 0) return false;
   try {
     const before = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
     const target = foregroundAuthorizedWindow(before, authorized);
     if (target === undefined || !sameWindowGeometry(target.bounds, binding.bounds) ||
-        isOccludedDesktopGroundingCandidate(bbox, target, before, scaleX, scaleY)) return false;
+        isOccludedDesktopGroundingCandidate(bbox, target, before, transform.nativeToDesktopScaleX, transform.nativeToDesktopScaleY)) return false;
     const activePage = await transport.collect({
       observationId: grounding.catalog.observationId,
       computerSessionId: input.sessionId,
@@ -5169,7 +5183,7 @@ async function revalidateDesktopManagedGrounding(input: DesktopGroundingFreshnes
     const latestTarget = foregroundAuthorizedWindow(after, authorized);
     if (latestTarget === undefined || !sameForegroundWindowSnapshot(before, after, target) ||
         !sameWindowGeometry(latestTarget.bounds, binding.bounds) ||
-        isOccludedDesktopGroundingCandidate(bbox, latestTarget, after, scaleX, scaleY)) return false;
+        isOccludedDesktopGroundingCandidate(bbox, latestTarget, after, transform.nativeToDesktopScaleX, transform.nativeToDesktopScaleY)) return false;
     if (!isBoundedBrowserIdentity(activePage.tabId) || !isBoundedBrowserIdentity(activePage.generation)) return false;
     if (activePage.tabId !== browserTarget.tabId || activePage.generation !== browserTarget.generation) {
       // The exact Host-owned window now shows a different managed tab. Keep
@@ -5191,21 +5205,20 @@ function projectGroundingToDesktop(
   desktopViewport: Viewport,
   target: CuaWindowInfo,
   inventory: CuaWindowInventory,
+  platform: NodeJS.Platform,
 ): PrivateGrounding | undefined {
   const bounds = capture.binding.bounds;
-  const scaleX = capture.viewport.width / bounds.width;
-  const scaleY = capture.viewport.height / bounds.height;
-  if (!Number.isFinite(scaleX) || !Number.isFinite(scaleY) || scaleX <= 0 || scaleY <= 0 ||
-      Math.abs(scaleX - scaleY) > Math.max(scaleX, scaleY) * 0.01) return undefined;
-  // Primary-desktop coordinates start at (0,0); use the exact target bounds
-  // for origin and the captured image/bounds ratio for physical pixel scale.
-  // A maximized window may extend beyond an edge, so only individual element
-  // boxes wholly inside the desktop image survive the clipping check below.
+  const transform = desktopGroundingCoordinateTransform(capture.viewport, bounds, platform, capture.nativeToDesktopScale);
+  if (transform === undefined) return undefined;
+  // Win32 window bounds and the desktop viewport are both native physical
+  // pixels. Window captures may be reduced, so undo that reduction for local
+  // candidate geometry while keeping the native window origin unchanged.
+  // macOS window bounds are logical points; retain the established Retina
+  // backing-scale projection for both origin and unrelated inventory rows.
+  // Other platforms keep the previous logical-origin behavior.
   const windowFrame = {
-    x: bounds.x * scaleX,
-    y: bounds.y * scaleY,
-    width: capture.viewport.width,
-    height: capture.viewport.height,
+    x: bounds.x * transform.nativeToDesktopScaleX,
+    y: bounds.y * transform.nativeToDesktopScaleY,
   };
 
   const elements = new Map<string, PrivateGroundingElement>();
@@ -5217,15 +5230,18 @@ function projectGroundingToDesktop(
     const local = candidate.element.bbox;
     if (local === undefined || local.coordinateSpace !== "physical") continue;
     const bbox = {
-      x: windowFrame.x + local.x,
-      y: windowFrame.y + local.y,
-      width: local.width,
-      height: local.height,
+      x: windowFrame.x + local.x * transform.localToDesktopScaleX,
+      y: windowFrame.y + local.y * transform.localToDesktopScaleY,
+      width: local.width * transform.localToDesktopScaleX,
+      height: local.height * transform.localToDesktopScaleY,
       coordinateSpace: "physical" as const,
     };
     if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.width > desktopViewport.width || bbox.y + bbox.height > desktopViewport.height ||
-        isOccludedDesktopGroundingCandidate(bbox, target, inventory, scaleX, scaleY)) continue;
-    const point = { x: windowFrame.x + candidate.point.x, y: windowFrame.y + candidate.point.y };
+        isOccludedDesktopGroundingCandidate(bbox, target, inventory, transform.nativeToDesktopScaleX, transform.nativeToDesktopScaleY)) continue;
+    const point = {
+      x: windowFrame.x + candidate.point.x * transform.localToDesktopScaleX,
+      y: windowFrame.y + candidate.point.y * transform.localToDesktopScaleY,
+    };
     const element: GroundingElement = { ...candidate.element, bbox };
     elements.set(elementRef, {
       ...candidate,
@@ -5245,12 +5261,69 @@ function projectGroundingToDesktop(
     ...grounding,
     windowBinding: capture.binding,
     producerViewport: capture.viewport,
+    nativeToDesktopScale: transform.nativeToDesktopScaleX,
     elements,
     catalog: {
       ...grounding.catalog,
       ...(publicElements.length === grounding.catalog.elements.length ? {} : { completeness: "partial" as const }),
       elements: publicElements,
     },
+  };
+}
+
+interface DesktopGroundingCoordinateTransform {
+  /** Map native/logical origins and inventory bounds into desktop physical pixels. */
+  readonly nativeToDesktopScaleX: number;
+  readonly nativeToDesktopScaleY: number;
+  /** Map window-capture-local physical pixels into desktop physical pixels. */
+  readonly localToDesktopScaleX: number;
+  readonly localToDesktopScaleY: number;
+}
+
+function desktopGroundingCoordinateTransform(
+  viewport: Viewport,
+  bounds: CuaWindowBinding["bounds"],
+  platform: NodeJS.Platform,
+  reportedNativeToDesktopScale?: number,
+): DesktopGroundingCoordinateTransform | undefined {
+  if (![viewport.width, viewport.height, bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) ||
+      viewport.width <= 0 || viewport.height <= 0 || bounds.width <= 0 || bounds.height <= 0) return undefined;
+  const captureScaleX = viewport.width / bounds.width;
+  const captureScaleY = viewport.height / bounds.height;
+  if (![captureScaleX, captureScaleY].every(Number.isFinite) || captureScaleX <= 0 || captureScaleY <= 0 ||
+      Math.abs(captureScaleX - captureScaleY) > Math.max(captureScaleX, captureScaleY) * 0.01) return undefined;
+
+  if (platform === "win32") {
+    // Win32 bounds are already in desktop physical pixels. Only the local
+    // image-space candidate needs the inverse of the actual capture reduction.
+    return {
+      nativeToDesktopScaleX: 1,
+      nativeToDesktopScaleY: 1,
+      localToDesktopScaleX: 1 / captureScaleX,
+      localToDesktopScaleY: 1 / captureScaleY,
+    };
+  }
+
+  if (platform === "darwin") {
+    // macOS reports logical native geometry and explicitly reports screenshot
+    // backing scale in get_window_state metadata. Capture/nativeBounds is only
+    // the image sampling ratio; do not confuse it with Retina scale.
+    if (reportedNativeToDesktopScale !== 1 && reportedNativeToDesktopScale !== 2) return undefined;
+    return {
+      nativeToDesktopScaleX: reportedNativeToDesktopScale,
+      nativeToDesktopScaleY: reportedNativeToDesktopScale,
+      localToDesktopScaleX: reportedNativeToDesktopScale / captureScaleX,
+      localToDesktopScaleY: reportedNativeToDesktopScale / captureScaleY,
+    };
+  }
+
+  // Other platforms retain the prior origin/bounds interpretation until they
+  // define a separate native coordinate contract.
+  return {
+    nativeToDesktopScaleX: captureScaleX,
+    nativeToDesktopScaleY: captureScaleY,
+    localToDesktopScaleX: 1,
+    localToDesktopScaleY: 1,
   };
 }
 

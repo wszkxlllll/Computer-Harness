@@ -459,6 +459,7 @@ export interface ManagedBrowserPageActivity {
 
 export interface ManagedBrowserNavigationReadiness {
   readonly url: string;
+  /** Observed for diagnostics; "loading" does not prevent DOM observation. */
   readonly readyState: "loading" | "interactive" | "complete";
   readonly hasDocumentElement: boolean;
   readonly hasBody: boolean;
@@ -469,7 +470,7 @@ export type ManagedBrowserNavigationReadinessReader = (
   signal: AbortSignal,
 ) => Promise<ManagedBrowserNavigationReadiness | undefined>;
 
-/** Wait for the explicit startup target to become a usable document. */
+/** Wait for the explicit HTTP(S) startup target to expose DOM/body for observation; this does not imply load completion. */
 export async function waitForManagedBrowserNavigationReady(
   page: ManagedBrowserDevToolsPage,
   readReadiness: ManagedBrowserNavigationReadinessReader,
@@ -483,7 +484,7 @@ export async function waitForManagedBrowserNavigationReady(
     const timeoutController = new AbortController();
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
-    const timedOut = Symbol("navigation-readiness-timeout");
+    const timedOut = Symbol("startup-observation-readiness-timeout");
     let readiness: ManagedBrowserNavigationReadiness | undefined;
     try {
       const readSignal = AbortSignal.any([signal, timeoutController.signal]);
@@ -493,7 +494,7 @@ export async function waitForManagedBrowserNavigationReady(
       });
       const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
         timeoutId = setTimeout(() => {
-          timeoutController.abort(new Error("managed browser navigation readiness timed out"));
+          timeoutController.abort(new Error("managed browser startup observation readiness timed out"));
           resolve(timedOut);
         }, remainingMs);
       });
@@ -508,7 +509,7 @@ export async function waitForManagedBrowserNavigationReady(
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
       if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
-      if (!timeoutController.signal.aborted) timeoutController.abort(new Error("navigation readiness check completed"));
+      if (!timeoutController.signal.aborted) timeoutController.abort(new Error("startup observation readiness check completed"));
     }
     let isHttpUrl = false;
     if (readiness !== undefined) {
@@ -517,9 +518,7 @@ export async function waitForManagedBrowserNavigationReady(
         isHttpUrl = url.protocol === "http:" || url.protocol === "https:";
       } catch { /* transient or invalid document URL */ }
     }
-    if (readiness !== undefined && isHttpUrl
-      && (readiness.readyState === "interactive" || readiness.readyState === "complete")
-      && readiness.hasDocumentElement && readiness.hasBody) return readiness;
+    if (readiness !== undefined && isHttpUrl && readiness.hasDocumentElement && readiness.hasBody) return readiness;
     await wait(Math.min(50, Math.max(0, deadline - Date.now())), signal);
   }
   return undefined;
@@ -1153,7 +1152,7 @@ export class ManagedBrowserHost {
           Math.max(1, startupReadyDeadline - Date.now()),
         );
         if (startupPage === undefined) {
-          throw new DomGroundingUnavailableError("managed browser startup page did not finish navigation and expose a DOM document");
+          throw new DomGroundingUnavailableError("managed browser startup target did not expose an HTTP(S) DOM document and body for observation");
         }
       }
       if (launchUrls.length === 1 && launchUrls[0] === bootstrapUrl) {

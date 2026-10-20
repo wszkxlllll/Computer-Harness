@@ -26,17 +26,25 @@ import {
   validateCliArgv,
 } from "./common.mjs";
 
-const VALUE_FLAGS = new Set(["--output-dir", "--profile-label", "--travel-date", "--as-of-date", "--task-id", "--variant", "--wechat-chat", "--suite", "--api-key-env", "--env-file"]);
+const VALUE_FLAGS = new Set(["--output-dir", "--profile-label", "--travel-date", "--as-of-date", "--task-id", "--variant", "--wechat-chat", "--suite", "--api-key-env", "--env-file", "--risk-guard"]);
 const BOOLEAN_FLAGS = new Set(["--help"]);
 const CUA_SOCKET_TOKEN = "{{CUA_SOCKET}}";
 const WECHAT_CHAT_TOKEN = "{{WECHAT_CHAT}}";
 
+export function resolveRiskGuard(value) {
+  const selected = value ?? "layered";
+  if (selected !== "off" && selected !== "layered") throw new Error("--risk-guard must be off or layered");
+  return selected;
+}
+
 export function parsePrepareArgs(argv) {
-  return parseFlags(argv, {
+  const options = parseFlags(argv, {
     valueFlags: VALUE_FLAGS,
     booleanFlags: BOOLEAN_FLAGS,
     required: ["--output-dir", "--profile-label", "--travel-date", "--as-of-date", "--task-id", "--variant"],
   });
+  if (options["--risk-guard"] !== undefined) options["--risk-guard"] = resolveRiskGuard(options["--risk-guard"]);
+  return options;
 }
 
 function assertNoUnresolvedTemplate(value) {
@@ -59,8 +67,10 @@ export function renderGoal(task, outputAttemptDir, travelDate, wechatChat) {
   return { goal, usesTravelDate, usesWechatChat };
 }
 
-export function buildCliArgvTemplate({ goal, task, variant, variantConfig = VARIANTS[variant], limits, profileLabel, runtimeOutputDir, envFilePath, model = "deepseek-flash", batching = "same-control-input-v1", monitor = "shadow" }) {
+export function buildCliArgvTemplate({ goal, task, variant, variantConfig = VARIANTS[variant], limits, profileLabel, runtimeOutputDir, envFilePath, model = "deepseek-flash", batching = "same-control-input-v1", monitor = "shadow", riskGuard: requestedRiskGuard }) {
   const config = variantConfig;
+  const riskGuard = resolveRiskGuard(requestedRiskGuard);
+  const riskModel = riskGuard === "off" ? "off" : "same";
   const argv = [
     "--goal", goal,
     "--model", model,
@@ -76,8 +86,9 @@ export function buildCliArgvTemplate({ goal, task, variant, variantConfig = VARI
     "--context-max-events", "80",
     "--monitor", monitor,
     "--profile", "live-interactive",
-    "--risk-guard", "layered",
-    "--risk-model", "same",
+    "--risk-guard", riskGuard,
+    ...(riskGuard === "off" ? ["--confirm-risk-guard-off"] : []),
+    "--risk-model", riskModel,
     "--risk-max-model-requests", String(limits.riskRequests),
     "--risk-timeout-ms", "90000",
     "--cleanup-deadline-ms", "15000",
@@ -181,6 +192,9 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
   const suiteVariants = variantsForSuite(suite.suiteId);
   if (!Object.hasOwn(suiteVariants, variant)) throw new Error(`--variant must be one of ${Object.keys(suiteVariants).join(", ")}`);
   const variantConfig = suiteVariants[variant];
+  const riskGuard = resolveRiskGuard(options["--risk-guard"]);
+  const riskModel = riskGuard === "off" ? "off" : "same";
+  const riskModelRequestsEnabled = riskModel !== "off";
   const asOfTime = parseIsoDate(options["--as-of-date"], "--as-of-date");
   const travelTime = parseIsoDate(options["--travel-date"], "--travel-date");
   const deltaDays = (travelTime - asOfTime) / 86_400_000;
@@ -234,6 +248,7 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
     model: suite.model,
     batching: suite.batching,
     monitor: suite.suiteId === SIX_DOMAIN_SUITE_ID ? "guidance" : "shadow",
+    riskGuard,
   });
   const parseArgs = await loadCliParser();
   validateCliArgv(parseArgs, argvTemplate.map((value) => value === CUA_SOCKET_TOKEN ? "dry-run-cua-socket-placeholder" : value));
@@ -297,13 +312,16 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
       monitor: suite.suiteId === SIX_DOMAIN_SUITE_ID ? "guidance" : "shadow",
       ...(variantConfig.supervision === undefined ? {} : { supervision: { ...variantConfig.supervision } }),
       riskProfile: "live-interactive",
-      riskGuard: "layered",
-      riskModel: "same",
+      riskGuard,
+      riskModel,
+      confirmRiskGuardOff: riskGuard === "off",
+      riskModelRequestsEnabled,
+      riskModelRequestLimitStatus: riskModelRequestsEnabled ? "active" : "inactive_risk_model_off",
       contextMode: "recent",
       contextMaxHistoryEvents: 80,
       windowSwitch: "opened-windows-v1",
       windowSelection: "local",
-      grounding: "hybrid-catalog-v1",
+      grounding: "off",
       requestedGrounding: "off",
       managedBrowserCompanion: true,
       initialCapture: "primary-desktop",
@@ -386,7 +404,11 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
           fileName: task.deliverables[0]?.name ?? null,
           status: "pending",
           reviewedAt: null,
-          notes: "Human must separately verify the same saved file was sent to the exact target; this is not auto-scored.",
+          notes: task.outcomeMode === "response"
+            ? "Human must verify that the text message was sent to the exact target; no attachment is expected and delivery is not auto-scored."
+            : task.outcomeMode === "document"
+              ? "Human must separately verify the same saved file was sent to the exact target; this is not auto-scored."
+              : "Human must verify that the exact target contains the unsent text draft; runner does not inspect chat history or send state.",
         },
       } : {}),
     },
@@ -417,7 +439,7 @@ export async function createPlan(options, { root = ROOT, manifestPath, now = () 
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv.length === 1 && argv[0] === "--help") {
-    process.stdout.write("Usage: node scripts/life-eval/prepare.mjs [--suite <life-business-20261015|life-business-shopping-communication-20261016>] --output-dir <absolute> --profile-label <label> --as-of-date YYYY-MM-DD --travel-date YYYY-MM-DD --task-id <suite task id> --variant <B00|P10|M01|PM11> [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--env-file <absolute>] [--wechat-chat <exact recipient name; only when the selected task requires WeChat>]\nOmitting --suite preserves the original 2026-10-15 nine-task suite. Prepare never reads API-key values or the env file.\n");
+    process.stdout.write("Usage: node scripts/life-eval/prepare.mjs [--suite <suiteId>] --output-dir <absolute> --profile-label <label> --as-of-date YYYY-MM-DD --travel-date YYYY-MM-DD --task-id <suite task id> --variant <variant> [--risk-guard <layered|off>] [--api-key-env <ARK_API_KEY|HUOSHAN_API_KEY for Ark suite>] [--env-file <absolute>] [--wechat-chat <exact recipient name; only when the selected task requires WeChat>]\nOmitting --risk-guard preserves layered Risk Guard with --risk-model same. Selecting off freezes --risk-model off and --confirm-risk-guard-off; the positive risk request cap remains recorded but is inactive. Prepare never reads API-key values or the env file.\n");
     return;
   }
   const options = parsePrepareArgs(argv);
@@ -430,6 +452,9 @@ export async function main(argv = process.argv.slice(2)) {
     task: result.plan.task.id,
     variant: result.plan.selection.variant,
     model: result.plan.configuration.model,
+    riskGuard: result.plan.configuration.riskGuard,
+    riskModel: result.plan.configuration.riskModel,
+    riskModelRequestsEnabled: result.plan.configuration.riskModelRequestsEnabled,
     providerEnabledByDefault: false,
     cliEntry: result.plan.cli.entry,
   }, null, 2)}\n`);

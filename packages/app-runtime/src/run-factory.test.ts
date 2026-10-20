@@ -1775,7 +1775,7 @@ describe("app-runtime RunHandle", () => {
         },
       });
 
-      expect(handle.config.grounding).toBe("hybrid-catalog-v1");
+      expect(handle.config.grounding).toBe("off");
       expect(handle.config.computer).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
       expect(computerConfig).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank", managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles" });
       expect(providerConfig?.computer).not.toHaveProperty("managedBrowserCompanion");
@@ -1787,6 +1787,39 @@ describe("app-runtime RunHandle", () => {
       expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
       expect(JSON.stringify(report.summary)).not.toContain("managedBrowserCompanion");
       expect(JSON.stringify(report.summary)).not.toContain("HarnessOwned");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps explicit grounding opt-in independent from managed-browser companion lifecycle", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-browser-companion-grounding-on-"));
+    let computerConfig: ResolvedRunConfig["computer"] | undefined;
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        grounding: "hybrid-catalog-v1",
+        windowSwitch: "opened-windows-v1",
+        computer: {
+          kind: "cua",
+          socketPath: "fixture.sock",
+          screenshotDir: "screenshots",
+          managedBrowserCompanion: true,
+        },
+      }, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "explicit hybrid" }; } }),
+        createComputer: (options) => {
+          computerConfig = options.config;
+          const calls = { open: 0, observe: 0, close: 0 };
+          return Promise.resolve({ ...fakeComputer(calls), async listWindows() { return []; } });
+        },
+      });
+
+      expect(handle.config.grounding).toBe("hybrid-catalog-v1");
+      expect(handle.config.computer).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(computerConfig).toMatchObject({ grounding: "hybrid-catalog-v1", managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });

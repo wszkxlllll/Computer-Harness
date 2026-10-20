@@ -351,6 +351,46 @@ describe("createComputer", () => {
     expect(createHost).not.toHaveBeenCalled();
   });
 
+  it("keeps the managed-browser Host/profile and cross-window binding when grounding is off", async () => {
+    const fixture = managedFixture();
+    const computer = await createComputer({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      grounding: "off",
+      managedBrowserCompanion: true,
+      managedBrowserUrl: "https://example.test/entry",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "fixture.profile",
+      managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles",
+      windowSwitch: "opened-windows-v1",
+    }, {
+      createManagedBrowserHost: fixture.createHost,
+      openCuaBootstrapSession: fixture.openBootstrap,
+      importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+    });
+    const session = await computer.open({}, fixture.signal);
+
+    expect(fixture.calls).toMatchObject({ bootstrapOpen: 1, hostConstruct: 1, hostStart: 1, delegateConstruct: 1, delegateOpen: 1 });
+    expect(fixture.calls.hostOptions).toMatchObject({
+      url: "https://example.test/entry",
+      profileMode: "persistent",
+      profileLabel: "fixture.profile",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    });
+    expect(fixture.calls.delegateOptions).toMatchObject({
+      grounding: "off",
+      windowSwitch: "opened-windows-v1",
+      browserTarget: managedTarget,
+    });
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("windowSwitchAllowedTargets");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("domGroundingTransport");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+
+    await computer.close(session);
+    expect(fixture.calls).toMatchObject({ delegateClose: 1, hostClose: 1, bootstrapClose: 1 });
+  });
+
   it("rejects SDK persistent managed profiles without an explicit Harness-owned root", async () => {
     await expect(createComputer({
       kind: "cua",

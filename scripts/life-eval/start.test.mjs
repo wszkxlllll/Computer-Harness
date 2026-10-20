@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SIX_DOMAIN_SUITE_ID, SIX_DOMAIN_VARIANTS, SUITE_ID, manifestPathForSuite, sha256 } from "./common.mjs";
+import { MANIFEST_PATH, ROOT, SHOPPING_COMMUNICATION_SUITE_ID, SIX_DOMAIN_SUITE_ID, SIX_DOMAIN_VARIANTS, SUITE_ID, manifestPathForSuite, sha256, sha256CanonicalText } from "./common.mjs";
 import { createPlan, renderGoal } from "./prepare.mjs";
 import {
   beijingDate,
@@ -25,6 +25,15 @@ const fixtureConfig = {
   candidateDriverSource: "7852ab1",
   envFilePath: join(tmpdir(), "life-eval-private-fixture.env"),
 };
+
+test("canonical text fingerprints are stable across CRLF, CR, and LF checkouts", () => {
+  const lf = "first line\nsecond line\n";
+  assert.equal(sha256CanonicalText(lf.replace(/\n/gu, "\r\n")), sha256CanonicalText(lf));
+  assert.equal(sha256CanonicalText(lf.replace(/\n/gu, "\r")), sha256CanonicalText(lf));
+  assert.notEqual(sha256CanonicalText("First line\nsecond line\n"), sha256CanonicalText(lf));
+  assert.notEqual(sha256CanonicalText("first line \nsecond line\n"), sha256CanonicalText(lf));
+  assert.notEqual(sha256CanonicalText(lf.slice(0, -1)), sha256CanonicalText(lf));
+});
 
 test("start derives today's Beijing date and tomorrow independent of host timezone", () => {
   const justAfterBeijingMidnight = new Date("2026-10-14T16:30:00.000Z");
@@ -307,16 +316,53 @@ test("six-domain suite preserves source goals and provenance while isolating CP0
     C: { planning: false, memory: "off", retrieval: "off", supervision: "dynamic" },
     D: { planning: true, memory: "facts", retrieval: "lexical", supervision: "dynamic" },
   });
-  for (const taskId of ["G01", "T03", "M02"]) {
+  for (const taskId of ["G01", "M02"]) {
     const actual = manifest.tasks.find((task) => task.id === taskId);
     const source = oldManifest.tasks.find((task) => task.id === taskId);
-    const expectedGoal = taskId === "T03"
-      ? `${source.goal}如高德地图请求浏览器定位权限，可以选择允许本次请求；这不授权其他网站或其他类型的权限。`
-      : source.goal;
-    assert.equal(actual.goal, expectedGoal);
+    assert.equal(actual.goal, source.goal);
     assert.deepEqual(actual.checks, source.checks);
     assert.equal(actual.sourceProvenance.sourceSuiteId, oldManifest.suiteId);
   }
+  const revisedT03 = manifest.tasks.find((task) => task.id === "T03");
+  const originalT03 = oldManifest.tasks.find((task) => task.id === "T03");
+  assert.equal(revisedT03.sourceProvenance.sourceSuiteId, oldManifest.suiteId);
+  for (const [taskId, provenance] of Object.entries(manifest.provenance)) {
+    const task = manifest.tasks.find((candidate) => candidate.id === taskId);
+    assert.ok(task, `${taskId} provenance must refer to a manifest task`);
+    for (const [pathField, hashField] of [
+      ["sourceManifestPath", "sourceManifestSha256"],
+      ["sourceTaskCardsPath", "sourceTaskCardsSha256"],
+      ["sourceSyntheticInputsPath", "sourceSyntheticInputsSha256"],
+    ]) {
+      const sourcePath = provenance[pathField];
+      if (typeof sourcePath !== "string") continue;
+      const expectedHash = sha256CanonicalText(await readFile(join(ROOT, sourcePath), "utf8"));
+      assert.equal(provenance[hashField], expectedHash, `${taskId} ${hashField} must fingerprint canonical UTF-8 text`);
+      assert.equal(task.sourceProvenance?.[hashField], expectedHash, `${taskId} task provenance must match the suite provenance`);
+    }
+  }
+  assert.equal(manifest.provenance.T03.copyPolicy, revisedT03.sourceProvenance.copyPolicy);
+  assert.match(revisedT03.sourceProvenance.copyPolicy, /user-authorized-revision/u);
+  assert.match(revisedT03.sourceProvenance.copyPolicy, /not directly comparable/u);
+  assert.notEqual(revisedT03.goal, originalT03.goal);
+  assert.notDeepEqual(revisedT03.checks, originalT03.checks);
+  assert.equal(revisedT03.outcomeMode, "response");
+  assert.deepEqual(revisedT03.requiredApps, ["managed-browser", "WeChat"]);
+  assert.deepEqual(revisedT03.deliverables, []);
+  assert.match(revisedT03.goal, /两班实际查到的车次/u);
+  assert.match(revisedT03.goal, /比较一两种方案/u);
+  assert.match(revisedT03.goal, /只向这个精确会话发送文字/u);
+  assert.match(revisedT03.goal, /不得自动批准任何发送审批/u);
+  assert.doesNotMatch(revisedT03.goal, /WPS|18磅|OUTPUT_DIR|DOCX/u);
+  const sixDomainReadme = await readFile(join(ROOT, "eval", SIX_DOMAIN_SUITE_ID, "README.md"), "utf8");
+  const t03Section = sixDomainReadme.replace(/\r\n?/gu, "\n").match(/### T03 —[\s\S]*?(?=\n### M02 —|$)/u)?.[0];
+  const quotedGoal = t03Section?.match(/完整自然 Goal：\n\n((?:>.*(?:\n|$))+)/u)?.[1];
+  const goalFromReadme = quotedGoal?.replace(/\n$/u, "").split("\n").map((line) => line.replace(/^> ?/u, "")).join("\n");
+  assert.equal(goalFromReadme, revisedT03.goal, "six-domain README T03 Goal must match its manifest exactly");
+  assert.match(t03Section, /不制作或发送文件\/附件/u);
+  assert.doesNotMatch(t03Section, /\bWPS\b|DOCX|18磅|保存文件夹|文件名：/u);
+  assert.match(t03Section, /不可直接比较/u);
+  assert.match(t03Section, /默认会话为本机配置的“文件传输助手”/u);
   for (const taskId of ["S02", "CM02"]) {
     const actual = manifest.tasks.find((task) => task.id === taskId);
     const source = shoppingManifest.tasks.find((task) => task.id === taskId);
@@ -387,6 +433,9 @@ test("six-domain offline plans freeze Ark guidance, primary desktop, and each A-
       assert.equal(prepared.plan.configuration.contextMaxHistoryEvents, 80);
       assert.equal(prepared.plan.configuration.initialCapture, "primary-desktop");
       assert.equal(prepared.plan.configuration.riskGuard, "layered");
+      assert.equal(prepared.plan.configuration.riskModel, "same");
+      assert.equal(prepared.plan.configuration.confirmRiskGuardOff, false);
+      assert.equal(prepared.plan.configuration.riskModelRequestsEnabled, true);
       assert.equal(prepared.plan.configuration.planning, settings.planning);
       assert.equal(prepared.plan.configuration.memory, settings.memory);
       assert.equal(prepared.plan.configuration.memoryRetrieval, settings.retrieval);
@@ -400,6 +449,9 @@ test("six-domain offline plans freeze Ark guidance, primary desktop, and each A-
       assert.equal(argv[argv.indexOf("--batching") + 1], "off");
       assert.equal(argv[argv.indexOf("--memory") + 1], settings.memory);
       assert.equal(argv.indexOf("--planning") !== -1, settings.planning);
+      assert.equal(argv[argv.indexOf("--risk-guard") + 1], "layered");
+      assert.equal(argv[argv.indexOf("--risk-model") + 1], "same");
+      assert.equal(argv.includes("--confirm-risk-guard-off"), false);
       assert.equal(argv.includes("--cua-window-pid"), false);
       assert.equal(argv.includes("--cua-window-id"), false);
       assert.equal(argv.includes("--window-switch"), true);
