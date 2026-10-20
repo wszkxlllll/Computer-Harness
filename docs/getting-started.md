@@ -154,6 +154,26 @@ Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随�
 
 启用 Memory `hybrid` 时还要把完整 Qwen embeddings URL 传给 `--memory-embedding-endpoint`，形如 `https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings`。只设置 `MEMORY_EMBEDDING_API_KEY` 而不提供 endpoint，或只提供 endpoint 而没有 key，都不能启动 Hybrid；`lexical` 模式不需要这两个配置。
 
+### 有限恢复与 Run 墙钟
+
+Runtime 最多重试一次。单个 decision 的恢复窗口按两次已配置的 HTTP 请求期限加一次 500ms 延迟计算，不再使用独立的固定 120 秒窗口；每次恢复仍须同时满足请求次数、decision 剩余时间和 Run 剩余墙钟。默认工厂和注入 `createProvider` 使用同一份配置期限；自定义 Provider 必须遵守工厂传入的对应请求期限，不能把更长的真实 HTTP 等待伪装成较短预留。
+
+Ark 的可重试状态与有界 `Retry-After` 建议仍按 Provider 的现有策略处理；等待和重新准备请求后仍须重新检查独立预算。请求次数收尾保持最后一次请求只供 `terminate`，不恢复旧的三请求预留；墙钟收尾与请求次数边界独立，任一进入收尾都不允许继续 GUI 探索。
+
+通过 app-runtime `createRun` 使用可选 `runTimeoutMs` 时，硬期限从 `start()` 开始计算，包含观察、准备请求和等待用户输入。Runtime 在剩余时间进入收尾预留区后停止 GUI 探索，Context 只提供 `terminate`，并保留最终硬取消；默认收尾预留为一次 Provider 请求期限。这是程序化 Run 配置，不是新增 CLI flag；外部宿主若另设硬取消，须把同一总期限传入 Run，不能只在宿主维护一个 Runtime 不可见的计时器。
+
+完整的协议错误只允许零执行后的有限反馈重决策；`terminate` 仍须独占响应。截断 `length` 无论参数看似完整与否都不执行，也不自动重试；此前已经完成的动作和结果未知的动作都不会因为模型响应恢复而重放。核对任务是否完成与记录是否一致分别表达，不强行改写模型的原始状态。
+
+### 受管浏览器的只读可见表格证据
+
+DOM/hybrid 观察可附带独立于交互元素 hot set 的 `grounding.visibleText`。它只面向当前主文档视口内可证明可见的原生 HTML 表格，保留原 Unicode、行列索引、表头和跨行跨列关系；继承同次 observation、页面和 surface 绑定，不生成可点击元素引用。
+
+页面来源只补充同次受管采集的有界 `pageUrl`，不从启动地址或截图猜测；Context 要求当前 observation/session/surface 一致。只保留无 userinfo、无常见认证参数的完整 HTTP(S) 地址，无法安全提供时标记未知；地址是来源数据，不是指令或额外导航授权。
+
+采集与请求投影都有界：最多 2 个区域、24 行、12 列、192 个单元格、每格 320 字符及总计 4800 字符。超限或可见性不足时省略整格并标记 partial/truncated；Context 放不下时整块省略并记录 trace，不把半格文字冒充完整证据。这里的 complete 只描述该有界表格采集，不代表整页覆盖。
+
+隐藏、裁剪、遮挡或绘制无法可靠界定的内容不作文字证据；图片/canvas、div/ARIA grid、iframe 和 shadow table 不由此通路读取。空或 partial 证据不能证明官网未提供某字段。字段与来源绑定有助于准确转录，但不代替业务真值核对，也不保证模型不会误读或改写最终答案。
+
 ## 5. OSWorld
 
 OSWorld Python、VM、磁盘和快照在仓库外维护。先阅读：

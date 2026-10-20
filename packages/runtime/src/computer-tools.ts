@@ -119,7 +119,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "scroll",
-      description: "Scroll at a screen point by positive wheel ticks.",
+      description: "Scroll at a screen point. Supply x, y, direction (up, down, left, or right), and positive integer ticks; all four are required. Do not use delta, amount, negative ticks, or extra fields.",
       category: "computer",
       coordinate: { fields: ["x", "y"] },
       inputSchema: {
@@ -450,6 +450,11 @@ function parseSingleKey(value: JsonValue): string[] {
 function parseScroll(value: JsonValue): Extract<GuiActionDraft, { kind: "scroll" }> extends infer T
   ? T extends { kind: "scroll" } ? Omit<T, "kind"> : never : never {
   const object = asObject(value, "scroll");
+  for (const key of Object.keys(object)) {
+    if (key !== "x" && key !== "y" && key !== "direction" && key !== "ticks") {
+      throw new Error(`scroll.${key} is not an accepted argument`);
+    }
+  }
   const direction = object.direction;
   if (direction !== "up" && direction !== "down" && direction !== "left" && direction !== "right") {
     throw new Error("scroll.direction must be up, down, left, or right");

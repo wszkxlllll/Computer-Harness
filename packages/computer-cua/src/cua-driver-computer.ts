@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { BoundWindowMissingError } from "@computer-harness/protocol";
+import { BoundWindowMissingError, isGroundingWebUrl } from "@computer-harness/protocol";
 import { dirname, join } from "node:path";
 import { cuaSdkVersionForPlatform, loadCuaSdkModule, type CuaDriverLike } from "./cua-sdk-platform.js";
 import type { ToolResult } from "./cua-sdk-contract.js";
@@ -5257,6 +5257,11 @@ function projectGroundingToDesktop(
     publicElements.push(element);
   }
   if (elements.size === 0) return undefined;
+  // Table text still uses window-capture coordinates and has no trustworthy
+  // desktop overlay intersection test. Keep it available to native-window
+  // observations only until both geometry and occlusion can be proven.
+  const { visibleText: windowLocalVisibleText, ...desktopCatalog } = grounding.catalog;
+  void windowLocalVisibleText;
   return {
     ...grounding,
     windowBinding: capture.binding,
@@ -5264,7 +5269,7 @@ function projectGroundingToDesktop(
     nativeToDesktopScale: transform.nativeToDesktopScaleX,
     elements,
     catalog: {
-      ...grounding.catalog,
+      ...desktopCatalog,
       ...(publicElements.length === grounding.catalog.elements.length ? {} : { completeness: "partial" as const }),
       elements: publicElements,
     },
@@ -5639,6 +5644,8 @@ function mergeGroundings(
       source: "hybrid",
       observationId,
       computerSessionId,
+      ...(isGroundingWebUrl(dom.catalog.pageUrl) ? { pageUrl: dom.catalog.pageUrl } : {}),
+      ...(dom.catalog.visibleText === undefined ? {} : { visibleText: dom.catalog.visibleText }),
       completeness: truncated ? "partial" : "complete",
       degraded: uia.catalog.degraded || dom.catalog.degraded,
       maxElements: GROUNDING_MAX_ELEMENTS,

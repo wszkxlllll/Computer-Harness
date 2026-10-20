@@ -630,3 +630,16 @@ Node env-file只用于明确live，key不进计划。既有可信代理如需要
 PR41未包含本地未提交的 Windows 缩小窗口 capture→桌面坐标修复，也未包含 Browser startup loading+DOM/body 的观察就绪修复；相同文件可文本合并不代表语义完成。合并时保留本地 producerViewport/dispatchBBox 与 backing-scale 合同，并把新增 visibleText 纳入桌面投影/遮挡；startup readiness 变更也须保留。建议顺序为先修上述两项与回归，再核最终提交树 CI，最后独立构建并对真实观察/业务做有界验收。
 
 操作边界：仅追加本小节；未修改源码、前文或 PR，未评论/提交/合并，未调用付费 API、操作真实桌面或启动新任务。
+
+### PR41 候选整改与离线回归（2026-10-19，PR42 基线）
+
+以下记录是 `8caa75f` 与 PR42 已验证修复组合后的后续源码整改；它不改写上方审查时的 CI 结果，也不改写作者历史十二次评测。候选已更新到原 PR41 分支，保留队友提交历史；PR42 的来源指纹修复 `0327bd0` 和 off/UIA 原生浏览器输入修复 `37cc39d` 均已合入，风险模型/default grounding off、Windows输入／坐标、无障碍能力没有被盖回。当前未发布该候选，Preview仍为原Host42184。
+
+- **固定提示预算：**`composeSystemPrompt` 压缩重复常驻指引，但保留 Goal/动作范围、来源适用范围与未查看不等于不存在、逐项核验/未知项、不得无证宣称完成，以及 Planning、Memory、ExecutionSegment、Guard、batch 和 scroll 合同。source-linked finish 的动态字段指引与 terminate/schema 消费者未移除。生产 Host `createRun → Context → Provider.prepare` all-on 离线 fixture 在原默认 16,384 text / 24,576 wire 预算下通过：fixed blocks 7,005 tokens，Provider text estimate 13,267、wire estimate 13,428，17 个工具和 1 张图；首次请求成功准备并由 fake HTTP 结束。原 8,000 text、无独立 wire budget 负例仍在 HTTP 前失败，0 次 HTTP。
+- **表格证据边界：**整桌面 `projectGroundingToDesktop` 只省略仍处窗口截图坐标且未做 OS overlay 相交验证的 `visibleText`；不改 PR42 的 DOM/UIA候选转换、视觉截图/动作或无候选 fallback。单窗口 managed-browser observation 仍保留该表格正文。新 CUA 合同测试覆盖非零原点 `(100,120)`、960×680 窗口与 480×340 缩小 capture、覆盖表格区域的桌面 overlay；桌面观察不含表格正文但仍给出未被遮挡的按钮候选 `[160,200,100,60]`，原生单窗口仍能读到 fixture 表格文本。该范围明确表示桌面表格正文暂不支持，不声称已完成桌面变换/遮挡投影。
+- **重试与硬期限：**测试按 `2 × 118001 + 500 = 236502 ms` 窗口验证严格边界：Retry-After 118,501 ms（加一次 reserve 正好相等）拒绝；118,500 ms（差 1 ms）获准仅重试一次。新增 `runTimeoutMs=5000`、`finishReserveMs=1000` 的 Runtime 合同测试：一次 click 完成后，第二次 Provider 等待被硬期限 Abort，Run 以 cancelled 收尾且没有重放 GUI 动作。原取消等待、单次重试及未知副作用拒绝覆盖继续保留。
+- **本地验证：**Node 24.19.0、冻结锁文件离线安装（184 个依赖复用缓存，禁用 install scripts）；`pnpm --filter @computer-harness/app-runtime... build` 13 个 workspace packages 通过。8 个聚焦文件最终合计 519/519 Vitest：Context 43、Host GLM budget 14、Host session defaults 17、CUA driver 423、Runtime retry 6、Memory recall 2、Planning 13、source guidance 1。根随后独立全仓类型检查及spike通过；首轮全量2584项2582通过，两失败分别为遗漏的旧terminate全文断言和隔离目录未构建Web导致首页404。前者只改默认／opt-in文案为语义断言，schema隔离保持，单文件14/14；后者补齐Vite build，不改Relay产品代码，Relay＋finish共18/18。此后根对包含37cc39d的最终组合树运行完整回归，完整JSON保留于该隔离checkout的 `runs/pr41-final-integrated-vitest.json`；提交树CI以 [PR41 Checks](https://github.com/wszkxlllll/Computer-Harness/pull/41/checks) 为动态准据，不沿用原head或PR42的CI结果。
+
+Sol 最终源码复审 GO：固定提示未抬预算；整桌面表格正文可靠省略、原生模式保留；新预算严格边界、硬期限真实Abort和不重放测试合理。其指出的剩余terminate旧文案断言也已修复并补审GO，未通过删schema检查绕过。旧CI红项仍作为历史保留，放行必须看最终提交树检查。
+
+操作边界：修改候选源码/测试和既有审计段、处理文档索引冲突，正常合并PR42历史并更新原PR41分支；未 force push、未重写队友作者。没有API、GUI或新评测Run，也未发布或替换Preview。独立checkout构建不写入正在运行的Preview工作区，用户登录profile、原记录与服务器服务均保持。

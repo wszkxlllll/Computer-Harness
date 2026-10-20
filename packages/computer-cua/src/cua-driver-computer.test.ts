@@ -3133,6 +3133,106 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it("keeps visible table text in native-window scope and omits it from scaled desktop grounding under an overlay", async () => {
+    const bounds = { x: 100, y: 120, width: 960, height: 680 };
+    const capture = { width: 480, height: 340 };
+    const visibleText = {
+      source: "dom-table-v1",
+      scope: "current-viewport",
+      completeness: "complete",
+      truncated: false,
+      regions: [{
+        frame: { x: 200, y: 150, width: 200, height: 100 },
+        completeness: "complete",
+        truncated: false,
+        rows: [{ rowIndex: 0, cells: [{
+          columnIndex: 0, rowSpan: 1, columnSpan: 1, header: false,
+          text: "fixture visible table value",
+          frame: { x: 210, y: 160, width: 80, height: 20 },
+        }] }],
+      }],
+    };
+    const setBrowserState = (fake: ReturnType<typeof windowDriver>) => {
+      const localButton = { x: 30, y: 40, width: 50, height: 30 };
+      fake.setGroundingState({ elements_complete: true, elements: [
+        { role: "Document", name: "Document", frame: bounds, enabled: true },
+        { role: "Button", name: "Safe action", frame: { x: bounds.x + localButton.x * 2, y: bounds.y + localButton.y * 2, width: localButton.width * 2, height: localButton.height * 2 }, enabled: true },
+      ] });
+    };
+    const createTransport = () => createMockDomGroundingTransport((request) => ({
+      complete: true,
+      tabId: request.browserTarget.tabId,
+      generation: request.browserTarget.generation,
+      coordinateSpace: "css",
+      viewportMetrics: { cssWidth: capture.width, cssHeight: capture.height, deviceScaleFactor: 1 },
+      visibleText,
+      candidates: [{ tagName: "button", ariaRole: "button", name: "Safe action", frame: { x: 30, y: 40, width: 50, height: 30 }, visible: true, interactive: true, state: { enabled: true } }],
+    }));
+
+    const nativeDirectory = await mkdtemp(join(tmpdir(), "computer-harness-native-visible-table-"));
+    const nativeFake = windowDriver(bounds, capture);
+    nativeFake.setPlatform("win32");
+    setBrowserState(nativeFake);
+    const nativeTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "native-visible-table-profile",
+      windowTarget: nativeFake.target, tabId: "native-visible-table-tab", generation: "native-visible-table-generation",
+      delivery: "loopback-cdp",
+    };
+    const nativeComputer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: nativeDirectory, platform: "win32", windowTarget: nativeFake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [nativeFake.target],
+      grounding: "hybrid-catalog-v1", browserTarget: nativeTarget,
+      domGroundingTransport: createTransport(), driverFactory: () => nativeFake.driver,
+    });
+    const signal = new AbortController().signal;
+    try {
+      const session = await nativeComputer.open({}, signal);
+      const observation = await nativeComputer.observe(session, "native-visible-table" as ObservationId, signal);
+      expect(observation.surfaceRef.kind).not.toBe("desktop");
+      expect(observation.grounding?.visibleText?.regions[0]?.rows[0]?.cells[0]?.text).toBe("fixture visible table value");
+      await nativeComputer.close(session);
+    } finally {
+      await rm(nativeDirectory, { recursive: true, force: true });
+    }
+
+    const desktopDirectory = await mkdtemp(join(tmpdir(), "computer-harness-desktop-visible-table-overlay-"));
+    const desktopFake = windowDriver(bounds, capture);
+    desktopFake.setPlatform("win32");
+    desktopFake.setDesktopImageSize(1920, 1080);
+    desktopFake.setForegroundTarget(desktopFake.target);
+    // The overlay covers the table after the capture reduction is reversed:
+    // local [200,150,200,100] maps to desktop [500,420,400,200].
+    desktopFake.setExtraWindow({
+      pid: 4_321, windowId: 8_765, appName: "Transient overlay", title: "Table cover",
+      bounds: { x: 450, y: 400, width: 450, height: 300 }, zIndex: 2, isOnScreen: true,
+    });
+    setBrowserState(desktopFake);
+    const desktopTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "desktop-visible-table-profile",
+      windowTarget: desktopFake.target, tabId: "desktop-visible-table-tab", generation: "desktop-visible-table-generation",
+      delivery: "loopback-cdp",
+    };
+    const desktopComputer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: desktopDirectory, platform: "win32", windowDeliveryMode: "foreground",
+      windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [desktopFake.target],
+      grounding: "hybrid-catalog-v1", browserTarget: desktopTarget,
+      domGroundingTransport: createTransport(), driverFactory: () => desktopFake.driver,
+    });
+    try {
+      const session = await desktopComputer.open({}, signal);
+      const observation = await desktopComputer.observe(session, "desktop-visible-table-overlay" as ObservationId, signal);
+      expect(observation.surfaceRef.kind).toBe("desktop");
+      expect(observation.screenshot.data.byteLength).toBeGreaterThan(0);
+      expect(observation.grounding?.visibleText).toBeUndefined();
+      expect(JSON.stringify(observation.grounding)).not.toContain("fixture visible table value");
+      const action = observation.grounding?.elements.find((element) => element.source === "dom" && element.name === "Safe action");
+      expect(action?.bbox).toEqual({ x: 160, y: 200, width: 100, height: 60, coordinateSpace: "physical" });
+      await desktopComputer.close(session);
+    } finally {
+      await rm(desktopDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("uses a dedicated desktop grounding probe without widening the ordinary window registry", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-dedicated-probe-"));
     const bounds = { x: 100, y: 120, width: 960, height: 680 };
