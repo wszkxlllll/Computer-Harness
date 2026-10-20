@@ -135,7 +135,7 @@ Sol medium 最后独立复核关闭探针 owner/cleanup/空白页判定发现，
 
 ## 2026-10-02 隔离 Preview 部署 smoke checks
 
-跨窗口版本已部署到隔离 Preview release `/opt/computer-harness-preview/releases/2026-10-02-cross-window-v1`，部署包 SHA-256 为 `1411ED3B62BACD8123C913F1D95820396281AFAD9FB0BD5786F05CF273F46126`。stable 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；此前 Preview release 保留，可供版本回退。详细部署与回滚说明见[语音 Preview 部署与手机测试记录](../../voice-preview-deploy-phone-test-2026-09-29.md)。
+跨窗口版本已部署到隔离 Preview release `/opt/computer-harness-preview/releases/2026-10-02-cross-window-v1`，部署包 SHA-256 为 `1411ED3B62BACD8123C913F1D95820396281AFAD9FB0BD5786F05CF273F46126`。stable 仍为 `/opt/computer-harness/releases/a-line-20260928-130957-252edf4`；此前 Preview release 保留，可供版本回退。详细部署与回滚说明见[语音 Preview 部署与手机测试记录](../2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)。
 
 部署边界检查结果：Preview Relay active 且只监听 loopback `8788`；对正确 Host `47.108.197.221:8443` 的 health 返回 `200`，公网根页面引用的 `/assets/index-C5cxMpjt.js` 返回 `200`。匿名 `/api/runs` 与 managed-browser profile 查询返回 `401`；恶意 Origin 的 `prepare` 被拒绝为 `403`，正确 Origin 但缺少 session/CSRF 时返回 `401`。一次错误 Host 的 health 返回 `403`，是 Host 校验 fail-closed，正确 Host 检查已通过。本机 Host 的 `/connect` 返回 `200`，固定监听 `4318`；服务器观察到 Nginx 到 Relay `8788` 的 WSS established，并复用了既有 CUA daemon。Node PID 动态变化，不作为文档状态记录。
 

@@ -94,7 +94,7 @@
 
 `scripts/provider-description-probe/probe.mjs` 及对应 selftest 纳入本批必要范围，仍由（8）唯一作者。动态请求预算提示须放入按预算计入的动态 message；非终局 system/tools 稳定检查保留。若终局 terminate-only 投影确需例外，只接受可核验的明确 final-budget 状态，保留非终局漂移拒绝、终局零 GUI 派发和必要上下文预算反例；不能删除全局 prefix 检查或凭自由文本推断例外。最终 diff 须独立 Sol medium 重审并重新验证失败 TAP 和全仓检查。
 
-最终实际结果：上述是排查时允许的候选范围，不是最终变更。真实脚本位于 `scripts/cross-window/provider-description-probe.mjs` 及 `.selftest.mjs`，最终两文件零 diff，没有新增例外或降低原检查。修复只将预算提示放入动态消息并完整计费。独立最终审查见 `docs/a-line-sync/fixes/F-20261006-001-review-r5.md`；最终交付见 `F-20261006-002.md`。独立审查者报告同版本 pnpm test 111 Vitest 套件1667/1667、TAP71/71、typecheck0。协调方实际重算326文件指纹 `9eb8e96ad9f7b5667c536612b7b420223e55bbc7c261ec3e328413bf2ddc1c1f`、锁hash并核对25文件清单与diffcheck，与交付一致；协调方未重复全仓测试、未消费真实API或操作桌面。
+最终实际结果：上述是排查时允许的候选范围，不是最终变更。真实脚本位于 `scripts/cross-window/provider-description-probe.mjs` 及 `.selftest.mjs`，最终两文件零 diff，没有新增例外或降低原检查。修复只将预算提示放入动态消息并完整计费。独立最终审查见 `docs/history/2026-10-20-product-docs/a-line-sync/fixes/F-20261006-001-review-r5.md`；最终交付见 `F-20261006-002.md`。独立审查者报告同版本 pnpm test 111 Vitest 套件1667/1667、TAP71/71、typecheck0。协调方实际重算326文件指纹 `9eb8e96ad9f7b5667c536612b7b420223e55bbc7c261ec3e328413bf2ddc1c1f`、锁hash并核对25文件清单与diffcheck，与交付一致；协调方未重复全仓测试、未消费真实API或操作桌面。
 
 ## 冻结交接要求
 

@@ -1,6 +1,6 @@
 # 成员C：有限恢复／可见证据修复与六题十二次Windows运行尝试
 
-日期：2026-10-18。范围为本轮M01、M02、M03、CP01、CP02、CP03各两次v1开发实例尝试，**不是昨日PR37的另一批十二轮**。机器摘要见[JSON](../../member-c-repair-twelve-runs-2026-10-18.json)。失败、中断、未知副作用、来源缺项及额外准备消耗均保留。
+日期：2026-10-18。范围为本轮M01、M02、M03、CP01、CP02、CP03各两次v1开发实例尝试，**不是昨日PR37的另一批十二轮**。机器摘要见[JSON](../2026-10-20-product-docs/member-c-repair-twelve-runs-2026-10-18.json)。失败、中断、未知副作用、来源缺项及额外准备消耗均保留。
 
 ## 结论与版本边界
 
@@ -49,21 +49,21 @@ M02目标为普通门诊(东院)→内分泌科→内分泌科门诊、2026-10-2
 
 当前DOM字形为**周颋**。保留历史“周頔”来源差异，不替换、不回写旧报告，也不推断网站变化时间或认定旧oracle错误。
 
-官网裁图：[科室位置及日期](../../member-c-repair-twelve-evidence-2026-10-18/m01-1-location.png)、[院区页脚地址](../../member-c-repair-twelve-evidence-2026-10-18/m01-1-addresses.png)、[365新页画面](../../member-c-repair-twelve-evidence-2026-10-18/m01-1-new-schedule-arrival.png)、[M02-1普通门诊独立9人行](../../member-c-repair-twelve-evidence-2026-10-18/m02-1-ordinary-morning-nine.png)、[M02-2上午格](../../member-c-repair-twelve-evidence-2026-10-18/m02-2-morning-nine.png)。最后一张不含日期表头，不把不同样本图片拼成单次观测。
+官网裁图：[科室位置及日期](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m01-1-location.png)、[院区页脚地址](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m01-1-addresses.png)、[365新页画面](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m01-1-new-schedule-arrival.png)、[M02-1普通门诊独立9人行](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m02-1-ordinary-morning-nine.png)、[M02-2上午格](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m02-2-morning-nine.png)。最后一张不含日期表头，不把不同样本图片拼成单次观测。
 
 ### M03：真实本地链路与一次客机中断
 
 M03-1实际切到专用记事本，保存新UTF-8 `preparation.txt`，经Ctrl+O打开对话框、重新查看文件内容，再回官网。对应序列439／451／471／486，2次switch_window；父未代输入或代保存。内容含有效证件、医保报到、院区地址、候诊、导诊单、跨院区取药限制以及具体到达时间／科室楼层未找到。**指定nosocomial URL未单独核对，按来源覆盖部分完成，不包装全Goal通过。**
 
-实际医院位置动态面板显示西单“辟才胡同7号”，与页脚“大木仓胡同41号”的上下文不同，不能仅凭页脚把该面板摘录判成编造。附件：[重开后合成清单正文](../../member-c-repair-twelve-evidence-2026-10-18/m03-1-reopened-synthetic-checklist.png)、[实际西单位置面板](../../member-c-repair-twelve-evidence-2026-10-18/m03-1-visible-west-campus-address.png)。清单仅合成测试资料，不是真实患者资料、诊疗建议、预约记录或平台草稿。
+实际医院位置动态面板显示西单“辟才胡同7号”，与页脚“大木仓胡同41号”的上下文不同，不能仅凭页脚把该面板摘录判成编造。附件：[重开后合成清单正文](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m03-1-reopened-synthetic-checklist.png)、[实际西单位置面板](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/m03-1-visible-west-campus-address.png)。清单仅合成测试资料，不是真实患者资料、诊疗建议、预约记录或平台草稿。
 
 M03-2最后心跳为2026-10-18T03:30:28.851Z。客机失去响应时画面处于Edge阅读模式，原因未唯一确定；随后用户重启Linux宿主。恢复后只读取原轨迹：343条完整事件、35次请求及响应、31个completed动作，最后序列342，没有run.finished、正常close或目标文件，也没有已开始却缺完成回执的GUI动作。**不补造成功／失败／正常取消，不重放、不重跑。**先前助理仅发过一次ACPI正常关机请求，130秒未见退出；未使用会超时强制终止的docker stop或强制结束客机，不把用户重启说成助理正常关机成功。
 
 ### CP01／CP02：不拿旧成功图替代，不改写终态
 
-CP01第一轮首调用选择在线客服，范围规则拒绝且0GUI；第二轮声称关闭登录弹层，实际到登录路由后被取消。两轮均无价目清单，未输入凭据。附件仅是[真实空白登录停止状态](../../member-c-repair-twelve-evidence-2026-10-18/cp01-2-stopped-login-route.png)，不使用昨日成功电价图冒充本轮结果。
+CP01第一轮首调用选择在线客服，范围规则拒绝且0GUI；第二轮声称关闭登录弹层，实际到登录路由后被取消。两轮均无价目清单，未输入凭据。附件仅是[真实空白登录停止状态](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/cp01-2-stopped-login-route.png)，不使用昨日成功电价图冒充本轮结果。
 
-CP02两轮都正确核对合成地址格式、本期25方、跨档10／15方，应计68.55元、账面多0.45元，待人工核对、不建议支付。附带非居民价均为2.63，不混成第二档2.83。第二轮仍因账单差异自报failure而Runtime failed，业务核对已交付但不替模型改状态。附件：[本轮官网价格表](../../member-c-repair-twelve-evidence-2026-10-18/cp02-1-official-gas-prices.png)。没有真实付款。
+CP02两轮都正确核对合成地址格式、本期25方、跨档10／15方，应计68.55元、账面多0.45元，待人工核对、不建议支付。附带非居民价均为2.63，不混成第二档2.83。第二轮仍因账单差异自报failure而Runtime failed，业务核对已交付但不替模型改状态。附件：[本轮官网价格表](../2026-10-20-product-docs/member-c-repair-twelve-evidence-2026-10-18/cp02-1-official-gas-prices.png)。没有真实付款。
 
 ### CP03：两轮均无文件，未知输入不重发
 

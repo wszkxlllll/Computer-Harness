@@ -53,7 +53,7 @@ GitHub 的 MERGEABLE 只说明已提交目标分支可自动合并，不包含�
 
 任务卡区分 development/heldout，并写明不付款、不提交预约等停止点，符合当前人工检查路线。医院公众号、小程序和物业 App 的入口可行性仍需要领域负责人实机确认；这些是候选任务，不能记为完成率证据。
 
-与当前本地工作重叠：`README.md`、`docs/DOCS-INDEX.md`。领域内容可进入独立任务文档，README 应保留本轮产品叙事，不把成员分工表重新插回前半部分。新增 `docs/government-task-cards.md` 与上海 pilot 的政务任务应登记主入口和交接关系，避免两套活动题库被误用。
+与当前本地工作重叠：`README.md`、`docs/DOCS-INDEX.md`。领域内容可进入独立任务文档，README 应保留本轮产品叙事，不把成员分工表重新插回前半部分。新增 `docs/history/2026-10-20-product-docs/government-task-cards.md` 与上海 pilot 的政务任务应登记主入口和交接关系，避免两套活动题库被误用。
 
 给实施 Agent 的修复提示词：
 

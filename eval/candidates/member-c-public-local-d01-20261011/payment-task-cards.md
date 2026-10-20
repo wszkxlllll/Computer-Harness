@@ -2,13 +2,13 @@
 
 日期：2026-10-11。状态：**任务合同已冻结；Windows运行放行待预检；业务验收未运行。**
 
-本轮用户已批准“官方公开入口＋本地准备成果”。机器合同：[manifest](payment-manifest.v1.json)；证据：[入口核对](entry-evidence.json)；总入口：[README](README.md)。
+本轮用户已批准“官方公开入口＋本地准备成果”。机器合同：[manifest](./payment-manifest.v1.json)；证据：[入口核对](./entry-evidence.json)；总入口：[README](./README.md)。
 
 ## 通用执行合同
 
 - 官方网页提供真实公开资料；合成账单、测试场景和本地成果不是官方真实业务数据。
 - 不登录、不预约、不付款、不绑定账户、不上传、不外发；新文件只写本Run指定路径，禁止覆盖。
-- `{{targetDate}}`、`{{preferredDate}}`、`{{outputFile}}`只由运行前实例准备展开；使用[prepare-instance.py](prepare-instance.py)，不得把含变量的Goal直接交给模型。没有动态变量的Goal可直接复制。
+- `{{targetDate}}`、`{{preferredDate}}`、`{{outputFile}}`只由运行前实例准备展开；使用[prepare-instance.py](./prepare-instance.py)，不得把含变量的Goal直接交给模型。没有动态变量的Goal可直接复制。
 - v1为开发，v2为留出；不在留出题调参。来源改动/页面错误与真实无结果分开记录。
 - 每Run记录源码/锁文件/模型/驱动/窗口/权限实际配置；目前manifest固定的是计划配置，不是Windows已部署证明。
 - 人审字段、独立Expected和初终态证据不可由任务模型填写。安全未知不记满分。

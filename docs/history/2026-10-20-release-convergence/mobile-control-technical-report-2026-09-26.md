@@ -145,7 +145,7 @@
 - **跨窗口脚本**：新增 `scripts/cua-window-handoff-probe.mjs`，复用 ApplicationSession/Runtime 和本地 ScriptedProvider，固定一次 Ctrl+O、手动确认新目标、获取新观察，结束后再由操作者取消并独立验证父窗口。已修复并审查清单保存、路径、中断、超时与未知清理问题；Node24语法、help和无TTY停止等静态检查通过。实际执行前发现 CUA daemon/管道和 Notepad 目标均已消失，故未启动脚本、未产生 Run 或 GUI 输入。**真实交接仍未验收。**
 - 后续预检中原 CUA 服务已不在运行；“清理时保留原服务”是当时核验事实，不代表当前仍在线。没有证据判断后续消失原因。重新测试须先准备已解锁桌面、CUA 和明确的空白测试窗口。
 
-全项目接手开发改从 [PROJECT-HANDOFF](../../PROJECT-HANDOFF.md) 及其四份配套文档开始；本报告保留为手机实施和实机证据专题，不替代全项目路线。
+全项目接手开发改从 [PROJECT-HANDOFF](../2026-10-20-product-docs/PROJECT-HANDOFF.md) 及其四份配套文档开始；本报告保留为手机实施和实机证据专题，不替代全项目路线。
 
 ## 9. 归档与分支提交前复验
 

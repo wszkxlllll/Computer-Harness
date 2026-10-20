@@ -56,7 +56,7 @@ M01 目标：从协和患者版进入内分泌科，交付三类门诊位置及�
 | Run 级 low 1 | 41，全部 200 | 391.743 | succeeded | 必需清单通过 |
 | Run 级 low 2 | 19，全部 200 | 111.910 | succeeded | 必需清单通过 |
 
-耗时包含 Run 启动，不包含结束后的证据回收。费用未知，Runtime token 用量和最终完整清单见[脱敏结果 JSON](../../volcengine-ark-agent-plan-2026-10-16.json)。这不是受控 A/B、正式评分或稳定性放行；四轮均无多 GUI 动作 Batch，不能用于评价批处理提速。
+耗时包含 Run 启动，不包含结束后的证据回收。费用未知，Runtime token 用量和最终完整清单见[脱敏结果 JSON](../2026-10-20-product-docs/volcengine-ark-agent-plan-2026-10-16.json)。这不是受控 A/B、正式评分或稳定性放行；四轮均无多 GUI 动作 Batch，不能用于评价批处理提速。
 
 ### 保留失败与恢复事实
 
@@ -72,9 +72,9 @@ M01 目标：从协和患者版进入内分泌科，交付三类门诊位置及�
 
 公开附件仅保留官网页面内容裁图，裁去浏览器和宿主标记，不包含操作员桌面：
 
-- disabled 第二轮：[已观察却在最终清单否认的位置／日期](../../volcengine-ark-evidence-2026-10-16/disabled-2-location.png)。
-- low 第一轮：[位置／日期](../../volcengine-ark-evidence-2026-10-16/low-1-location.png)、[新版落地](../../volcengine-ark-evidence-2026-10-16/low-1-schedule.png)、[页脚地址](../../volcengine-ark-evidence-2026-10-16/low-1-addresses.png)。
-- low 第二轮：[位置／日期](../../volcengine-ark-evidence-2026-10-16/low-2-location.png)、[稳定新版落地](../../volcengine-ark-evidence-2026-10-16/low-2-schedule.png)、[页脚地址](../../volcengine-ark-evidence-2026-10-16/low-2-addresses.png)。
+- disabled 第二轮：[已观察却在最终清单否认的位置／日期](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/disabled-2-location.png)。
+- low 第一轮：[位置／日期](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/low-1-location.png)、[新版落地](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/low-1-schedule.png)、[页脚地址](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/low-1-addresses.png)。
+- low 第二轮：[位置／日期](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/low-2-location.png)、[稳定新版落地](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/low-2-schedule.png)、[页脚地址](../2026-10-20-product-docs/volcengine-ark-evidence-2026-10-16/low-2-addresses.png)。
 
 来源：[患者版](https://www.pumch.cn/patient.html)、[科室位置](https://www.pumch.cn/detail/12497.html)、[医院位置](https://www.pumch.cn/nosocomial.html)、[新版门诊出诊表](https://www.pumch.cn/news_visitinfo.html)。外部真值未输入模型；当前网页读取与各轮截图分别作为独立资料和运行事实，不互相替代。
 

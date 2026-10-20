@@ -15,18 +15,18 @@
 
 | 文件 | 用途 |
 |---|---|
-| [full-roadmap-v2-review-2026-09-17.md](full-roadmap-v2-review-2026-09-17.md) | 完整路线 V2 复核：采纳 DEV 顺序，补会话/接管/执行所有权合同及实验命名与分组 |
-| [external-audit-confirmation-2026-09-17.md](external-audit-confirmation-2026-09-17.md) | 外部 39ff27f9 审计逐项复核：真实实现反例、优先级修正、Guard 强制规则旁路与下一步 |
-| [audit-2026-09-16-overview.md](audit-2026-09-16-overview.md) | 当前深入审计总览：交互/语音/风险、架构/CI/CD、CUA 能力/升级三份分项与实施依赖；仅审计，未实施 |
+| [full-roadmap-v2-review-2026-09-17.md](./full-roadmap-v2-review-2026-09-17.md) | 完整路线 V2 复核：采纳 DEV 顺序，补会话/接管/执行所有权合同及实验命名与分组 |
+| [external-audit-confirmation-2026-09-17.md](./external-audit-confirmation-2026-09-17.md) | 外部 39ff27f9 审计逐项复核：真实实现反例、优先级修正、Guard 强制规则旁路与下一步 |
+| [audit-2026-09-16-overview.md](./audit-2026-09-16-overview.md) | 当前深入审计总览：交互/语音/风险、架构/CI/CD、CUA 能力/升级三份分项与实施依赖；仅审计，未实施 |
 | [stage-6-convergence-and-start-state-2026-09-15.md](../../stage-6-convergence-and-start-state-2026-09-15.md) | 当前收敛状态、冻结条件、P/C/B/M1/M2/N 消融顺序和停止条件 |
-| [risk-guard-implementation-plan-2026-09-15.md](risk-guard-implementation-plan-2026-09-15.md) | 当前 Risk Guard 实施入口：action-level seam、Batch、Approval、CLI、测试与停止条件 |
-| [risk-guard-real-api-and-local-tui-plan-2026-09-16.md](risk-guard-real-api-and-local-tui-plan-2026-09-16.md) | Risk Guard 无桌面真实 API、最小 TUI 与本机递增测试门槛 |
-| [product-tui-and-module-refactor-plan-2026-09-16.md](product-tui-and-module-refactor-plan-2026-09-16.md) | 独立产品 TUI、共享应用组装层与单文件 package 的行为保持拆分路线 |
-| [global-design-consistency-audit-2026-09-15.md](global-design-consistency-audit-2026-09-15.md) | 全局设计一致性审计与本轮整改记录 |
-| [qwen-flat-regression-and-integration-acceptance-2026-09-15.md](qwen-flat-regression-and-integration-acceptance-2026-09-15.md) | Qwen flat 真实 API 回归、GLM/Qwen Composite/Memory/Planning 及双后端集成验收 |
-| [qwen-flat-source-audit-and-migration-2026-09-15.md](qwen-flat-source-audit-and-migration-2026-09-15.md) | Qwen strict 固定 `calls[]` 源码复审、提示词边界与协议迁移证据 |
-| [real-api-conformance-2026-09-15.md](real-api-conformance-2026-09-15.md) | 真实 API 的详细请求、响应与历史失败证据 |
-| [harness-development-validation-candidates-2026-09-10.json](../../harness-development-validation-candidates-2026-09-10.json) | G0 修订3候选 manifest：20开发/20验证/11备用；V19由R10替代，主集动态预检已回填、预算未定，不可直接当正式 runner 输入 |
+| [risk-guard-implementation-plan-2026-09-15.md](./risk-guard-implementation-plan-2026-09-15.md) | 当前 Risk Guard 实施入口：action-level seam、Batch、Approval、CLI、测试与停止条件 |
+| [risk-guard-real-api-and-local-tui-plan-2026-09-16.md](./risk-guard-real-api-and-local-tui-plan-2026-09-16.md) | Risk Guard 无桌面真实 API、最小 TUI 与本机递增测试门槛 |
+| [product-tui-and-module-refactor-plan-2026-09-16.md](./product-tui-and-module-refactor-plan-2026-09-16.md) | 独立产品 TUI、共享应用组装层与单文件 package 的行为保持拆分路线 |
+| [global-design-consistency-audit-2026-09-15.md](./global-design-consistency-audit-2026-09-15.md) | 全局设计一致性审计与本轮整改记录 |
+| [qwen-flat-regression-and-integration-acceptance-2026-09-15.md](./qwen-flat-regression-and-integration-acceptance-2026-09-15.md) | Qwen flat 真实 API 回归、GLM/Qwen Composite/Memory/Planning 及双后端集成验收 |
+| [qwen-flat-source-audit-and-migration-2026-09-15.md](./qwen-flat-source-audit-and-migration-2026-09-15.md) | Qwen strict 固定 `calls[]` 源码复审、提示词边界与协议迁移证据 |
+| [real-api-conformance-2026-09-15.md](./real-api-conformance-2026-09-15.md) | 真实 API 的详细请求、响应与历史失败证据 |
+| [harness-development-validation-candidates-2026-09-10.json](../2026-10-20-product-docs/harness-development-validation-candidates-2026-09-10.json) | G0 修订3候选 manifest：20开发/20验证/11备用；V19由R10替代，主集动态预检已回填、预算未定，不可直接当正式 runner 输入 |
 | [g0-preflight-progress-2026-09-10.md](../2026-10-20-release-convergence/g0-preflight-progress-2026-09-10.md) | G0 主集动态预检：Development 20/20、Validation 20/20（V19由R10替代）；evaluator正例校准和预算冻结未完成 |
 | [osworld-environment-implementation.md](../2026-10-20-release-convergence/osworld-environment-implementation.md) | OSWorld/VM、Bridge、官方评分和真实任务环境 |
 | [stage-5-osworld-reproducibility.md](../2026-10-20-release-convergence/stage-5-osworld-reproducibility.md) | OSWorld artifact、快照、显示校准和复现实验入口 |
@@ -35,11 +35,11 @@
 
 | 文件 | 用途 |
 |---|---|
-| [development-documentation-standard.md](../../development-documentation-standard.md) | 文档角色、证据、归档和提交规范 |
-| [multimodal-gui-agent-harness-product-plan.md](multimodal-gui-agent-harness-product-plan.md) | 当前产品、架构、协议、优先级和长期演进的全局基线 |
-| [run-turn-tool-and-user-correction-semantics.md](run-turn-tool-and-user-correction-semantics.md) | 当前 Run、ModelTurn、多调用、Batch、Approval、Abort 和用户纠正语义 |
-| [GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计.md](GUI%20Agent%20多模态%20Memory%20与%20Advisory%20Subagent%20演进设计.md) | 已实现 Run Memory，以及长期 Memory、Advisory、Sandbox/Execution Subagent 的分层路线 |
-| [面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计.md](面向视障场景的%20GUI%20Agent%20意图守护技术路线调整与系统设计.md) | 意图守护、最小 Risk Guard、Accessible Approval 和验证边界 |
+| [development-documentation-standard.md](../2026-10-20-product-docs/development-documentation-standard.md) | 文档角色、证据、归档和提交规范 |
+| [multimodal-gui-agent-harness-product-plan.md](./multimodal-gui-agent-harness-product-plan.md) | 当前产品、架构、协议、优先级和长期演进的全局基线 |
+| [run-turn-tool-and-user-correction-semantics.md](./run-turn-tool-and-user-correction-semantics.md) | 当前 Run、ModelTurn、多调用、Batch、Approval、Abort 和用户纠正语义 |
+| [GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计.md](./GUI Agent 多模态 Memory 与 Advisory Subagent 演进设计.md) | 已实现 Run Memory，以及长期 Memory、Advisory、Sandbox/Execution Subagent 的分层路线 |
+| [面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计.md](./面向视障场景的 GUI Agent 意图守护技术路线调整与系统设计.md) | 意图守护、最小 Risk Guard、Accessible Approval 和验证边界 |
 
 ## 代码与实验入口
 

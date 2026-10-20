@@ -35,4 +35,4 @@ main：`961a098`。本机 Pi 工作分支：`codex/runtime-surface-preview-20261
 
 失败时保留轨迹并归因；只证明列窗/激活、靠全屏代替窗口链路、人工代切或外部工具代输入，均不能记为自动跨窗口通过。Windows 先回归新 main；Mac/Linux 由各自实机负责人补验，然后更新此台账。
 
-来源：PR #21；main 中 `docs/macos-runtime-surface-integration-2026-10-03.md`、`docs/a-line-progress-review-2026-10-03.md`、`docs/a-line-sync/tests/T-20261003-018.md`；[Linux 配对摘要](./cua-linux-0320-upgrade-verification-2026-10-02.md)与[Windows Surface 交接](./surface-registry-team-handoff-2026-10-03.md)。
+来源：PR #21；main 中 `docs/macos-runtime-surface-integration-2026-10-03.md`、`docs/a-line-progress-review-2026-10-03.md`、`docs/history/2026-10-20-product-docs/a-line-sync/tests/T-20261003-018.md`；[Linux 配对摘要](./cua-linux-0320-upgrade-verification-2026-10-02.md)与[Windows Surface 交接](./surface-registry-team-handoff-2026-10-03.md)。

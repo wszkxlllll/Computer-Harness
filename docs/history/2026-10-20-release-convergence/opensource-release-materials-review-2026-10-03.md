@@ -1,6 +1,6 @@
 # 开源发布材料独立审查（2026-10-03）
 
-审查范围：根 LICENSE、package.json、THIRD_PARTY_NOTICES.md、README.md、docs/DOCS-INDEX.md、docs/project-materials.md。除本报告外仅做只读检查，没有启动桌面任务、模型调用、部署、提交或推送。本报告依据当前工作树，用户已确认全体核心贡献者同意原创代码采用 Apache-2.0。
+审查范围：根 LICENSE、package.json、THIRD_PARTY_NOTICES.md、README.md、docs/DOCS-INDEX.md、docs/history/2026-10-20-product-docs/project-materials.md。除本报告外仅做只读检查，没有启动桌面任务、模型调用、部署、提交或推送。本报告依据当前工作树，用户已确认全体核心贡献者同意原创代码采用 Apache-2.0。
 
 ## 结论与分级
 

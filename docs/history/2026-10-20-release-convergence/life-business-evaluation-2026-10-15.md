@@ -2,7 +2,7 @@
 
 ## 2026-10-20 跨 APP Demo 收敛与验收
 
-**展示状态更新：用户要求10月20日晚重新准备并录制。**现有72秒片仅保留开发验收证据，不作为正式演示定稿：大块遮挡影响观感，开场旧消息也会干扰“本次从头执行”的理解。字幕和明示等待加速可沿用；今晚先由用户准备干净可辨认的初态，再通知开始，不能擅自删除旧聊天或白天自动重录。双端/声音和隐私准备见[项目材料第9节](../../project-materials.md#9-10月20日晚重录安排等待用户准备和通知)。此调整不抹去GLM04真实完成及先前失败记录。
+**展示状态更新：用户要求10月20日晚重新准备并录制。**现有72秒片仅保留开发验收证据，不作为正式演示定稿：大块遮挡影响观感，开场旧消息也会干扰“本次从头执行”的理解。字幕和明示等待加速可沿用；今晚先由用户准备干净可辨认的初态，再通知开始，不能擅自删除旧聊天或白天自动重录。双端/声音和隐私准备见[项目材料第9节](../2026-10-20-product-docs/project-materials.md#9-10月20日晚重录安排等待用户准备和通知)。此调整不抹去GLM04真实完成及先前失败记录。
 
 用户本轮明确授权真实 Harness／模型 API／桌面操作与录屏，优先完成顺畅的跨 APP 展示，而非继续扩展功能。基线为 PR41 `3b8eb47`（已含 PR42 `37cc39d`，两 PR 的完整 CI 均通过）；修复接续分支为 `codex/demo-crossapp-20261020`。独立运行不等于已替换 Preview，原 Host 和原始评测记录保持不动。
 
@@ -202,7 +202,7 @@ Luna 14/14、根独立 14/14 通过，Sol 只读复审 GO；此修复不构建�
 
 最终严格Run中，Context三次请求的 `monitorGuidanceIncluded=false`、估算0 tokens；有1条 `monitor.proposal`、2条 `monitor.transition`，未观察到 `grounding.selection.recovery` 重排字段/记录。因此本Run未观察到Monitor guidance注入或recovery重排，不能把 `shadow` 声称为全程零影响。首帧候选进入模型请求、被模型选用、DOM动作receipt完成及文章截图复核是分别核对的三个阶段。当前窗口切tab后中间观察没有catalog，下一观察恢复候选；这属于旧tab/generation不匹配时的安全视觉降级与fresh observation恢复，不把缺ref帧强行填充。
 
-实测结束时仅关闭本次Harness拥有的ephemeral Browser/Computer并确认无物理桌面lease；没有删除持久profile/cookies、登录页或旧标签，当时尚未部署。用户随后授权发布：[PR #39](https://github.com/wszkxlllll/Computer-Harness/pull/39) 的四组CI及必需检查全部通过，已合入main `8d77912`。本机Preview Host已备份并更新，关键构建指纹与真实测试候选一致；本地连接页、公网Preview页面及health均HTTP200，新Host已连接8443 Relay。Web/Relay无本轮代码变化、未无关替换；旧构建和原登录profile保留。手机需要重新扫码。本次发布后未自动重跑业务任务或声称手机端已验收，详见[发布记录](../../voice-preview-deploy-phone-test-2026-09-29.md)。以上Run及失败记录均保留供复核。
+实测结束时仅关闭本次Harness拥有的ephemeral Browser/Computer并确认无物理桌面lease；没有删除持久profile/cookies、登录页或旧标签，当时尚未部署。用户随后授权发布：[PR #39](https://github.com/wszkxlllll/Computer-Harness/pull/39) 的四组CI及必需检查全部通过，已合入main `8d77912`。本机Preview Host已备份并更新，关键构建指纹与真实测试候选一致；本地连接页、公网Preview页面及health均HTTP200，新Host已连接8443 Relay。Web/Relay无本轮代码变化、未无关替换；旧构建和原登录profile保留。手机需要重新扫码。本次发布后未自动重跑业务任务或声称手机端已验收，详见[发布记录](../2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)。以上Run及失败记录均保留供复核。
 
 ## 2026-10-18 修复与无障碍复查（历史记录：离线验收完成；当时已发布 Preview）
 
@@ -228,7 +228,7 @@ Luna 14/14、根独立 14/14 通过，Sol 只读复审 GO；此修复不构建�
 
 手机应用播报通过浏览器语音接口播放；VoiceOver 则读取网页的可访问内容，两者不是同一声音队列。当前没有可靠的 VoiceOver 自动检测或抢话仲裁，建议先关闭应用自动播报、单独验收旁白。关闭应用播报不得隐藏进展、审批原因或结果文字，也不得停掉 ARIA 状态通知。Web 检查已确认运行页单一 `aria-atomic` 状态区不受应用播报开关控制，具体进展、审批和结果仍有文字；追加修复非交互目标说明的多个文本节点，保留按钮/链接的独立操作语义。普通控件标题与帮助说明不机械合成一个大节点。此原则参照 [W3C 状态通知规范](https://w3c.github.io/wcag/techniques/aria/ARIA22)；应用播报使用独立的 [Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/Window/speechSynthesis)。浏览器离线测试不能代替 iPhone 真机听感验收。
 
-用户随后授权推送、备份和部署：本轮源码 `480126a` 已发布 Preview，服务器 Web/Relay 与本机 Host 均更新；旧 release、旧本机代码/构建/配置保留，登录资料未清理。公网页面与本地资源哈希一致，连接及匿名访问拒绝通过；手机须重新扫码。详见[发布与回退记录](../../voice-preview-deploy-phone-test-2026-09-29.md)。源码、部署和手机声音验收分别报告；没有新一轮业务实测或付费 API 调用。
+用户随后授权推送、备份和部署：本轮源码 `480126a` 已发布 Preview，服务器 Web/Relay 与本机 Host 均更新；旧 release、旧本机代码/构建/配置保留，登录资料未清理。公网页面与本地资源哈希一致，连接及匿名访问拒绝通过；手机须重新扫码。详见[发布与回退记录](../2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)。源码、部署和手机声音验收分别报告；没有新一轮业务实测或付费 API 调用。
 
 ### 审批仅靠听觉理解：已确认缺口与最小修复
 
@@ -461,7 +461,7 @@ node scripts/life-eval/summarize.mjs --package <package> --attempt-id <live-atte
 
 ## 新六题：方舟对照准备（2026-10-16接续）
 
-用户要求今晚进行对照，但本轮仅接入和离线验证，不调用API、不打开浏览器或操作桌面、不填写预检通过。完整Goal仍见[任务卡](../../life-business-task-cards-2026-10-15.md)，程序唯一题面为新suite manifest，不将来源真值或评分要求注入Goal。
+用户要求今晚进行对照，但本轮仅接入和离线验证，不调用API、不打开浏览器或操作桌面、不填写预检通过。完整Goal仍见[任务卡](../2026-10-20-product-docs/life-business-task-cards-2026-10-15.md)，程序唯一题面为新suite manifest，不将来源真值或评分要求注入Goal。
 
 | 题号 | 难度 | 用户要做的事 | 最终成果与起点 |
 | --- | --- | --- | --- |
@@ -506,7 +506,7 @@ node scripts/life-eval/start.mjs --suite life-business-shopping-communication-20
 
 Luna实施、Sol一轮只读审查GO；根独立执行runner/start Node测试 **33/33通过**，含六题×四variant CLI投影、起始URL、原九题保留、套件路径/冻结、无答案注入、离线不读env、指定key无回退和取消/清理回归。相关MJS语法检查及diff检查通过。新manifest仅更新顶层状态/说明，六题Goal、来源、评分内容保持原样；原九题manifest未改。没有调用真实API、打开浏览器/应用、读真实key、控制桌面或替换Preview。今晚的GUI/网站/daemon实态检查及首题监督运行仍未完成，不把这些离线结果记作业务成功。
 
-更新：2026-10-16。状态：授权的八题已依次真实执行完毕、跳过G03，使用整个桌面前台路径；成功、失败、中止及复跑分别保留，详见[逐题结果](./life-business-eight-task-results-2026-10-16.md)。没有足够证据判定完整业务通过，先处理已复现基础问题再开展模块对照。完整指令见[任务卡](../../life-business-task-cards-2026-10-15.md)，程序题面唯一来源是[tasks.json](../../../eval/life-business-20261015/tasks.json)。旧准备树及其历史记录保留，不继续使用旧包。
+更新：2026-10-16。状态：授权的八题已依次真实执行完毕、跳过G03，使用整个桌面前台路径；成功、失败、中止及复跑分别保留，详见[逐题结果](./life-business-eight-task-results-2026-10-16.md)。没有足够证据判定完整业务通过，先处理已复现基础问题再开展模块对照。完整指令见[任务卡](../2026-10-20-product-docs/life-business-task-cards-2026-10-15.md)，程序题面唯一来源是[tasks.json](../../../eval/life-business-20261015/tasks.json)。旧准备树及其历史记录保留，不继续使用旧包。
 
 当前准备分支为`codex/life-eval-ready-20261015`，基底main `6b1d6e20136b38c9a53c7033ba5e372f00add335`（PR32已合入，main CI也已通过）。只搬入本批任务/脚本，另补CLI输入策略接线；没有带入原PR30未合入的DOM、网页来源绑定或Context/Monitor后续改动。未发布到远端、未部署Preview，不把原准备树的CLI构建直接当成新版本。
 
@@ -524,7 +524,7 @@ checks/sourceIds/allowedHosts/requiredApps用于操作者预检、操作范围�
 
 ## 2. 来源与预检
 
-**2026-10-15静态核验及修题：** [仅供评分员的逐项答案与依据](../../life-business-static-answer-key-2026-10-15.md)包含G01/G02/G03/M01/M02及M03院址的静态事实、条号/段落和版本。T02、T03、M03的高德路线以及票务结果都是动态信息，不在静态答案中冻结。无法明确的问题已经从任务与评分要求移除，不以“再问银行/医院”替代必答答案。答案表不由runner读取或注入Goal。
+**2026-10-15静态核验及修题：** [仅供评分员的逐项答案与依据](../2026-10-20-product-docs/life-business-static-answer-key-2026-10-15.md)包含G01/G02/G03/M01/M02及M03院址的静态事实、条号/段落和版本。T02、T03、M03的高德路线以及票务结果都是动态信息，不在静态答案中冻结。无法明确的问题已经从任务与评分要求移除，不以“再问银行/医院”替代必答答案。答案表不由runner读取或注入Goal。
 
 下列页面本日已经公开网页初查，不占桌面、不调用模型；可读不等于本机GUI通过。评分用原条款不注入模型。
 

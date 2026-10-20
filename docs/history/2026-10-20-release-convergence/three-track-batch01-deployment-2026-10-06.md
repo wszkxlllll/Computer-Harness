@@ -9,7 +9,7 @@
 - 起点 PR22：`bb17a7b3838858e6fb9b95a2e35bf737f0f828e0`；来源 PR24：`39a3b2aa9779024b30da50b0d2ef6b952163e2f4`。
 - 326 tracked apps/packages/native 源码指纹（排序path-NUL-content-NUL）：`9eb8e96ad9f7b5667c536612b7b420223e55bbc7c261ec3e328413bf2ddc1c1f`。
 - pnpm-lock SHA256：`44081c30484355a86f76adf86e9da8b61f309eef8d1a2ecb20cb0b2687295c60`。
-- 实际25业务/测试文件与逐项功能见 [F002](../../a-line-sync/fixes/F-20261006-002.md)；其余变化仅执行说明与交付证据。computer-cua/native/Web源码、两个probe脚本均零diff。
+- 实际25业务/测试文件与逐项功能见 [F002](../2026-10-20-product-docs/a-line-sync/fixes/F-20261006-002.md)；其余变化仅执行说明与交付证据。computer-cua/native/Web源码、两个probe脚本均零diff。
 
 ## 验证边界
 

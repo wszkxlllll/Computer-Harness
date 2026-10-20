@@ -3,7 +3,7 @@
   "manifestId": "medical-care-d01-20261002",
   "status": "draft_not_frozen",
   "domain": "medical_care_services",
-  "scope": "D01 就医与健康服务三类任务：查询科室/院区、按时间筛选号源、核对预约草稿与整理就诊准备。对齐 docs/project-materials.md §4 官方示例口径。",
+  "scope": "D01 就医与健康服务三类任务：查询科室/院区、按时间筛选号源、核对预约草稿与整理就诊准备。对齐 docs/history/2026-10-20-product-docs/project-materials.md §4 官方示例口径。",
   "origin": {
     "country": "China",
     "calendar": "Asia/Shanghai"

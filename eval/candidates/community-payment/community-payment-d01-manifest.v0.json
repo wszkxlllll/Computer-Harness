@@ -3,7 +3,7 @@
   "manifestId": "community-payment-d01-20261002",
   "status": "draft_not_frozen",
   "domain": "community_payment_services",
-  "scope": "D01 生活缴费与社区服务三类任务：核对户号/账单、查询缴费与物业入口、准备报修和服务预约草稿。对齐 docs/project-materials.md §4 官方示例口径；素材取自 community-payment-candidate-manifest.v0.json（C01/C03/C05/C06/C07 适配）。",
+  "scope": "D01 生活缴费与社区服务三类任务：核对户号/账单、查询缴费与物业入口、准备报修和服务预约草稿。对齐 docs/history/2026-10-20-product-docs/project-materials.md §4 官方示例口径；素材取自 community-payment-candidate-manifest.v0.json（C01/C03/C05/C06/C07 适配）。",
   "origin": {
     "country": "China",
     "calendar": "Asia/Shanghai"

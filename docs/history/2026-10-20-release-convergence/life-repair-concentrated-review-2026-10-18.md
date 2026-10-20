@@ -12,7 +12,7 @@
 
 **GO（审批最小增量的功能、类型及两项集成断言复审）。** 此前主修复及 Web/voice 增量的审查结论保持。已独立核对最终最小签名：approvalPlanVoiceText 返回 ready、sensitive、unavailable 三个独立判别分支，没有使用 as 绕过检查。根协调器实际重跑 tsc -b、spike noEmit 及 Web production build 均通过。
 
-根协调器最终验收补记：整改后的完整组合 Vitest 为 **141 文件、2563/2563 通过**，不是审查者独立执行数。Node 脚本测试仍有 10 项本机 symlink fixture 权限 EPERM 失败，保留此边界。审查时未部署、未运行真实任务或 iPhone VoiceOver；用户随后授权的推送、备份与 Preview 发布见[部署记录](../../voice-preview-deploy-phone-test-2026-09-29.md)，不追溯作为实机功能验收。
+根协调器最终验收补记：整改后的完整组合 Vitest 为 **141 文件、2563/2563 通过**，不是审查者独立执行数。Node 脚本测试仍有 10 项本机 symlink fixture 权限 EPERM 失败，保留此边界。审查时未部署、未运行真实任务或 iPhone VoiceOver；用户随后授权的推送、备份与 Preview 发布见[部署记录](../2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)，不追溯作为实机功能验收。
 
 集成断言捕获与整改：组合全量 Vitest 曾为 **2561 passed、2 failed**；两项失败位于 remote-run-api.test 的旧审批精确文案断言，因新增计划文本而不再匹配。已审该测试文件的唯一新 diff：两处仍采用严格完整预期，纳入当前计划、未核验提示及风险句；保留 pendingRequestId 绑定与 hunter2/password 敏感 raw reason 排除断言，新增 preview 精确 target/summary 及 verified:false 断言，没有降为宽泛包含匹配。独立筛选这两个原失败 case，**2 passed、0 failed**；其余 82 项因筛选未运行。两项断言缺口已关闭，后续最终组合结果见顶部根验收补记；前一版本 2554 项通过不替代最终结果。
 

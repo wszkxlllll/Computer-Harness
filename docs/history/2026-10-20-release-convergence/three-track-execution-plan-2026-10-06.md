@@ -37,7 +37,7 @@
 
 ## 2 分工和依赖
 
-沿用[三聊天协作](../../a-line-three-thread-coordination-2026-10-03.md)和[事件协议](../../a-line-collaboration-sync-2026-10-03.md)。下列“Mac 修复”和“Windows 修复”是工作包，可由现有修复方或原作者承担，不额外创建一套竞争实现。
+沿用[三聊天协作](../2026-10-20-product-docs/a-line-three-thread-coordination-2026-10-03.md)和[事件协议](../2026-10-20-product-docs/a-line-collaboration-sync-2026-10-03.md)。下列“Mac 修复”和“Windows 修复”是工作包，可由现有修复方或原作者承担，不额外创建一套竞争实现。
 
 | 角色 | 负责什么 | 明确交付 |
 | --- | --- | --- |

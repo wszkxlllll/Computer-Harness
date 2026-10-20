@@ -22,9 +22,9 @@
 
 # A 线双聊天协作
 
-- 用户于 2026-10-03 另指定 `确定三人分工步骤 (6)`（Thread `01a10088-17c4-7351-a68b-953b0af94781`）负责远端代码更新和审查，并与（8）、（10）建立联系。三方角色、共享工作树及 Git 操作协调见 [三聊天协作入口](docs/a-line-three-thread-coordination-2026-10-03.md)；（6）读取双聊天事件证据，不代替（10）操作实机或覆盖其验收记录。
+- 用户于 2026-10-03 另指定 `确定三人分工步骤 (6)`（Thread `01a10088-17c4-7351-a68b-953b0af94781`）负责远端代码更新和审查，并与（8）、（10）建立联系。三方角色、共享工作树及 Git 操作协调见 [三聊天协作入口](./docs/history/2026-10-20-product-docs/a-line-three-thread-coordination-2026-10-03.md)；（6）读取双聊天事件证据，不代替（10）操作实机或覆盖其验收记录。
 - 用户于 2026-10-03 指定：`确定三人分工步骤 (8)`（Thread `01a10059-ed82-78a1-9a0a-156c56cd1673`）负责修复；`确定三人分工步骤 (10)`（Thread `01a10084-4097-7200-8cf3-5c0c7f65c413`）负责实机测试。仅对这两个聊天应用职责分工。
-- 两者每轮先读取 [同步协议](docs/a-line-collaboration-sync-2026-10-03.md) 与 `docs/a-line-sync/` 新事件。修复方写源码及 fixes，测试方写 issues/tests 并管理本机运行；关键交接使用对应 Thread ID 通知，记录优先于消息。
+- 两者每轮先读取 [同步协议](./docs/history/2026-10-20-product-docs/a-line-collaboration-sync-2026-10-03.md) 与 `docs/a-line-sync/` 新事件。修复方写源码及 fixes，测试方写 issues/tests 并管理本机运行；关键交接使用对应 Thread ID 通知，记录优先于消息。
 - 共享 checkout 的源码、构建和桌面按协议交接；实机测试占用期间不并发改相关源码或构建，不由修复方重启服务。未提交版本以源码指纹核对，不将离线通过或源码已改当作实机已部署。
 
 # Exact-window activation and handoff
@@ -38,8 +38,8 @@
 
 # Explicit cross-window feature authorization
 
-- The 2026-10-04 window repair supersedes the historical requirement above to fail a Run merely because the global inventory is partial. Preserve the completed receipt; use fresh exact-target evidence and never infer child disappearance from a partial inventory. An unresolved transient becomes a user-confirmation boundary rather than an action replay. Complete Win32 snapshots may prove an exact cross-process owner relationship; same-PID and UIA root classification are not universal prerequisites. See `docs/window-and-progress-repair-results-2026-10-04.md` for the verified scope.
+- The 2026-10-04 window repair supersedes the historical requirement above to fail a Run merely because the global inventory is partial. Preserve the completed receipt; use fresh exact-target evidence and never infer child disappearance from a partial inventory. An unresolved transient becomes a user-confirmation boundary rather than an action replay. Complete Win32 snapshots may prove an exact cross-process owner relationship; same-PID and UIA root classification are not universal prerequisites. See `docs/history/2026-10-20-product-docs/window-and-progress-repair-results-2026-10-04.md` for the verified scope.
 
-- On 2026-10-02 the user approved the opt-in model-requested `list_windows` / `switch_window` plan in `docs/cross-window-execution-plan-2026-10-02.md`. This is a separate explicitly authorized target-switch operation, not a relaxation of the legacy automatic foreground-mismatch/new-popup handoff rules above.
+- On 2026-10-02 the user approved the opt-in model-requested `list_windows` / `switch_window` plan in `docs/history/2026-10-20-product-docs/cross-window-execution-plan-2026-10-02.md`. This is a separate explicitly authorized target-switch operation, not a relaxation of the legacy automatic foreground-mismatch/new-popup handoff rules above.
 - Reuse exact activation and identity/capture verification. A model may select only a Run-scoped candidate reference discovered by the adapter and allowed by the Host. Background/minimized candidates require fresh verification after activation before subsequent input; inclusion in inventory alone does not prove operability.
 - Preserve default single-target behavior, per-action foreground guards, desktop ownership, Abort/approval and unknown-side-effect handling. Switching never silently enables whole-desktop capture or personal-browser DOM access.

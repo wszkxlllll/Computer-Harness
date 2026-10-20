@@ -114,7 +114,7 @@ Sol从PR原始源码经现有TypeScript在内存转译，执行真实比较函�
 
 本机整桌面、focused writable Document 的空白输入、文末追加及真实 GLM 保存链路已通过全文读回：新文件 431 字符精确，10 请求、194.243 秒；其中请求等待 165.285 秒。两次保存／取消点击仍保留 partial unknown，经新观察恢复而非重放。私有 Edge 地址栏和页面单行回归通过。证据在下方“真实Harness整桌面输入／保存复核通过”。
 
-Preview Relay/Web 已部署到 `2026-10-07-desktop-input-v1`，本机候选 Host 监听 4318 并连接 8443；健康、静态资源指纹、匿名 API 拒绝和本机配对票据流程检查通过。稳定入口 443、默认 driver、原配置与登录 profile 保留。部署期间没有重跑业务任务或调用模型；手机须重新扫码配对。详见[部署、使用与回退记录](../../voice-preview-deploy-phone-test-2026-09-29.md)。
+Preview Relay/Web 已部署到 `2026-10-07-desktop-input-v1`，本机候选 Host 监听 4318 并连接 8443；健康、静态资源指纹、匿名 API 拒绝和本机配对票据流程检查通过。稳定入口 443、默认 driver、原配置与登录 profile 保留。部署期间没有重跑业务任务或调用模型；手机须重新扫码配对。详见[部署、使用与回退记录](../2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)。
 
 体验携程→记事本时显式选择“整个桌面（高级）”并打开“跨应用完成任务”；单独记事本任务可关闭跨应用。整个桌面会暴露其他可见内容，开始前隐藏敏感窗口，执行期间不要同时操作鼠标键盘。手机 Guard 继续按既有审批工作，不提供关闭开关。
 
@@ -168,7 +168,7 @@ Issue正文已替换“暂无PR／仍在探索”旧状态并双向关联PR，�
 
 最终修复已通过：大图decode前扫描有界chunk、首且唯一完整IHDR／interlace0／IEND；三个恶意或畸形负例确认decoder未调用。Luna定向102/102，Sol仅复核P1增量并独立helper5/5通过、最终GO。协调者全仓1817/1817通过，原始JSON为`runs/diagnostics/preview-thumbnail-context-regression-20261007.json`；代码分两commit保存：Context `6de2a509`、预览`d840000c`。
 
-本机Host已按后者构建并更新：重启前后lease为unowned，仅精确重启Preview Host，CUA binary／pipe／home、profile、env、服务器Relay/Web保留；连接／session200及Relay连接通过，没有启动新业务／模型测试。手机须重新配对。详细版本矩阵见[部署记录](../../voice-preview-deploy-phone-test-2026-09-29.md)。真实大图候选仍待用户复验，不能把合成指标或health200称为真实capture通过。
+本机Host已按后者构建并更新：重启前后lease为unowned，仅精确重启Preview Host，CUA binary／pipe／home、profile、env、服务器Relay/Web保留；连接／session200及Relay连接通过，没有启动新业务／模型测试。手机须重新配对。详细版本矩阵见[部署记录](../2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)。真实大图候选仍待用户复验，不能把合成指标或health200称为真实capture通过。
 
 #### 完整版 Demo 录制安排（修复验收后执行）
 

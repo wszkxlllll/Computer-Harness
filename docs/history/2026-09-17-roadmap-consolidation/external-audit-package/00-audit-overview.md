@@ -15,13 +15,13 @@
 
 通过 GitHub 连接器固定提交读取了 Runtime 主循环、Context、Memory、Planning、Risk、CUA Adapter、CLI/TUI、两家 Provider 的关键路径，以及 Trajectory 的核心状态迁移和持久化逻辑；抽查 Context、CUA 的测试，阅读现有产品计划、能力探针和轨迹统计脚本。针对 CUA 扩展，对照的是项目真正锁定的 **0.22.2**，对应上游提交 **d114f35fec05ecd37bf529e5587be86852205b64**，不是拿最新主干功能反推旧版本能力。
 
-本次另外在 Node **v22.16.0** 执行了 **6 个提取逻辑复现用例**，覆盖 5 类行为：用户纠正被预算裁剪、单事件预算溢出、Memory replacement 校验遗漏（2 个用例）、风险文本规则漏检、原生工具参数日志保留。详细结果见 [verification/probe-results.tap](verification/probe-results.tap)。它们全部复现了预期的当前行为。
+本次另外在 Node **v22.16.0** 执行了 **6 个提取逻辑复现用例**，覆盖 5 类行为：用户纠正被预算裁剪、单事件预算溢出、Memory replacement 校验遗漏（2 个用例）、风险文本规则漏检、原生工具参数日志保留。详细结果见 [verification/probe-results.tap](./verification/probe-results.tap)。它们全部复现了预期的当前行为。
 
 **没有完成的验证：**当前容器无法联网 clone / 安装这个仓库的依赖，因此没有执行整个仓库的 `pnpm typecheck`、`pnpm test`，没有调用付费 Provider，也没有连接 CUA 或操作真实桌面。提取逻辑复现不是仓库集成测试，更不是 Windows 实机证明。仓库文档中的“179 项测试”等是作者历史记录，不作为本次独立运行结果。
 
 GitHub 的 `main` 分支查询返回 `protected: false`，required status checks 为 off；固定提交根目录也没有 `.github/`。这是本次读取时的设置，不代表之后不会改变。
 
-生成的工作流完成本地 YAML/结构校验，候选源码归档脚本在合成 Git 仓库中完成了归档、校验和、拒绝覆盖和拒绝未提交变更检查；这些也不等于 GitHub CI 已通过。结果见 [verification/template-checks.json](verification/template-checks.json)。
+生成的工作流完成本地 YAML/结构校验，候选源码归档脚本在合成 Git 仓库中完成了归档、校验和、拒绝覆盖和拒绝未提交变更检查；这些也不等于 GitHub CI 已通过。结果见 [verification/template-checks.json](./verification/template-checks.json)。
 
 ## 3. 先纠正面试讨论中不准确的判断
 
@@ -42,10 +42,10 @@ GitHub 的 `main` 分支查询返回 `protected: false`，required status checks
 
 | 文件 | 用途 |
 |---|---|
-| [01-runtime-context-memory-remediation.md](01-runtime-context-memory-remediation.md) | 17 项审计问题、修复边界、测试要求，以及 Memory / Monitor / Evaluation 的可行设计 |
-| [02-cua-tui-live-testing.md](02-cua-tui-live-testing.md) | CUA 能力利用顺序、窗口/焦点与坐标合同、TUI 产品化和实机验收门槛 |
-| [03-refactor-ci-cd.md](03-refactor-ci-cd.md) | 具体拆文件方案、依赖边界、协作 PR 顺序、CI/CD 与发布治理 |
-| [04-agent-work-orders.md](04-agent-work-orders.md) | 可交给开发 Agent 的实施工单、输入输出、禁止事项、验收条件 |
+| [01-runtime-context-memory-remediation.md](./01-runtime-context-memory-remediation.md) | 17 项审计问题、修复边界、测试要求，以及 Memory / Monitor / Evaluation 的可行设计 |
+| [02-cua-tui-live-testing.md](./02-cua-tui-live-testing.md) | CUA 能力利用顺序、窗口/焦点与坐标合同、TUI 产品化和实机验收门槛 |
+| [03-refactor-ci-cd.md](./03-refactor-ci-cd.md) | 具体拆文件方案、依赖边界、协作 PR 顺序、CI/CD 与发布治理 |
+| [04-agent-work-orders.md](./04-agent-work-orders.md) | 可交给开发 Agent 的实施工单、输入输出、禁止事项、验收条件 |
 | `verification/` | 六项提取逻辑复现、真实 TAP 输出与验证范围说明 |
 | `templates/` | CI、候选交付制品 workflow、Dependabot、CODEOWNERS 起点；未写入远端 |
 

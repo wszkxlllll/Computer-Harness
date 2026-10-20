@@ -1,6 +1,6 @@
 # Harness Relay
 
-当前交付包含 Relay 服务、Host 出站 WSS 连接器和 Web 前端静态托管入口。团队隔离 Preview 已完成 HTTPS 公网部署、配对及部分手机真实任务验证，见[部署与验证记录](../../docs/voice-preview-deploy-phone-test-2026-09-29.md)；这不是面向所有人的无人值守公共 Demo，也不表示跨平台或所有任务已经验收。以下解释通信边界，当前请求合同以源码校验器及[Host 合同](../host/CONTRACT.md)为准。
+当前交付包含 Relay 服务、Host 出站 WSS 连接器和 Web 前端静态托管入口。团队隔离 Preview 已完成 HTTPS 公网部署、配对及部分手机真实任务验证，见[部署与验证记录](../../docs/history/2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)；这不是面向所有人的无人值守公共 Demo，也不表示跨平台或所有任务已经验收。以下解释通信边界，当前请求合同以源码校验器及[Host 合同](../host/CONTRACT.md)为准。
 
 ## 数据路径与边界
 

@@ -22,7 +22,7 @@ G0 尚未完成，不能把候选 JSON 标记为冻结，也不能开始正式�
 ```powershell
 python scripts/stage5-osworld/preflight-candidates.py `
   --osworld-root "<OSWORLD_ROOT>" `
-  --candidate-doc "docs/harness-development-validation-candidates-2026-09-10.json" `
+  --candidate-doc "docs/history/2026-10-20-product-docs/harness-development-validation-candidates-2026-09-10.json" `
   --output "runs/g0-static-preflight/summary.json"
 ```
 
@@ -52,7 +52,7 @@ node scripts/stage5-osworld/preflight-batch.mjs `
   --osworld-root "<OSWORLD_ROOT>" `
   --path-to-vm "<OSWORLD_VMX>" `
   --snapshot-name "<VM_SNAPSHOT_NAME>" `
-  --candidate-doc "docs/harness-development-validation-candidates-2026-09-10.json" `
+  --candidate-doc "docs/history/2026-10-20-product-docs/harness-development-validation-candidates-2026-09-10.json" `
   --python "<PYTHON_EXECUTABLE>" `
   --vmrun-path "<VMRUN_EXECUTABLE>" `
   --labels "V06,V07,V08,V09,V10,V11,V12,V13,V14,V15,V16,V17,V18,V20" `
@@ -66,7 +66,7 @@ node scripts/stage5-osworld/preflight-batch.mjs `
   --osworld-root "<OSWORLD_ROOT>" `
   --path-to-vm "<OSWORLD_VMX>" `
   --snapshot-name "<VM_SNAPSHOT_NAME>" `
-  --candidate-doc "docs/harness-development-validation-candidates-2026-09-10.json" `
+  --candidate-doc "docs/history/2026-10-20-product-docs/harness-development-validation-candidates-2026-09-10.json" `
   --python "<PYTHON_EXECUTABLE>" `
   --vmrun-path "<VMRUN_EXECUTABLE>" `
   --include-reserve `

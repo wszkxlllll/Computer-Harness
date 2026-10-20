@@ -9,7 +9,7 @@
 
 ## 1. 本轮能开始什么
 
-开始独立于生产Runtime的评测准备：任务候选、显式日期固定、任务身份、证据目录、人工走查及评分模板、离线校验。用户新增要求后，补充显式逐题启动和轨迹指标收集，实际调用由用户执行run并确认。复用现有CUA与应用入口，不另建Agent Loop，不先开发自进化框架，不把模拟订票网页充当真实App。完整题目与填写说明见[20题及反馈表](../../travel-task-cards-and-feedback.md)。
+开始独立于生产Runtime的评测准备：任务候选、显式日期固定、任务身份、证据目录、人工走查及评分模板、离线校验。用户新增要求后，补充显式逐题启动和轨迹指标收集，实际调用由用户执行run并确认。复用现有CUA与应用入口，不另建Agent Loop，不先开发自进化框架，不把模拟订票网页充当真实App。完整题目与填写说明见[20题及反馈表](../2026-10-20-product-docs/travel-task-cards-and-feedback.md)。
 
 开发验收期间不执行真实模型/桌面任务；交付后用户可显式启动单题。脚本不自动连续执行题库、不自动下单/支付/退改签/候补或修改账号；登录与验证码由用户处理。提示词边界和现有Guard不是绝对安全隔离，用户须现场观察，出现越界意图立即停止。
 
@@ -81,7 +81,7 @@ Luna只读源码预检（不是运行通过）：`spikes/cua-driver/stage4-local
 - 初态、页面证据、人工评分模板默认pending，缺失证据不能通过。真实运行绑定与结果导入需另行验收。
 - 单测覆盖上述拒绝路径和12/8分集；实际客户端走查前不能改为ready。
 
-2026-09-20新增指标要求：除基础计数，按[反馈表第4节](../../travel-task-cards-and-feedback.md#4-脚本记录的指标)保留Context、Memory、Planning、Batch、Monitor、Guard和人机控制的参与证据。只复用已有trace；不能观测的记未知，净效果由人工检查和后续对照确认，不为填指标新增模型裁判。
+2026-09-20新增指标要求：除基础计数，按[反馈表第4节](../2026-10-20-product-docs/travel-task-cards-and-feedback.md#4-脚本记录的指标)保留Context、Memory、Planning、Batch、Monitor、Guard和人机控制的参与证据。只复用已有trace；不能观测的记未知，净效果由人工检查和后续对照确认，不为填指标新增模型裁判。
 
 准备资产不修改Computer/Provider/Runtime协议；本机能力和真实页面可用性另做实际走查，不能用离线检查替代。本轮未消费业务模型API额度、操作桌面、安装依赖或commit/push。
 
@@ -171,7 +171,7 @@ PowerShell解析及launcher替身验证使用 `scripts/travel/run.parse.test.ps1
 
 ### 启动命令与操作说明
 
-**面向用户的唯一完整步骤、启动命令和20题完整goal统一在[任务操作手册第0节及第2.1节](../../travel-task-cards-and-feedback.md)。**先按那一份做，不需要拼接本文件的旧CLI命令。首次TUI启动保留Build；生产报告新增字段需要重建。新入口不带Task/AnchorDate，用户在TUI内输入明确日期的goal。
+**面向用户的唯一完整步骤、启动命令和20题完整goal统一在[任务操作手册第0节及第2.1节](../2026-10-20-product-docs/travel-task-cards-and-feedback.md)。**先按那一份做，不需要拼接本文件的旧CLI命令。首次TUI启动保留Build；生产报告新增字段需要重建。新入口不带Task/AnchorDate，用户在TUI内输入明确日期的goal。
 
 每个Run在会话目录下独立保存summary、trajectory、run-metadata、report、metrics和manual-review。后台采集器随TUI启动，在退出时收尾；普通单题CLI的runtime目录与TUI会话/run-*目录不混用。
 
@@ -334,6 +334,6 @@ window模式右键/双击仍禁用。foreground可能激活目标，遮挡/前�
 - 浏览器独立profile本地页两轮：窗口布局/身份及窗口截图通过，click焦点oracle未确认，未继续输入。用户要求停止后已清理自有浏览器、私有daemon、临时profile及subst映射，保留脱敏summary，不计浏览器动作通过。
 - 最后整仓418项与构建通过记录是其执行时树的证据；停止测试之后仅做文案/接入收口及必要构建，不声称又跑了完整回归或新的真实任务。
 
-用户日常命令和键盘操作统一见[任务操作手册第0节](../../travel-task-cards-and-feedback.md#0-你现在照这个顺序做)。spikes中保留了matrix、side-by-side、browser探针及使用说明供以后复核，但启动TUI不需要先跑这些探针。本轮Guard最终为逐次审批：Y只允许当前调用，fresh observe仍校验旧画面，查询关键词豁免已撤回，授权grant仅为后续候选。
+用户日常命令和键盘操作统一见[任务操作手册第0节](../2026-10-20-product-docs/travel-task-cards-and-feedback.md#0-你现在照这个顺序做)。spikes中保留了matrix、side-by-side、browser探针及使用说明供以后复核，但启动TUI不需要先跑这些探针。本轮Guard最终为逐次审批：Y只允许当前调用，fresh observe仍校验旧画面，查询关键词豁免已撤回，授权grant仅为后续候选。
 
 最终收口：停止实验后已再次完成隔离Node 24.19.0下的`check -Build`，CLI/CUA输出与当前源码同步。没有再运行模型、GUI或单元测试；此前418项结果不冒充最后文案树的重跑结果。重新打开TUI即可载入新构建，现有共享daemon可以复用，无需重新登录或重装环境。

@@ -1,8 +1,8 @@
-> Current combined candidate, 2026-10-12: the seventh native identity addition is documented in [F079](../../a-line-sync/fixes/F-20261012-079-saved-document-identity.md). Its signed SHA-256 is `54493778143216adc202eb6a7d82e6e5b4f987e78b15291557bd43910b79b6b7`. Accessibility and Screen Recording have been granted and verified; the denied permission state below is historical. Real SDK identity/capture diagnostics passed, while complete business tasks remain unaccepted.
+> Current combined candidate, 2026-10-12: the seventh native identity addition is documented in [F079](../2026-10-20-product-docs/a-line-sync/fixes/F-20261012-079-saved-document-identity.md). Its signed SHA-256 is `54493778143216adc202eb6a7d82e6e5b4f987e78b15291557bd43910b79b6b7`. Accessibility and Screen Recording have been granted and verified; the denied permission state below is historical. Real SDK identity/capture diagnostics passed, while complete business tasks remain unaccepted.
 >
 > To reproduce the current source, start with a **complete** archive of upstream `d114f35fec05ecd37bf529e5587be86852205b64`, then apply these patches in order with `git apply --check` before each application: `d114f35-macos-exact-window-capture.patch`, `d114f35-macos-focused-element-proof.patch`, `d114f35-macos-attached-sheet-proof.patch`, `d114f35-macos-exact-focused-unicode-text.patch`, `d114f35-macos-foreground-pixel-hit-guard.patch`, `d114f35-macos-ax-text-format.patch`, `d114f35-macos-document-identity.patch`. The final seventh patch also completes three AXNode initializer sites needed by the prior text-format change. A sparse copy of only previously changed files is not a source checkout. Final author gates and complete nine-file replay are recorded in F079; they do not inherit the historical capture-only test counts below.
 
-> The earlier `a0…` digest in this capture-only report is historical. The current combined capture-and-focus candidate, isolated bundle identity, and binary SHA-256 are recorded in [F-20261011-071](../../a-line-sync/fixes/F-20261011-071-macos-browser-focus-proof.md).
+> The earlier `a0…` digest in this capture-only report is historical. The current combined capture-and-focus candidate, isolated bundle identity, and binary SHA-256 are recorded in [F-20261011-071](../2026-10-20-product-docs/a-line-sync/fixes/F-20261011-071-macos-browser-focus-proof.md).
 
 # macOS exact-window capture patch (2026-10-11)
 
@@ -18,7 +18,7 @@ A native ScreenCaptureKit matrix reproduced the issue with TextEdit's parent win
 - Changed native source: `libs/cua-driver/rust/crates/platform-macos/src/capture.rs`, blob `e8fee0477103451914545e60db9097866c4adbcf`.
 - Patch SHA-256: `980323a0737626152a27ad0edda2eb0408f944e707f5a63f6094bd74d3e8393b`.
 - `Cargo.lock` remained unchanged; `screencapturekit` is locked at 6.0.1.
-- Toolchain: Rust/Cargo 1.97.1, offline and locked. Cargo home, Rustup home, and temporary Swift/clang module caches are the existing isolated paths documented in `docs/a-line-sync/diagnostics/F-20261007-005/MANIFEST.md`.
+- Toolchain: Rust/Cargo 1.97.1, offline and locked. Cargo home, Rustup home, and temporary Swift/clang module caches are the existing isolated paths documented in `docs/history/2026-10-20-product-docs/a-line-sync/diagnostics/F-20261007-005/MANIFEST.md`.
 
 From the Cua Rust workspace root, the candidate was checked with:
 

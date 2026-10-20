@@ -2,6 +2,8 @@
 
 Suite ID：`life-business-six-domain-20261018`
 
+2026-10-20文档收敛：详细题卡和证据移入docs/history，程序引用随之迁移；CP02来源题卡仅文档链接变化，provenance文本指纹同步重算。Goal、检查项、答案、分组与运行策略不变。旧冻结包及旧Run保留，不将旧包改写成新版本；以后运行需重新prepare。
+
 状态：首轮已授权实跑 16 次，另 8 组未运行，原记录保留。结果与本轮离线修复见[评测报告](../../docs/history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md)。新版本复测仍须用户明确授权，并重新冻结和预检，不能复用旧包。
 程序题面：[`tasks.json`](./tasks.json)。旧九题和 2026-10-16 新六题保持原样。
 
