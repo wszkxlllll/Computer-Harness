@@ -64,6 +64,8 @@ describe("prepareComputerRunAssembly", () => {
     if (process.platform === "win32") {
       expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("intended to insert at the current caret or replace the current selection");
       expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("driver completion does not verify the resulting content");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("use a single paragraph in submit-on-Enter controls");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("perform any send/submit as a separate deliberate action");
       expect(caretProfile.toolPresentationOverrides[0]?.description).not.toContain("preserves the current caret or selection");
       expect(caretProfile.toolPresentationOverrides[0]?.inputPropertyDescriptions.elementRef).toContain("append-to-end");
     }
@@ -382,6 +384,7 @@ describe("createComputer", () => {
       grounding: "off",
       windowSwitch: "opened-windows-v1",
       browserTarget: managedTarget,
+      activateManagedBrowserOnOpen: true,
     });
     expect(fixture.calls.delegateOptions).not.toHaveProperty("windowSwitchAllowedTargets");
     expect(fixture.calls.delegateOptions).not.toHaveProperty("domGroundingTransport");
@@ -459,6 +462,7 @@ describe("createComputer", () => {
       windowSwitchAllowedTargets: [nativeScope, managedTarget.windowTarget],
     });
     expect(fixture.calls.delegateOptions).not.toHaveProperty("windowTarget");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("activateManagedBrowserOnOpen");
     expect(fixture.calls.delegateOptions).not.toHaveProperty("windowRelationshipProbe");
     if (process.platform === "win32") {
       expect(fixture.calls.delegateOptions?.desktopGroundingRelationshipProbe).toMatchObject({ read: expect.any(Function) });
@@ -491,6 +495,31 @@ describe("createComputer", () => {
 
     expect(fixture.calls.delegateOptions).not.toHaveProperty("windowRelationshipProbe");
     expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+    await computer.close(session);
+  });
+
+  it("preserves a manually selected native initial window instead of activating the browser companion", async () => {
+    const fixture = managedFixture();
+    const nativeTarget = { pid: 456, windowId: 789 };
+    const computer = await createComputer({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      grounding: "off",
+      managedBrowserUrl: "https://example.test/entry",
+      managedBrowserCompanion: true,
+      windowSwitch: "opened-windows-v1",
+      windowTarget: nativeTarget,
+      windowSwitchAllowedTargets: [nativeTarget],
+    }, {
+      createManagedBrowserHost: fixture.createHost,
+      openCuaBootstrapSession: fixture.openBootstrap,
+      importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+    });
+    const session = await computer.open({}, fixture.signal);
+
+    expect(fixture.calls.delegateOptions).toMatchObject({ windowTarget: nativeTarget });
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("activateManagedBrowserOnOpen");
     await computer.close(session);
   });
 

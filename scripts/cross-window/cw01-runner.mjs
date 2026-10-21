@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CONFIG_PATH = resolve(REPO_ROOT, ".harness.local.psd1");
-const TASK_CARD_PATH = resolve(REPO_ROOT, "docs/cross-window-life-task-cards-2026-10-02.md");
+const TASK_CARD_PATH = resolve(REPO_ROOT, "docs/history/2026-10-20-product-docs/cross-window-life-task-cards-2026-10-02.md");
 const EVIDENCE_ROOT = resolve(REPO_ROOT, "runs/cross-window-life-task");
 const TASK_ID = "CW01";
 const OUTPUT_FILE = "E:\\MyDesktop\\output\\CW01-活动备忘录.txt";

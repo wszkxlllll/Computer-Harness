@@ -49,6 +49,33 @@ function desktopProjection(catalog: GroundingCatalog | undefined): string {
 }
 
 describe("runtime projections for action effects and desktop grounding", () => {
+  it("requires same-Run evidence before claiming a requested mutation was completed", () => {
+    const text = composeSystemPrompt("Base prompt", {
+      planning: "off",
+      memory: "off",
+      batching: "off",
+    });
+    expect(text).toContain("an already-present matching result is prior state, not proof this Run made the change");
+    expect(text).toContain("this Run's matching action/receipt and a fresh post-action Observation support it");
+    expect(text).toContain("if it was not executed, do not say it was");
+    expect(text).toContain("report it as uncompleted or unknown with the evidence gap");
+  });
+
+  it("defines ordinary navigation/edit effects and prevents approval claims without Runtime evidence", () => {
+    const text = composeSystemPrompt("Base prompt", {
+      planning: "off",
+      memory: "off",
+      batching: "off",
+      riskGuard: "layered",
+    });
+    expect(text).toContain("Use navigate for ordinary page or view navigation");
+    expect(text).toContain("use local_edit for focusing ordinary input controls or reversible edits that do not submit");
+    expect(text).toContain("Runtime controls approvals");
+    expect(text).toContain("A screenshot that does not show an approval cannot establish that approval was unnecessary or did not occur");
+    expect(text).toContain("unless explicit Runtime evidence says so, do not state whether approval occurred");
+    expect(text).not.toContain("Never imply approval/safety");
+  });
+
   it("classifies Planning and Memory as schema-only non-Computer tools for effect metadata", () => {
     const text = composeSystemPrompt("Base prompt", {
       planning: "tasks-v1",

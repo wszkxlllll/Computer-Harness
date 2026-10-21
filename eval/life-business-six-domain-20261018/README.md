@@ -2,7 +2,9 @@
 
 Suite ID：`life-business-six-domain-20261018`
 
-状态：首轮已授权实跑 16 次，另 8 组未运行，原记录保留。结果与本轮离线修复见[评测报告](../../docs/life-business-evaluation-2026-10-15.md)。新版本复测仍须用户明确授权，并重新冻结和预检，不能复用旧包。
+2026-10-20文档收敛：详细题卡和证据移入docs/history，程序引用随之迁移；CP02来源题卡仅文档链接变化，provenance文本指纹同步重算。Goal、检查项、答案、分组与运行策略不变。旧冻结包及旧Run保留，不将旧包改写成新版本；以后运行需重新prepare。
+
+状态：首轮已授权实跑 16 次，另 8 组未运行，原记录保留。结果与本轮离线修复见[评测报告](../../docs/history/2026-10-20-release-convergence/life-business-evaluation-2026-10-15.md)。新版本复测仍须用户明确授权，并重新冻结和预检，不能复用旧包。
 程序题面：[`tasks.json`](./tasks.json)。旧九题和 2026-10-16 新六题保持原样。
 
 本批包含 G01、T03、M02、S02、CM02、CP02。G01、M02 沿用旧九题题面和评分标准；T03 保留原有携程两班车与高德路线查询，但按本次用户授权改为直接发送微信文字，不再制作 WPS 文档/附件，Goal、检查项和 outcome 均有变化，不能与旧九题 T03 的结果直接比较，旧题及旧运行记录保持不变。S02、CM02 来自 2026-10-16 新六题；CP02 固定采用 `member-c-public-local-d01-20261011` 的 CP02 v1 开发候选及对应合成输入，不混用 v2。来源记录、任务检查项和独立评分答案都不写入 Goal。完整来源出处及 UTF-8 文本 SHA-256 见 manifest 的 `provenance`；文本摘要先将 CRLF 或 CR 规范为 LF，不改变 Goal 或来源文件的内容。CP02 的独立预期值见 [`operator-only-answer-key.json`](./operator-only-answer-key.json)。

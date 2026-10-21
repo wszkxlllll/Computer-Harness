@@ -17,7 +17,7 @@
 - 当前 HEAD 与报告完全一致；生产源码无未提交差异，已有变动属于文档和附件。
 - 在 Windows、Node **24.19.0**、pnpm **11.19.0** 下执行 `pnpm typecheck` 与 `pnpm test`：14 个文件、179 项测试通过。
 - 默认 PATH 原先解析到 Node 18.19.0，低于仓库 `>=22.13.0` 要求；最终验证只在本次命令进程前置隔离 Node 路径，未修改系统 PATH。首次旧 Node 下的通过不作为支持版本验收。
-- 新增 [本地复核探针](../../verification/audit-39ff27f9-local-probes.mjs)，9/9 成功复现问题。它们独立于产品测试集；通过代表缺陷存在，不代表修复。
+- 新增 [本地复核探针](../2026-10-20-product-docs/verification/audit-39ff27f9-local-probes.mjs)，9/9 成功复现问题。它们独立于产品测试集；通过代表缺陷存在，不代表修复。
 - F02/F05 调用真实 DefaultContextCompiler；F03 调用真实 Memory 工具、RunController、Reducer 与内存 Store；F08/R01 调用真实 LayeredRiskGuard；F07 使用真实 Controller 和延迟结束的 Fake Computer；F12 调用真实 TUI renderer。
 - F06/补充日志问题从刚构建的 CLI 提取未修改的纯诊断函数执行。由于 CLI import 会直接运行 main，该项未进行完整 HTTP/CLI 集成；证据范围明确限于诊断投影。
 - GitHub 只读核对：远端 main 仍为相同 SHA、`protected=false`、workflow 数为 0。未修改仓库规则。
@@ -29,7 +29,7 @@
 ```text
 pnpm typecheck
 pnpm test
-node --test docs/verification/audit-39ff27f9-local-probes.mjs
+node --test docs/history/2026-10-20-product-docs/verification/audit-39ff27f9-local-probes.mjs
 ```
 
 ## 3. 逐条判定

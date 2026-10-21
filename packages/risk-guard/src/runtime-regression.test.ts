@@ -28,6 +28,7 @@ const surfaceRef: SurfaceRef = { surfaceId: "risk-guard-desktop" as SurfaceId, g
 
 class FakeComputer implements Computer {
   public executeCalls = 0;
+  public readonly executedActions: ActionIntent[] = [];
   private observationCount = 0;
   public readonly session: ComputerSession = {
     id: sessionId,
@@ -56,6 +57,7 @@ class FakeComputer implements Computer {
   public async execute(_session: ComputerSession, _action: ActionIntent, signal: AbortSignal) {
     signal.throwIfAborted();
     this.executeCalls += 1;
+    this.executedActions.push(_action);
     return { actionId: _action.actionId, status: "completed" as const };
   }
 
@@ -180,6 +182,15 @@ function typeCall(id: string, effect: "unknown" | "observe" | "local_edit", targ
   };
 }
 
+function multilineTypeCall(id: string): ToolCall {
+  return {
+    id: id as ToolCallId,
+    name: "type",
+    arguments: { text: "first line\nsecond line" },
+    declaredEffect: { effects: ["local_edit"], target: "Draft field", summary: "Enter a reversible draft" },
+  };
+}
+
 function hotkeyCall(id: string): ToolCall {
   return {
     id: id as ToolCallId,
@@ -199,7 +210,8 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 
 function makeController(
   call: ToolCall,
-  actionPolicy: LayeredRiskGuard,
+  actionPolicy?: LayeredRiskGuard,
+  riskGuard: "layered" | "off" = "layered",
 ): { controller: RunController; computer: FakeComputer; writer: MemoryEventWriter } {
   const computer = new FakeComputer();
   const writer = new MemoryEventWriter();
@@ -210,12 +222,12 @@ function makeController(
     contextCompiler: new RegressionContextCompiler(),
     toolRegistry: registry(),
     policy: new DefaultRuntimePolicy(8, 8),
-    actionPolicy,
+    ...(actionPolicy === undefined ? {} : { actionPolicy }),
     eventWriter: writer,
     assetStore: assetStore(),
     idFactory: idFactory(),
     clock: { now: () => "2026-09-17T00:00:00.000Z" },
-    features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
+    features: { planning: "off", memory: "off", batching: "off", riskGuard },
   });
   return { controller, computer, writer };
 }
@@ -276,6 +288,45 @@ describe("DEV-1B Risk Guard through RunController", () => {
       modelRequestCount: 0,
     });
     expect(created.writer.events.some((event) => event.type === "approval.requested")).toBe(false);
+  });
+
+  it("holds multiline type before dispatch until one approval, preserves Guard-off behavior, and never dispatches a rejection", async () => {
+    const approved = makeController(multilineTypeCall("multiline-approved"), new LayeredRiskGuard());
+    const approvedRun = approved.controller.start("enter a reversible two-line draft");
+    await waitUntil(() => approved.controller.getSnapshot().status === "waiting_approval" || approved.controller.getSnapshot().status === "finished");
+    expect(approved.controller.getSnapshot().status).toBe("waiting_approval");
+    expect(approved.computer.executeCalls).toBe(0);
+    expect(approved.computer.executedActions).toHaveLength(0);
+    expect(approved.writer.events.filter((event) => event.type === "approval.requested")).toHaveLength(1);
+    expect(approved.writer.events.find((event) => event.type === "action.guard.evaluated")).toMatchObject({
+      decision: "require_approval",
+      path: "local",
+      reasonCode: "multiline_type_enter_boundary",
+      modelRequestCount: 0,
+    });
+    const approval = approved.writer.events.find((event) => event.type === "approval.requested");
+    expect(approval?.type === "approval.requested" ? approval.reason : "").toContain("文字包含换行");
+    const approvalId = approved.controller.getSnapshot().pendingApproval?.requestId;
+    await approved.controller.resolveApproval(approvalId ?? "", true);
+    await expect(approvedRun).resolves.toBe("succeeded");
+    expect(approved.computer.executeCalls).toBe(1);
+    expect(approved.computer.executedActions).toMatchObject([{ kind: "type", text: "first line\nsecond line" }]);
+    expect(approved.writer.events.filter((event) => event.type === "approval.requested")).toHaveLength(1);
+
+    const rejected = makeController(multilineTypeCall("multiline-rejected"), new LayeredRiskGuard());
+    const rejectedRun = rejected.controller.start("enter a reversible two-line draft");
+    await waitUntil(() => rejected.controller.getSnapshot().status === "waiting_approval" || rejected.controller.getSnapshot().status === "finished");
+    const rejectionId = rejected.controller.getSnapshot().pendingApproval?.requestId;
+    await rejected.controller.resolveApproval(rejectionId ?? "", false);
+    await expect(rejectedRun).resolves.toBe("succeeded");
+    expect(rejected.computer.executeCalls).toBe(0);
+    expect(rejected.computer.executedActions).toHaveLength(0);
+
+    const guardOff = makeController(multilineTypeCall("multiline-guard-off"), undefined, "off");
+    await expect(guardOff.controller.start("enter a reversible two-line draft")).resolves.toBe("succeeded");
+    expect(guardOff.computer.executeCalls).toBe(1);
+    expect(guardOff.computer.executedActions).toMatchObject([{ kind: "type", text: "first line\nsecond line" }]);
+    expect(guardOff.writer.events.some((event) => event.type === "approval.requested")).toBe(false);
   });
 
 });

@@ -1,235 +1,128 @@
-# Developer getting started
+# Windows 手机使用入门
 
-本页承接根目录 README 的通用安装步骤，集中放置平台准备和排查；它不把真实桌面、模型或 OSWorld VM 当作安装后的默认依赖。
+本文只写 Windows 从干净 checkout 到手机首次任务的操作顺序。macOS 步骤由 Mac 成员补充并实机核对；不能用这份 Windows 结果代表 Mac 已验收。
 
-## 1. 选择代码版本并安装
+## 先了解驱动交付状态
 
-本文描述开发预览能力。先确认目标功能所在的开发分支或待审 PR，再执行：
+当前 workspace 锁定 CUA SDK 0.22.2；Host 还需要单独的 `cua-driver.exe`，`pnpm install` 不会安装它。官方 stock driver 0.22.2 可提供该版本的基础桌面能力，但不包含本项目自有的 Windows 输入修复。
 
-```text
+输入修复曾有自有 fork 的候选构建和本机隔离验证；候选二进制不在 Git checkout 中，也没有可供新成员长期获取、校验和重装的正式分发包。因此不能把“克隆后即包含修复”写成事实，也不要把本机忽略目录里的旧文件当成发行版。需要依赖该输入修复的任务，须等候选有合规的固定版本、来源和校验信息后再使用。stock 与 patched candidate 是两个不同 driver，不能只凭相同的 0.22.2 版本号视为同一构建。
+
+## 1. 准备源码与依赖
+
+先在电脑安装[Git for Windows](https://git-scm.com/downloads/win)和[Node.js](https://nodejs.org/en/download)，安装后重新打开终端，确认`git --version`、`node --version`及`npm.cmd --version`可用。Node至少为22.13.0，团队已使用24.19.0验证开发环境；已有满足要求的安装无需覆盖。受管浏览器还需要本机已安装并能正常打开Microsoft Edge。
+
+在 Windows 原生 PowerShell 5.1 或 PowerShell 7 中，先切到准备存放代码的父目录，再执行下方克隆命令；后续命令均在克隆得到的仓库根目录运行。本文使用 `pnpm.cmd`，不依赖 PowerShell 7 才有的 `$IsWindows`。建议 checkout 和 CUA driver 放在只含 ASCII 字符的路径，避免外部程序的中文路径编码问题。
+
+```powershell
+git clone https://github.com/wszkxlllll/Computer-Harness.git
+Set-Location .\Computer-Harness
+# 如需特定功能，检出团队指定的分支或 commit
 node --version
-pnpm --version
-corepack enable
-corepack install --global pnpm@11.19.0
-pnpm install --frozen-lockfile
-pnpm run build
-pnpm --filter @computer-harness/web build
-pnpm test
-```
-
-Node 应为 `22.13.0+`，pnpm 应为 `11.19.0`。根 `pnpm run build` 会构建 workspace references 和类型检查，不要只构建 `apps/cli` 来判断仓库是否完整。
-
-普通 CLI 的直接入口是：
-
-```text
-node apps/cli/dist/index.js --help
-```
-
-依赖安装在本仓库 workspace 内；不要把全局 Node、其他项目的 OpenClaw/LightSpeaker 环境或本机密钥复制进仓库。
-
-## 2. Windows PowerShell 排查
-
-pnpm 在 Windows 下可能同时生成 `.cmd` 和 `.ps1` wrapper。先确认当前终端不是 WSL/Git Bash 混用：
-
-```powershell
-$IsWindows
-where.exe node
-where.exe pnpm.*
-pnpm --version
-```
-
-原生 PowerShell 中 `$IsWindows` 应为 `True`。若 wrapper 内出现 `/mnt/` 等 Unix 路径，通常是依赖在另一种 shell 中生成或 PATH 混用。只清理本仓库的 `node_modules`，再用 `pnpm.cmd` 重装；保留 lockfile：
-
-```powershell
-Remove-Item -LiteralPath .\node_modules -Recurse -Force
+npm.cmd install --global pnpm@11.19.0
+pnpm.cmd --version
 pnpm.cmd install --frozen-lockfile
-pnpm.cmd run build
-pnpm.cmd test
 ```
 
-如果执行策略阻止 `.ps1`，持续使用 `pnpm.cmd` 即可；这与路径转换问题是独立问题。
+Node.js 至少为 22.13.0，pnpm 固定为 11.19.0；确认版本输出符合要求。若 pnpm 已安装，直接检查版本后安装依赖即可。遇到 PowerShell 的 pnpm 脚本策略问题时继续调用 `pnpm.cmd`，不必改执行策略。若当前目录已有非空的 `Computer-Harness` 文件夹，Git 会拒绝克隆，不会覆盖它；换到其他父目录再执行。若 Windows 用户名或当前路径含中文，先切到已有的 ASCII-only 目录，再用默认克隆命令；也可指定一个新的 ASCII-only 目标目录。
 
-## 3. CUA SDK 按平台路由
+## 2. 准备 CUA daemon
 
-当前上手范围为 Windows/macOS，使用 SDK 与 daemon `0.22.2` 配对。computer-cua 按运行平台懒加载对应客户端和原生 binding，不会自动安装或启动 daemon。SDK 与 daemon 必须同版本且 contract 版本匹配；跨版本组合会由 doctor 标记为 `unknown`，不能作为受支持组合。仓库保留的其他兼容依赖以锁文件和第三方声明为准，不作为本指南的安装目标：
+从[官方 CUA Driver 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)下载与电脑架构匹配的 Windows binary zip（x86_64 或 ARM64）。release 页面列有 SHA-256；先运行下面的命令，并将结果与该页面对应资产的 checksum 比较，再解压得到 `cua-driver.exe`：
 
-- [官方 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
-- [官方 daemon 生命周期文档（main 分支可变参考；固定版本以 release 为准）](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/keep-running.mdx)
-
-选择当前平台对应的 daemon release，并按该 release 提供的 checksum 校验下载物。不要用另一平台的 SDK alias 或把不同版本的 SDK 与 daemon 混用。
-
-平台准备要点：
-
-- Windows：使用登录用户的真实桌面会话；服务会话、Session 0 或 RDP 切换可能改变屏幕/焦点权限。
-- macOS：按系统提示授予 Accessibility 和 Screen Recording；窗口可见不等于这些权限已生效。
-
-本项目 Windows/CUA 0.22.2 窄路径实测的 daemon 入口形态是 `cua-driver serve --socket "<private-socket>"`；其他平台按对应 release 的安装/权限说明准备 daemon。release 页用于固定资产和 checksum，不把 main 文档或 release 描述当作本项目所有平台的 flag 证据：
-
-```text
-cua-driver serve --socket "<private-socket>"
+```powershell
+Get-FileHash -LiteralPath '<下载的 binary zip 路径>' -Algorithm SHA256
+Expand-Archive -LiteralPath '<已校验的 binary zip 路径>' -DestinationPath '<本机解压目录>'
 ```
 
-再用完全相同的 socket 值运行 Harness。Windows named pipe 与 Unix socket 的写法由 daemon 和当前 shell 决定，README 示例中的 `<private-socket>` 不是本机路径。
+锁文件中的 SDK 版本与 daemon 必须配套，使用 0.22.2。
 
-无模型、无截图/输入窗口动作的诊断：
+此步骤安装的是 **官方 stock**。候选输入修复不是此 zip 的内容；官方版本号相同也不表示带有候选修复。
 
-```text
-node apps/cli/dist/index.js --doctor --computer cua --cua-socket "<private-socket>"
+## 3. 填本机配置和私有环境变量
+
+复制示例配置；若本机文件已存在，不要覆盖：
+
+```powershell
+if (-not (Test-Path -LiteralPath .harness.local.psd1)) {
+  Copy-Item -LiteralPath .harness.local.example.psd1 -Destination .harness.local.psd1
+}
 ```
 
-诊断可能返回 `unknown` 并以非零码结束；这表示字段、权限、session 或 cleanup 无法确认，不是可以忽略的“全通过”。`--doctor` 不读取 `--env-file`，不截图、不输入窗口、不调用模型，但会建立、检查并结束临时诊断 session；也不支持 TUI、interactive 或 window target。
+编辑 `.harness.local.psd1`，把以下项目替换成自己机器上的值，其余可先保留示例默认值：
 
-### CUA 探针
-
-`spikes/cua-driver` 的直接 SDK 依赖固定为 `0.22.2`，下列旧探针不会采用 computer-cua 的平台 alias 路由。先使用上方 Harness `--doctor` 核对平台配对，再按专用桌面授权执行当前 adapter 的集成验证。
-
-默认探针只做只读能力检查；输出目录可能包含当前桌面截图，只能在专用桌面运行并保持本地。输入探针不是任务执行器，也不会判断点击是否符合目标：
-
-```text
-pnpm probe:cua
-pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-x <x> --click-y <y>
+```powershell
+NodePath = '<本机 node.exe 的绝对路径>'
+EnvFile = '.env'
+CuaBinary = '<已校验并解压出的 cua-driver.exe 路径>'
+Model = 'glm-5.3-flash'
 ```
 
-输入探针需要额外的专用桌面授权；完整参数见[`spikes/cua-driver/README.md`](../spikes/cua-driver/README.md)。不要把 probe、fixture 或 screenshot 结果写成模型成功率。
+`Model` 目前由 `scripts/mobile.ps1` 限定为 `glm-5.3-flash` 或 `qwen3.8-flash`。选 GLM 时在下一步配置 GLM 凭据；选 Qwen 时将此值改为 `qwen3.8-flash` 并配置 DashScope 凭据。保持示例中的 `CuaSocket`，或确保自行修改后 Host 和 daemon 使用完全相同的值。配置文件仅存本机路径和选项，不放 API key。
 
-## 4. Provider 与本地 secrets
+在仓库根目录创建私有 `.env`。它已被 Git 忽略。按需填写以下占位项，不要把尖括号占位文字原样保存：
 
-只在本机创建 `.env` 或使用其他未跟踪 secrets 文件，不要把它加入 Git。`--env-file` 读取普通 `KEY=VALUE` 行；已有进程环境变量优先。CLI 当前实际读取：
+```dotenv
+# GLM 模型凭据；仅在 Model=glm-5.3-flash 时需要
+ZHIPUAI_API_KEY=<GLM 提供方签发的密钥>
+# Qwen 模型或语音输入所需；选 GLM 且不用语音输入时可不填
+DASHSCOPE_API_KEY=<DashScope 提供方签发的密钥>
 
-| Provider/用途 | Key | 备注 |
-| --- | --- | --- |
-| GLM key | `ZHIPUAI_API_KEY` | 兼容别名：`ZHIPU_API_KEY`、`GLM_API_KEY` |
-| GLM endpoint | `GLM_BASE_URL` | 可选，自定义 OpenAI-compatible endpoint |
-| GLM thinking | `GLM_THINKING` | GLM-5.3-Flash 强制思考；使用 `low`、`high` 或 `max` 控制强度。`low` 延迟较低，`max` 为最深档。旧 `enabled` 仍表示由 Provider 使用默认强度；`disabled` 会被当前 GLM-5.3-Flash API 拒绝。 |
-| Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
-| Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
-| Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |
-| DeepSeek key | `DEEPSEEK_API_KEY` | 官方 `deepseek-flash`；只从本机环境注入，不放在命令行、配置或公共响应里 |
-| DeepSeek endpoint | `DEEPSEEK_BASE_URL` | 可选；默认 `https://api.deepseek.com/chat/completions`，接受 API base URL 或完整 chat completions URL |
-| DeepSeek request timeout | `DEEPSEEK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`；可覆盖为 `1000`–`240000` 整数毫秒 |
-| DeepSeek output budget | `DEEPSEEK_MAX_OUTPUT_TOKENS` | 默认 `4096`；可覆盖为 `1`–`131072` 整数 token（服务端也可能施加更低限制） |
-| 火山方舟 Agent Plan key | `ARK_API_KEY` | 独立渠道 `deepseek-v4.1-flash`；不复用或回退到官方 `DEEPSEEK_API_KEY`，只从本机环境注入 |
-| 方舟 Agent Plan endpoint | `ARK_BASE_URL` | 可选；默认 `https://ark.cn-beijing.volces.com/api/plan/v3`，接受 base URL 或完整 `/chat/completions` URL |
-| 方舟 request timeout | `ARK_REQUEST_TIMEOUT_MS` | 单请求默认 `90000`；可覆盖为 `1000`–`240000` 整数毫秒，与官方 DeepSeek 配置独立 |
-| 方舟 output budget | `ARK_MAX_OUTPUT_TOKENS` | 默认 `4096`；可覆盖为 `1`–`131072` 整数 token，服务端仍可能施加更低限制 |
-| Memory embedding key | `MEMORY_EMBEDDING_API_KEY` | Hybrid Memory 专用 key；不要复用聊天模型 key |
-| Jev window selector | `TYPESAFE_API_KEY` | 仅显式启用 CUA TUI Jev 选窗时需要；还需允许分享窗口标题，见[配置步骤](./local-launcher.md#jev-辅助选窗可选) |
-| OSWorld Bridge | `OSWORLD_BRIDGE_TOKEN` | 可选 loopback Bridge token，不进轨迹 |
+# 手机远程配对必填：按 Relay 管理员提供的本机身份和公开地址填写
+HARNESS_RELAY_URL=https://<Relay 域名>
+HARNESS_HOST_ID=<Relay 分配给这台电脑的唯一 ID>
+HARNESS_RELAY_CREDENTIAL=<Relay 中为该 ID 登记的随机凭据>
+HARNESS_RELAY_PUBLIC_ORIGIN=https://<Relay 域名>
 
-普通运行示例：
-
-```text
-node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
+# 可选：语音输入。填 workspace ID，或改用下方显式 WSS endpoint
+DASHSCOPE_WORKSPACE_ID=<语音服务 workspace ID>
+# DASHSCOPE_REALTIME_ASR_ENDPOINT=wss://<语音服务提供方的实时识别地址>
 ```
 
-### 模型选择与切换范围
+Host 要求四个 `HARNESS_RELAY_*` 项全填或全不填；只填一部分会在启动时报错。ID 和至少 32 字节的随机凭据必须与 Relay 服务端登记相同，每台电脑使用独立身份。此电脑端启动器不会安装或启动 Relay；手机使用要求 Relay 已部署、手机网络可达且使用手机信任的 HTTPS。仅用本机 localhost Relay 可预览电脑页面，不能让手机连接。若你负责部署 Relay，服务端配置、TLS 和监听方式见 [Relay 运维说明](../apps/relay/README.md)；不要把服务端配置文件复制到此电脑的 `.env`。
 
-CLI Run 必须显式选择 `--model glm-5.3-flash`、`qwen3.8-flash`、`deepseek-flash`（DeepSeek 官方）或 `deepseek-v4.1-flash`（火山方舟 Agent Plan）。切换模型就是结束当前 Run / 退出 TUI 后，以不同 `--model` 启动新 Run / TUI 会话；模型在每个 Run 内固定，TUI 没有模型选择器。CLI 的 `--risk-model` 接受 `off`、`same` 和以上四个模型名；`same` 跟随本 Run 的主模型。
+语音输入需要 `DASHSCOPE_API_KEY`，并设置 `DASHSCOPE_WORKSPACE_ID` 或 `DASHSCOPE_REALTIME_ASR_ENDPOINT`。Host 启动时读取配置，修改 `.env` 后要重启。语音通知播报走手机浏览器的语音合成，不需要 ASR 密钥。
 
-Host 启动参数 `--model` 接受以上四个模型，省略时仍默认 GLM。Host 进程内的新 Run 使用启动时的模型；要切换须停止旧 Host、确保其 Run 完成清理后，以另一个 `--model` 重启。Web / 手机界面没有每 Run 的模型选择器，也不能修改 Host 的模型。没有运行中热切换、自动 Provider fallback 或动作重放。
+## 4. 检查并启动电脑 Host
 
-DeepSeek 官方和方舟 Agent Plan 均使用截图 `image_url` 和原生 tools，默认发送 `thinking: { type: "disabled" }`，坐标为 `actual_pixels`；两者使用独立模型标识、端点、凭据和请求设置，方舟诊断记录为 `provider: "ark"`。它们不是 GLM 的别名，也不接受 Qwen 专用参数。只有 CLI 的 Qwen Run 必须额外指定 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`（Host 的 Qwen 配置现为 `normalized_1000`）。
-
-这两条 DeepSeek 渠道的临时网络错误、429/5xx由Runtime按原请求有限重试；完整响应中的工具协议错误可在零执行前带反馈重新生成。两者共用请求次数、时间窗和预算，不是Provider内部无限循环。鉴权/参数HTTP错误、主动截止、用户取消、完整body无法解码及截断响应不会盲目重试；未知工具仍整组拒绝，结果未知的GUI动作绝不自动重放。本地响应校验不等于启用了服务端strict。
-
-如果环境需要代理，已有 `HTTPS_PROXY` 不一定表示 Node fetch 已启用它。使用可信且已授权的代理时，Node 24.5+（或22.21+）可在启动进程时加 `--use-env-proxy`，例如 `node --use-env-proxy apps/cli/dist/index.js ...`；其他参数保持原命令。该开关只作用于本次进程，不修改系统代理，也不默认改变其他Provider的网络路径。不要关闭TLS校验。若Node版本不支持该开关，先按部署环境选择兼容的代理方案，不把这个参数直接加到所有版本的启动脚本。参见[Node官方说明](https://nodejs.org/api/cli.html#--use-env-proxy)。
-
-从仓库根目录启动新模型的示例（先把 key 放进私有 `.env`，不要把 key 写进命令）：
-
-```text
-node apps/cli/dist/index.js --goal "describe the current screen" --model deepseek-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-deepseek" --env-file ".env"
-node apps/cli/dist/index.js --goal "describe the current screen" --model deepseek-v4.1-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-ark" --env-file ".env"
-node apps/cli/dist/index.js --goal "describe the current screen" --model qwen3.8-flash --qwen-coordinate-mode normalized_1000 --computer cua --cua-socket "<private-socket>" --output "runs/live-qwen" --env-file ".env"
-node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --model deepseek-flash --output "runs/host-deepseek"
-node apps/host/dist/index.js --env-file ".env" --socket "<private-socket>" --model deepseek-v4.1-flash --output "runs/host-ark"
+```powershell
+.\scripts\mobile.ps1 -Command check
+.\scripts\mobile.ps1 -Command start -Build
 ```
 
-Host 示例里的 `--model` 可换为以上任一模型名。凭据仍留在 Host 私有环境，Web 不接收 key；同一私有 env 文件可分别设置 `ARK_API_KEY` 与 `DEEPSEEK_API_KEY`，选择渠道不会覆盖另一条渠道的配置。
+`check` 检查 Node、环境文件和模型设置，并报告 Host/Web 构建文件是否存在；它不验证 driver 二进制或 Relay 在线状态。首次启动加 `-Build` 会构建 Host 与 Web。启动器会复用配置 socket 上已就绪的 daemon；若没有，就在后台启动配置的 daemon。启动窗口保持打开，直到停止服务。
 
-火山方舟渠道的完整配置、Run 级 low 与产品默认值的区别，以及 Windows 接入 smoke、两轮 disabled／两轮 low 的脱敏运行结果，见[火山方舟 Agent Plan 接入与运行记录](./volcengine-ark-agent-plan-2026-10-16.md)。历史样本使用既有 Windows 修复候选，不是对本提交树重新部署或实跑；不要把 Runtime 成功或启用开关当作业务成功。
+如果 PowerShell 的执行策略阻止启动脚本，可在仓库根目录运行下面这条命令。`Bypass` 只对新启动的这个 PowerShell 进程生效，不会改用户或系统的全局执行策略：
 
-Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen/DeepSeek 官方/方舟请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
-
-路径提示：直接从仓库根目录执行 `node apps/cli/dist/index.js` 时，`--env-file ".env"` 指向根目录；通过 `pnpm --filter @computer-harness/cli start` 启动时，工作目录是 `apps/cli`，请传根目录 `.env` 的绝对路径或 `..\..\.env`。
-
-启用 Memory `hybrid` 时还要把完整 Qwen embeddings URL 传给 `--memory-embedding-endpoint`，形如 `https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings`。只设置 `MEMORY_EMBEDDING_API_KEY` 而不提供 endpoint，或只提供 endpoint 而没有 key，都不能启动 Hybrid；`lexical` 模式不需要这两个配置。
-
-### 有限恢复与 Run 墙钟
-
-Runtime 最多重试一次。单个 decision 的恢复窗口按两次已配置的 HTTP 请求期限加一次 500ms 延迟计算，不再使用独立的固定 120 秒窗口；每次恢复仍须同时满足请求次数、decision 剩余时间和 Run 剩余墙钟。默认工厂和注入 `createProvider` 使用同一份配置期限；自定义 Provider 必须遵守工厂传入的对应请求期限，不能把更长的真实 HTTP 等待伪装成较短预留。
-
-Ark 的可重试状态与有界 `Retry-After` 建议仍按 Provider 的现有策略处理；等待和重新准备请求后仍须重新检查独立预算。请求次数收尾保持最后一次请求只供 `terminate`，不恢复旧的三请求预留；墙钟收尾与请求次数边界独立，任一进入收尾都不允许继续 GUI 探索。
-
-通过 app-runtime `createRun` 使用可选 `runTimeoutMs` 时，硬期限从 `start()` 开始计算，包含观察、准备请求和等待用户输入。Runtime 在剩余时间进入收尾预留区后停止 GUI 探索，Context 只提供 `terminate`，并保留最终硬取消；默认收尾预留为一次 Provider 请求期限。这是程序化 Run 配置，不是新增 CLI flag；外部宿主若另设硬取消，须把同一总期限传入 Run，不能只在宿主维护一个 Runtime 不可见的计时器。
-
-完整的协议错误只允许零执行后的有限反馈重决策；`terminate` 仍须独占响应。截断 `length` 无论参数看似完整与否都不执行，也不自动重试；此前已经完成的动作和结果未知的动作都不会因为模型响应恢复而重放。核对任务是否完成与记录是否一致分别表达，不强行改写模型的原始状态。
-
-### 受管浏览器的只读可见表格证据
-
-DOM/hybrid 观察可附带独立于交互元素 hot set 的 `grounding.visibleText`。它只面向当前主文档视口内可证明可见的原生 HTML 表格，保留原 Unicode、行列索引、表头和跨行跨列关系；继承同次 observation、页面和 surface 绑定，不生成可点击元素引用。
-
-页面来源只补充同次受管采集的有界 `pageUrl`，不从启动地址或截图猜测；Context 要求当前 observation/session/surface 一致。只保留无 userinfo、无常见认证参数的完整 HTTP(S) 地址，无法安全提供时标记未知；地址是来源数据，不是指令或额外导航授权。
-
-采集与请求投影都有界：最多 2 个区域、24 行、12 列、192 个单元格、每格 320 字符及总计 4800 字符。超限或可见性不足时省略整格并标记 partial/truncated；Context 放不下时整块省略并记录 trace，不把半格文字冒充完整证据。这里的 complete 只描述该有界表格采集，不代表整页覆盖。
-
-隐藏、裁剪、遮挡或绘制无法可靠界定的内容不作文字证据；图片/canvas、div/ARIA grid、iframe 和 shadow table 不由此通路读取。空或 partial 证据不能证明官网未提供某字段。字段与来源绑定有助于准确转录，但不代替业务真值核对，也不保证模型不会误读或改写最终答案。
-
-## 5. OSWorld
-
-OSWorld Python、VM、磁盘和快照在仓库外维护。先阅读：
-
-- [OSWorld upstream](https://github.com/xlang-ai/OSWorld)
-- [本仓库 Bridge 指南](../integrations/osworld/README.md)
-- [固定环境和 Gate 2 说明](./stage-5-osworld-reproducibility.md)
-
-在 Bridge 前准备与团队约定一致的 OSWorld checkout、Python 环境和 VM artifact；使用无模型 Gate 2 验证 `DesktopEnv`、loopback RPC、显示尺寸和快照，再启动模型。不要复制别人的绝对路径、VMX、快照名或 `vmrun.exe` 路径。
-
-仓库内 Python contract 测试不需要 VM：
-
-```text
-python -m unittest integrations.osworld.test_bridge -v
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
-Gate 2 和模型 runner 的完整参数以上述 Bridge/Stage 5 文档为准；README 不为不存在的本地 VM 写快捷命令。
+在运行这台 Host 的电脑浏览器打开 `http://localhost:4317/connect`，点“生成配对二维码”。用手机相机扫描；二维码必须指向手机可访问的 HTTPS Relay，而不能是 localhost。扫码只会发起请求，不会授权：确认电脑页面的“待处理请求”中显示的是自己的手机，再点“允许这台手机”。手机显示已连接后点“打开任务列表”。
 
-## 6. 常见边界
+如果二维码警告它指向本机地址，或 Host 日志提示 Relay 未连接，先核对上面四项 Relay 设置及服务端状态，再重启 Host、生成新码。Relay 重启后需要重新配对。
 
-| 现象 | 先检查 |
+## 5. 手机发任务、设置语音和登录状态
+
+在手机“新任务”页输入目标，选择起点并点“开始任务”。页面默认推荐“打开网站”；可以留空网址从空白受管浏览器开始，也可以填完整的 `https://` 地址。首次先做只读、无外发的简单任务。手动窗口和“整个桌面（高级）”会扩大电脑画面或窗口信息的暴露范围，开始前关闭不相关的敏感窗口。
+
+语音输入配置完成并重启 Host 后，打开“设置 → 语音功能”，确认出现“语音输入测试”，按需测试麦克风和识别。音频会发送给所配置的 ASR 提供方。要播报任务通知，在同一设置中开启“朗读任务关键通知”；播报能力由手机浏览器和设备语音支持决定。即使没有语音输入，任务文字仍可使用。
+
+要让网页任务复用这台电脑的专用登录状态：手机打开“设置 → 浏览器与登录状态”，选择“本机已准备的登录状态”，点“准备登录状态”；在电脑出现的 Harness 受管 Edge 窗口里自行登录，再回手机点“我已在电脑完成登录”。登录信息保存在这台电脑的 Harness 受管浏览器中，不会从个人浏览器或手机复制。网站之后仍可能要求重新登录。
+
+## 6. 停止与排错
+
+回到启动 Host 的 PowerShell 窗口按 `Ctrl+C`。启动器会停止 Host，以及本次启动器创建的 daemon；若它复用了原本已运行的 daemon，不会替你停止该进程。日志写入 `.harness.local.psd1` 所设输出目录下的 `mobile` 子目录；分享前检查并脱敏。
+
+| 现象 | 检查 |
 | --- | --- |
-| `--tui requires an interactive terminal` | stdin/stdout 是否真实 TTY；PowerShell 重定向、CI 和普通管道不能启动 TUI |
-| 普通 Run 报 `--model is required` | Run 必须显式 `--model`；只有 doctor 使用内部占位值 |
-| Qwen 参数报 coordinate 错误 | 加 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`，并按需选择 thinking/output mode |
-| CUA socket 连接失败 | Windows/macOS 的 SDK/daemon 是否均为 0.22.2、socket 是否相同、桌面会话和平台权限是否有效 |
-| doctor 输出 `unknown` | 把它当作未确认边界；不要以 npm 版本、RPC envelope 或静态 tool 名单推断实际 daemon 能力 |
-| window action 被拒绝 | window PID/ID、observation 和 geometry 是否仍有效；当前不支持 keyboard、自动发现或 desktop fallback |
-| 运行后找不到“回复” | 查看 TUI 的 waiting/failure/final reply 区块与 `runs/<output>`；没有终稿时 UI 会明确显示 unknown/failure，不生成虚构答案 |
+| pnpm 安装或脚本 wrapper 异常 | 用 `pnpm.cmd --version` 和 `pnpm.cmd install --frozen-lockfile`；确认没有从 WSL/Git Bash 生成依赖后在 PowerShell 混用。 |
+| 启动脚本被执行策略阻止 | 在仓库根目录运行上面的 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build`；只影响该进程，不修改全局策略。 |
+| 启动报告缺少 Host/Web 构建 | 重新运行第 4 节的 `start -Build` 命令，查看终端中的构建错误。 |
+| CUA daemon 未就绪 | 核对 `CuaBinary` 指向真实文件、版本是 0.22.2，且没有其他服务占用配置的 `CuaSocket`；检查输出目录中的 `cua-daemon` 日志。 |
+| 手机打不开二维码或 Host 提示 Relay 未连接 | 四项 Relay 值必须完整并与服务端一致；Relay URL 应从手机可达，二维码使用受信任的 HTTPS 地址。电脑本机的 `localhost` 只能由电脑访问。 |
+| 语音输入不可用 | 核对 DashScope key 和 workspace ID/实时识别 WSS endpoint，重启 Host 后在设置里刷新并测试。播报可用不代表 ASR 已配置。 |
+| stock 输入与预期不一致 | 确认当前使用的是官方 stock 还是独立 patched candidate。stock 不含本项目输入修复；结果未知的输入动作不要盲目重发。 |
+| Host 端口已占用 | 以 `-HostPort <未占用端口>` 启动，并在电脑打开对应端口的 `/connect` 页面。 |
 
-TUI 必须将焦点放在当前终端，不注册全局热键；visible input 可能留在 terminal scrollback/recording，这不是隐私保证。`--interactive` 行式模式与 `--tui` 快捷键不同；P/R/I 只属于 TUI 控制面。
-
-### 受管浏览器窗口身份
-
-受管 Edge／Chromium 启动必须同时满足进程归属、CDP 选定窗口和唯一原生窗口证据。几何核对对位置与尺寸逐项限制边框差异（最多 16 DIP），不从候选宽高比例推断缩放，不选最大或最接近的窗口。Windows 使用选定目标的两次原生 `Page.getLayoutMetrics`：物理 viewport 与 CSS viewport 的比值除以 page zoom，得到 CDP 外窗 DIP 到 CUA 原生像素的尺度，并验证横纵及前后读数一致。macOS 两边均为屏幕点，按 1:1 比较。窗口身份不使用页面脚本可改写的 `window.devicePixelRatio`；DOM 内容坐标转换仍保留其独立合同。
-
-缺失、异常或变化中的尺度证据只允许 1:1 的有界帧差；多个合法候选仍拒绝 `multiple_candidates`。当前合同针对本机受管浏览器及已选定的本机 CUA 后端，不代表 Wayland 原生、混合 DPI 或任意多屏原点已经实机验收。拒绝时保留 CDP／CUA 几何诊断，不扩大容差或改用整屏冒充受管 DOM 成功。
-
-### 受管 DOM 点击与新标签页
-
-受管 DOM 点击使用观察绑定的控件中心点；候选收集和点击派发共用视口、裁剪、遮挡及开放 shadow root 命中检查。不可见或中心被遮挡的控件不列入 DOM 候选；控件在观察后被遮挡时，点击明确拒绝并保证未发送输入，应重新观察，不自动重放。
-
-只有实际 DOM 点击的 CDP `Runtime.evaluate` 设置 `userGesture: true`，以支持页面正常的 `target="_blank"` 链接；只读候选收集、点击验证和输入焦点验证不授予用户手势。后续观察仍只接纳已绑定受管窗口内的唯一活动标签页，新窗口不自动接管。`completed` 表示点击已派发，不表示导航或业务任务成功，须从新观察确认预期页面。
-
-混合观察中，Windows UIA 的 `Hyperlink` 与 DOM `link` 使用同一角色。只有已确定属于网页内容区、且本次 DOM 覆盖完整的 UIA 超链接，才要求存在唯一、可见且几何对应的 DOM 项；这类轮播裁剪、遮挡或非活动标签页残留链接不能走原生点击兜底。浏览器工具栏和区域不明的 UIA 控件保留原有受控原生路径，不因网页 DOM 缺少对应项被删除。当前视口有可见但未遍历的 iframe 时，DOM 覆盖标记为不完整；不把“未列出”当作不可见证明，既有 UIA 回退保留。原生窗口、截图点路径和旧引用/禁用控件约束不变。
-
-无可访问名称的轮播箭头仍可按当前观察中的元素引用操作；名称两侧使用相同规范化规则，不能把未命名控件误拒绝为边界变化。控件的指纹、几何、唯一性和中心命中约束保持不变。
-
-## 7. 贡献前检查
-
-默认贡献路径不需要 API、桌面或 VM：
-
-```text
-pnpm run build
-pnpm --filter @computer-harness/web build
-pnpm test
-```
-
-提交文档或代码时同时说明：实际运行的命令、Node/pnpm、是否读取 secrets、是否触碰桌面/VM、测试范围和未验证限制。保持包边界，不从生产代码跨包导入私有 `src`；不要提交真实 runs、截图、VM、token 或本机绝对路径。
+Relay 配对、自动化和手机真机验收是不同证据。成功扫码或看到任务页面，不等于输入修复、真实任务结果、手机语音和 macOS 均已验收。

@@ -328,7 +328,7 @@ test("manifest fixture contains nine identified tasks and no answer key is proje
   assert.match(t03.checks.find((item) => item.id === "consumer").description, /分别人工核验文件与投递，不自动判分/u);
   assert.match(t03.checks.find((item) => item.id === "constraints").description, /只向指定微信会话发送这一个DOCX/u);
   assert.doesNotMatch(`${t03.title} ${t03.sourceLineage}`, /银行|电话预约/u);
-  const taskCards = await readFile(join(ROOT, "docs", "life-business-task-cards-2026-10-15.md"), "utf8");
+  const taskCards = await readFile(join(ROOT, "docs", "history", "2026-10-20-product-docs", "life-business-task-cards-2026-10-15.md"), "utf8");
   const extractT03TaskCardGoal = (markdown) => {
     const lfMarkdown = markdown.replace(/\r\n?/gu, "\n");
     const t03Section = lfMarkdown.match(/## T03 ·[\s\S]*?(?=\n## |$)/u)?.[0];

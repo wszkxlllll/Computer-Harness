@@ -1,6 +1,6 @@
 # OSWorld Bridge
 
-> 可复现实验入口见[`docs/stage-5-osworld-reproducibility.md`](../../docs/stage-5-osworld-reproducibility.md)。特别注意：VMware 快照不在 Git 仓库中，队友必须获取完整 VM artifact 或自行创建等价快照；只拿到 `.vmx` 或快照名称是不够的。
+> 可复现实验入口见[`docs/stage-5-osworld-reproducibility.md`](../../docs/history/2026-10-20-release-convergence/stage-5-osworld-reproducibility.md)。特别注意：VMware 快照不在 Git 仓库中，队友必须获取完整 VM artifact 或自行创建等价快照；只拿到 `.vmx` 或快照名称是不够的。
 
 当前真实 VM 路径已在 Windows 11 + VMware Workstation 上验证。macOS/Linux 可以运行 Harness 代码和测试；要运行同一 OSWorld VM 实验，还必须先用本机 VMware/`vmrun` 通过无模型 Gate 2，不能把 Windows 的绝对路径或 `vmrun.exe` 路径直接照搬。
 

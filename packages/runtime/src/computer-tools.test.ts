@@ -36,6 +36,9 @@ describe("default Computer tools", () => {
     expect(type?.description).toContain("Windows desktop-wide CUA multiline input is not supported by this path");
     expect(type?.description).toContain("only when the target is confirmed to accept line breaks and the Goal calls for them");
     expect(type?.description).toContain("Enter is a real key event and can submit/send");
+    expect(type?.description).toContain("Do not assume line breaks are literal text");
+    expect(type?.description).toContain("use a single paragraph in submit-on-Enter controls");
+    expect(type?.description).toContain("perform any send/submit as a separate deliberate action");
     expect(type?.description).toContain("Other platforms keep their native multiline typing route");
     expect(type?.description).not.toContain("let the backend resolve an unambiguous current editor");
     expect(type?.inputSchema).toMatchObject({
@@ -51,6 +54,8 @@ describe("default Computer tools", () => {
     expect(JSON.stringify(type?.inputSchema)).toContain("Omit on macOS");
     expect(JSON.stringify(type?.inputSchema)).toContain("only when the target is confirmed to support line breaks and the Goal requires them");
     expect(JSON.stringify(type?.inputSchema)).toContain("Enter is a real key event and may submit/send in search or message controls");
+    expect(JSON.stringify(type?.inputSchema)).toContain("use a single paragraph in submit-on-Enter controls");
+    expect(JSON.stringify(type?.inputSchema)).toContain("perform any send/submit as a separate deliberate action");
   });
 
   it("maps an optional current UIA elementRef into the type action without exposing driver tokens", () => {
