@@ -89,7 +89,7 @@ Provider、Computer、Context、Planning 与 Run Memory 通过组件装配协作
 Lightspeaker建立在开源Computer-Use生态之上，也将真实使用中的问题反馈给上游：
 
 - [CUA PR #4500](https://github.com/trycua/cua/pull/4500)：与 CUA 维护者共同排查 Windows 多行文本输入异常，贡献复现用例、测试夹具和回归验证，协助完成输入队列修复，已合并。
-- [CUA PR #5338](https://github.com/trycua/cua/pull/5338)：针对现代记事本的文本输入问题提出进一步改进方案，原始提交由上游维护者保留并继续完善。
+- [CUA PR #5587](https://github.com/trycua/cua/pull/5587)：针对前台文稿输入提供带能力检查与读回验证的改进方案，上游维护者保留团队原始提交并推动合并，已合并。
 - OpenClaw [#126399](https://github.com/openclaw/openclaw/pull/126399)、[#127177](https://github.com/openclaw/openclaw/pull/127177)：修复任务结束后的资源复用问题与 Windows 设备重复审批问题，均已合并。
 
 我们欢迎开发者通过代码、任务案例、问题反馈和无障碍体验建议参与改进。准备开发环境和提交修改请看[参与贡献](./CONTRIBUTING.md)。
