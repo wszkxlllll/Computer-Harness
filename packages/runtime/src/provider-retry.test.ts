@@ -2,12 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ComputerSession, ModelInput, ProviderAdapter } from "./contracts.js";
+import type { ComputerSession, ContextCompileInput, ModelInput, PreparedProviderRequest, ProviderAdapter } from "./contracts.js";
 import { DefaultContextCompiler } from "../../context/src/index.js";
 import { FileAssetStore, JsonlRunEventWriter } from "@computer-harness/trajectory";
 import type { Computer, ComputerOpenOptions } from "./contracts.js";
-import { createDefaultComputerTools, DefaultRuntimePolicy, RunController } from "./index.js";
-import type { ComputerSessionId, EventId, ObservationId, RunId, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
+import { createDefaultComputerTools, createDefaultToolRegistry, DefaultRuntimePolicy, RunController } from "./index.js";
+import type { ActionIntent, AssetId, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, RuntimeEventData, RuntimeEventDraft, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
+import { ChatCompletionsAdapter } from "../../provider-glm/src/chat-completions.js";
+import { ArkProviderError } from "../../provider-glm/src/ark.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const runId = "ark-provider-retry-test" as RunId;
@@ -283,6 +285,296 @@ describe("bounded Ark provider retry delay", () => {
       expect(scripted.calls()).toBe(1);
     } finally {
       await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+});
+
+class MemoryEventWriter {
+  public readonly events: RuntimeEvent[] = [];
+
+  public async append(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
+    const event = { ...draft, eventId: draft.eventId ?? `wire-event-${this.events.length}` as EventId, sequence: this.events.length, occurredAt: draft.occurredAt ?? "2026-09-17T00:00:00.000Z" } as RuntimeEvent;
+    this.events.push(event);
+    return event;
+  }
+
+  public async flush(): Promise<void> {}
+  public async close(): Promise<void> {}
+}
+
+const assets = {
+  async put(input: { assetId: AssetId; relativePath: string; mediaType: string; data: Uint8Array }) {
+    return { assetId: input.assetId, relativePath: input.relativePath, mediaType: input.mediaType, byteLength: input.data.length };
+  },
+};
+
+class RecordingComputer extends RetryTestComputer {
+  public executions = 0;
+
+  public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+    signal.throwIfAborted();
+    this.executions += 1;
+    return { actionId: action.actionId, status: "completed" as const };
+  }
+}
+
+function historyEvent(sequence: number, data: RuntimeEventData): RuntimeEvent {
+  return { ...data, runId, sequence, eventId: `history-${sequence}` as EventId, occurredAt: "2026-09-17T00:00:00.000Z" } as RuntimeEvent;
+}
+
+function inflatedHistory(): RuntimeEvent[] {
+  const events: RuntimeEvent[] = [
+    historyEvent(-100, { type: "user.input.received", text: "Correction one: keep the revised Goal." }),
+    historyEvent(-99, { type: "user.input.received", text: "Correction two: do not repeat a completed click." }),
+  ];
+  for (let index = 0; index < 14; index += 1) {
+    const callId = `old-call-${index}` as ToolCallId;
+    events.push(
+      historyEvent(-90 + index * 2, {
+        type: "model.response.received",
+        turn: {
+          type: "tool_calls",
+          calls: [{ id: callId, name: "click", arguments: { x: 1, y: 2 } }],
+          assistantText: `old-${index}: ${'"\\'.repeat(1_800)}`,
+          continuation: { providerId: "deepseek-v4.1-flash", kind: "reasoning_content", content: `old reasoning ${index}` },
+        },
+      }),
+      historyEvent(-89 + index * 2, { type: "tool.call.completed", result: { callId, status: "completed", output: { text: '"\\'.repeat(1_800) } } }),
+    );
+  }
+  return events;
+}
+
+function wireController(options: {
+  history?: RuntimeEvent[];
+  budgets?: boolean;
+  beforePrepare?: (input: ModelInput, signal: AbortSignal, count: number) => void | Promise<void>;
+  clickFirst?: boolean;
+  runTimeoutMs?: number;
+  finishReserveMs?: number;
+} = {}) {
+  const registry = createDefaultToolRegistry();
+  const features = { planning: "off", memory: "off", batching: "off" } as const;
+  const compiler = new DefaultContextCompiler(registry, {
+    features,
+    ...(options.budgets === false ? {} : { maxInputTokens: 16_384, maxWireInputTokens: 24_576 }),
+  });
+  const preparedInputs: ModelInput[] = [];
+  const sentInputs: ModelInput[] = [];
+  const compileInputs: ContextCompileInput[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  const preparedInputsByRequest = new WeakMap<PreparedProviderRequest, ModelInput>();
+  const adapter = new ChatCompletionsAdapter({
+    apiKey: "offline-fixture",
+    profile: { name: "deepseek-v4.1-flash", thinking: "low", coordinateMode: "actual_pixels", maxOutputTokens: 16_384 },
+    assetReader: { async read() { return new Uint8Array([1]); } },
+    httpClient: {
+      async post(_url, body) {
+        bodies.push(body);
+        return options.clickFirst && bodies.length === 1
+          ? { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, reasoning_content: "latest GUI reasoning", tool_calls: [{ id: "live-click", type: "function", function: { name: "click", arguments: '{"x":20,"y":30}' } }] } }] }
+          : { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "finish-fixture", type: "function", function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "The offline budget scenario retained the required current evidence and completed its requested decision." }) } }] } }] };
+      },
+    },
+  }, {
+    label: "Ark", errorCodePrefix: "ARK", endpoint: "https://offline.invalid", requestTimeoutMs: 90_000,
+    maxOutputTokens: 16_384, strictResponse: true, userImagesOnly: true,
+    error: (message, code, retryable, retryMode) => new ArkProviderError(message, code, retryable, retryMode),
+    isProviderError: (error) => error instanceof ArkProviderError,
+  });
+  const provider: ProviderAdapter = {
+    id: adapter.id,
+    generate: adapter.generate.bind(adapter),
+    async prepare(input, { signal }) {
+      preparedInputs.push(input);
+      await options.beforePrepare?.(input, signal, preparedInputs.length);
+      const prepared = await adapter.prepare(input, { signal });
+      preparedInputsByRequest.set(prepared, input);
+      return prepared;
+    },
+    async generatePrepared(prepared, requestOptions) {
+      const input = preparedInputsByRequest.get(prepared);
+      if (input === undefined) throw new Error("fixture request was not prepared");
+      sentInputs.push(input);
+      return adapter.generatePrepared(prepared, requestOptions);
+    },
+  };
+  const writer = new MemoryEventWriter();
+  const computer = new RecordingComputer();
+  const controller = new RunController({
+    runId, provider, computer, toolRegistry: registry, features,
+    contextCompiler: {
+      async compile(input, signal) {
+        compileInputs.push(input);
+        return compiler.compile({ ...input, recentEvents: [...(options.history ?? []), ...input.recentEvents] }, signal);
+      },
+    },
+    policy: new DefaultRuntimePolicy(10, 10), eventWriter: writer, assetStore: assets,
+    ...(options.runTimeoutMs === undefined ? {} : { runTimeoutMs: options.runTimeoutMs }),
+    ...(options.finishReserveMs === undefined ? {} : { finishReserveMs: options.finishReserveMs }),
+    clock: { now: () => "2026-09-17T00:00:00.000Z" },
+  });
+  return { controller, compiler, computer, preparedInputs, sentInputs, compileInputs, bodies, events: writer.events };
+}
+
+function budgetFeedback(input: ModelInput, code = "ARK_INPUT_TOO_LARGE") {
+  const maxWireInputTokens = input.contextBudget?.maxWireInputTokens ?? 24_576;
+  return Object.assign(new Error("offline preparation budget failure"), {
+    code,
+    inputBudget: {
+      maxWireInputTokens,
+      estimate: { estimatedTextTokens: maxWireInputTokens + 1, estimatedTotalTokens: maxWireInputTokens + 1, imageCount: 1, estimationMethod: "provider_projection" },
+    },
+  });
+}
+
+describe("Provider wire budget convergence through RunController", () => {
+  it("refreshes closing tools when the finish boundary changes during failed local preparation", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.now();
+    const created = wireController({
+      runTimeoutMs: 10_000,
+      finishReserveMs: 2_000,
+      beforePrepare(input, _signal, count) {
+        if (count === 1) {
+          vi.setSystemTime(startedAt + 9_000);
+          throw budgetFeedback(input);
+        }
+      },
+    });
+    await expect(created.controller.start("Close from current evidence without new GUI work.")).resolves.toBe("succeeded");
+    expect(created.sentInputs).toHaveLength(1);
+    expect(created.preparedInputs[0]!.tools.some((tool) => tool.category === "computer")).toBe(true);
+    expect(created.sentInputs[0]!.tools.map((tool) => tool.name)).toEqual(["terminate"]);
+    expect(created.computer.executions).toBe(0);
+    expect(created.events.filter((event) => event.type === "model.request.started")).toHaveLength(1);
+  });
+
+  it("locally trims inflated history, retaining corrections, paired tools, the latest GUI result and reasoning without replay", async () => {
+    const created = wireController({ history: inflatedHistory(), clickFirst: true });
+    await expect(created.controller.start("Keep this Goal and click once, then finish.")).resolves.toBe("succeeded");
+    expect(created.preparedInputs.length).toBeGreaterThan(created.sentInputs.length);
+    expect(created.sentInputs).toHaveLength(2);
+    expect(created.bodies).toHaveLength(2);
+    expect(created.computer.executions).toBe(1);
+    expect(created.events.filter((event) => event.type === "model.request.started")).toHaveLength(2);
+    expect(created.events.some((event) => event.type === "model.request.failed")).toBe(false);
+    expect(created.compileInputs.some((input) => input.textTokenTarget !== undefined)).toBe(true);
+    for (const input of created.sentInputs) {
+      expect(input.contextBudget?.maxInputTokens).toBe(16_384);
+      expect(input.contextBudget?.maxWireInputTokens).toBe(24_576);
+      const text = input.messages.flatMap((message) => message.content.flatMap((block) => block.type === "text" ? [block.text] : [])).join("\n");
+      expect(text).toContain("Keep this Goal");
+      expect(text).toContain("Correction one");
+      expect(text).toContain("Correction two");
+      const calls = input.messages.flatMap((message) => message.content.flatMap((block) => block.type === "tool_call" ? [block.call.id] : []));
+      const results = input.messages.flatMap((message) => message.content.flatMap((block) => block.type === "tool_result" ? [block.result.callId] : []));
+      expect(results).toEqual(calls);
+      expect(input.messages.flatMap((message) => message.content).filter((block) => block.type === "image")).toHaveLength(1);
+    }
+    const latest = created.sentInputs[1]!;
+    expect(latest.messages.flatMap((message) => message.content).some((block) => block.type === "tool_result" && block.result.callId === "live-click" && block.result.status === "completed")).toBe(true);
+    expect(latest.messages.flatMap((message) => message.content).some((block) => block.type === "provider_continuation" && block.continuation.content === "latest GUI reasoning")).toBe(true);
+    for (const event of created.events) {
+      if (event.type === "model.request.started") {
+        expect(event.preparedRequest?.estimate?.estimatedTotalTokens).toBeLessThanOrEqual(24_576);
+        expect(event.attempt).toBe(1);
+      }
+    }
+    expect(created.bodies.every((body) => body.max_tokens === 16_384 && body.reasoning_effort === "low")).toBe(true);
+  });
+
+  it("measures intact required content and fails without sending when it alone exceeds the wire limit", async () => {
+    const created = wireController();
+    const baseline = await created.compiler.compile({ runId, goal: "", recentEvents: [] }, new AbortController().signal);
+    const goal = '"\\'.repeat(Math.floor((16_384 - baseline.contextBudget!.estimatedInputTokens - 1_024) * 2));
+    await expect(created.controller.start(goal)).resolves.toBe("failed");
+    expect(created.preparedInputs.length).toBeGreaterThan(1);
+    expect(created.sentInputs).toHaveLength(0);
+    expect(created.bodies).toHaveLength(0);
+    expect(created.computer.executions).toBe(0);
+    expect(created.events.some((event) => event.type === "model.request.started")).toBe(false);
+    expect(created.events.some((event) => event.type === "runtime.error" && event.category === "budget")).toBe(true);
+    for (const input of created.preparedInputs) {
+      expect(input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text === goal))).toBe(true);
+      expect(input.messages.flatMap((message) => message.content).some((block) => block.type === "image")).toBe(true);
+    }
+  });
+
+  it("drains a correction arriving during failed preparation before any request is sent", async () => {
+    let correction: Promise<void> | undefined;
+    const created = wireController({
+      history: inflatedHistory(),
+      beforePrepare(input, _signal, count) {
+        if (count === 1) {
+          correction = created.controller.submitUserInput("New correction during wire preparation.");
+          throw budgetFeedback(input);
+        }
+      },
+    });
+    await expect(created.controller.start("Correction boundary Goal")).resolves.toBe("succeeded");
+    await correction;
+    expect(created.sentInputs).toHaveLength(1);
+    expect(created.computer.executions).toBe(0);
+    expect(created.sentInputs[0]!.messages.some((message) => message.content.some((block) => block.type === "text" && block.text === "New correction during wire preparation."))).toBe(true);
+    const observation = [...created.events].reverse().find((event) => event.type === "observation.created");
+    if (observation?.type !== "observation.created") throw new Error("fixture has no observation");
+    expect(created.sentInputs[0]!.messages.flatMap((message) => message.content).some((block) => block.type === "image" && block.asset.assetId === observation.observation.screenshot.assetId)).toBe(true);
+  });
+
+  it("cancels local convergence after one completed GUI action without another request or action", async () => {
+    let reached!: () => void;
+    const preparing = new Promise<void>((resolve) => { reached = resolve; });
+    const created = wireController({
+      clickFirst: true,
+      async beforePrepare(input, signal, count) {
+        if (count === 2) {
+          reached();
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw budgetFeedback(input);
+        }
+      },
+    });
+    const running = created.controller.start("One click, then cancellation.");
+    await preparing;
+    created.controller.cancel("cancel local preparation");
+    await expect(running).resolves.toBe("cancelled");
+    expect(created.sentInputs).toHaveLength(1);
+    expect(created.computer.executions).toBe(1);
+    expect(created.events.filter((event) => event.type === "model.request.started")).toHaveLength(1);
+  });
+
+  it("bounds local preparation even when a compiler cannot reduce required content", async () => {
+    const created = wireController({ beforePrepare(input) { throw budgetFeedback(input); } });
+    await expect(created.controller.start("Required Goal")).resolves.toBe("failed");
+    expect(created.preparedInputs).toHaveLength(9);
+    expect(created.sentInputs).toHaveLength(0);
+    const targets = created.compileInputs.flatMap((input) => input.textTokenTarget === undefined ? [] : [input.textTokenTarget]);
+    expect(targets).toHaveLength(8);
+    expect(targets.every((target, index) => index === 0 || target < targets[index - 1]!)).toBe(true);
+  });
+
+  it.each(["ARK_INPUT_TOO_LARGE", "DEEPSEEK_INPUT_TOO_LARGE"])("classifies %s without guessing feedback from error text", async (code) => {
+    const created = wireController({ beforePrepare() { throw Object.assign(new Error("budget failure"), { code }); } });
+    await expect(created.controller.start("Goal")).resolves.toBe("failed");
+    expect(created.preparedInputs).toHaveLength(1);
+    expect(created.sentInputs).toHaveLength(0);
+    expect(created.events.some((event) => event.type === "runtime.error" && event.category === "budget")).toBe(true);
+  });
+
+  it("keeps non-budget preparation errors and absent input budgets out of convergence", async () => {
+    for (const budgets of [true, false]) {
+      const created = wireController({
+        budgets,
+        beforePrepare(input) { throw budgetFeedback(input, budgets ? "ARK_INVALID_HISTORY" : "ARK_INPUT_TOO_LARGE"); },
+      });
+      await expect(created.controller.start("Goal")).resolves.toBe("failed");
+      expect(created.preparedInputs).toHaveLength(1);
+      expect(created.sentInputs).toHaveLength(0);
+      if (budgets) expect(created.events.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(true);
     }
   });
 });

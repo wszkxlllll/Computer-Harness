@@ -20,6 +20,7 @@ import type {
   ProviderAdapter,
   ProviderRequestContext,
   PreparedProviderRequest,
+  ProviderInputBudgetFeedback,
   ControlKind,
   CoordinateField,
 } from "@computer-harness/runtime";
@@ -203,19 +204,22 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         : {}),
       max_tokens: this.profile.maxOutputTokens,
     } satisfies Record<string, unknown>;
-    assertInputBudget(snapshot, body, boundary.label, boundary);
+    const textTokens = estimateWireTextTokens(body);
+    const visualTokens = estimateVisualTokens(snapshot);
+    const estimate: ProviderInputBudgetFeedback["estimate"] = Object.freeze({
+      estimatedTextTokens: textTokens,
+      estimatedVisualTokens: visualTokens,
+      estimatedEnvelopeTokens: 32,
+      estimatedTotalTokens: textTokens + visualTokens + 32,
+      imageCount: countImages(snapshot),
+      estimationMethod: "provider_projection",
+    });
+    assertInputBudget(snapshot, estimate, boundary.label, boundary);
     const frozenBody = deepFreeze(body);
     const prepared: PreparedProviderRequest = Object.freeze({
       providerId: this.id,
       payloadHash: createHash("sha256").update(JSON.stringify(frozenBody)).digest("hex"),
-      estimate: Object.freeze({
-        estimatedTextTokens: estimateWireTextTokens(frozenBody),
-        estimatedVisualTokens: estimateVisualTokens(snapshot),
-        estimatedEnvelopeTokens: 32,
-        estimatedTotalTokens: estimateWireTextTokens(frozenBody) + estimateVisualTokens(snapshot) + 32,
-        imageCount: countImages(snapshot),
-        estimationMethod: "provider_projection",
-      } as const),
+      estimate,
     });
     this.preparedRequests.set(prepared, { body: frozenBody, input: snapshot });
     return prepared;
@@ -587,7 +591,7 @@ function estimateWireTextTokens(body: unknown): number {
   return Math.ceil(JSON.stringify(withoutImagePayload).length / 4);
 }
 
-function assertInputBudget(input: ModelInput, body: unknown, provider: string, boundary: ChatCompletionsBoundary): void {
+function assertInputBudget(input: ModelInput, estimate: ProviderInputBudgetFeedback["estimate"], provider: string, boundary: ChatCompletionsBoundary): void {
   const textMax = input.contextBudget?.maxInputTokens;
   const maxWireInputTokens = input.contextBudget?.maxWireInputTokens;
   const max = maxWireInputTokens ?? textMax;
@@ -603,14 +607,17 @@ function assertInputBudget(input: ModelInput, body: unknown, provider: string, b
   // Context compilation cannot see provider-specific envelopes or the visual
   // token cost. Keep a conservative provider-side gate immediately before the
   // network call so an oversized image/schema prompt is never sent.
-  const visualTokens = estimateVisualTokens(input);
-  const textTokens = estimateWireTextTokens(body);
-  const estimated = textTokens + visualTokens + 32;
+  const { estimatedTextTokens: textTokens, estimatedVisualTokens: visualTokens, estimatedTotalTokens: estimated } = estimate;
   const exceedsBudget = maxWireInputTokens === undefined
     ? estimated > max && (max < 1_000 || estimated > max + 4_096)
     : estimated > max;
   if (exceedsBudget) {
-    throw providerError(boundary, `${provider} prompt exceeds wire input budget (estimated=${estimated}, text=${textTokens}, visual=${visualTokens}, envelope=32, maxWireInputTokens=${maxWireInputTokens ?? "unset"}, maxInputTokens=${textMax ?? "unset"}, effectiveLimit=${max})`, "GLM_INPUT_TOO_LARGE", false);
+    throw Object.assign(
+      providerError(boundary, `${provider} prompt exceeds wire input budget (estimated=${estimated}, text=${textTokens}, visual=${visualTokens}, envelope=32, maxWireInputTokens=${maxWireInputTokens ?? "unset"}, maxInputTokens=${textMax ?? "unset"}, effectiveLimit=${max})`, "GLM_INPUT_TOO_LARGE", false),
+      maxWireInputTokens === undefined ? {} : {
+        inputBudget: Object.freeze({ estimate, maxWireInputTokens } satisfies ProviderInputBudgetFeedback),
+      },
+    );
   }
 }
 

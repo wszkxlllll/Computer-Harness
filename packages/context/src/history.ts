@@ -29,6 +29,14 @@ export function latestGuiHistoryGroup(events: readonly RuntimeEvent[]): RuntimeE
   if (response?.type !== "model.response.received" || response.turn.type !== "tool_calls") return [];
   return [response, ...historyEventsForCalls(events, response.turn.calls.map((call) => call.id))];
 }
+
+/** A retained reasoning tool turn must carry its continuation and every result
+ * together, including when its tools did not dispatch a GUI action. */
+export function latestContinuationHistoryGroup(events: readonly RuntimeEvent[]): RuntimeEvent[] {
+  const response = [...events].reverse().find((event) => event.type === "model.response.received");
+  if (response?.type !== "model.response.received" || response.turn.type !== "tool_calls" || response.turn.continuation === undefined) return [];
+  return [response, ...historyEventsForCalls(events, response.turn.calls.map((call) => call.id))];
+}
 export function findOldestEvictableHistoryGroup(events: readonly RuntimeEvent[]): RuntimeEvent[] {
   for (const event of events) {
     if (event.type === "user.input.received") continue;

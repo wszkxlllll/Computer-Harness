@@ -185,6 +185,13 @@ export interface PreparedProviderRequest extends PreparedRequestMetadata {
   readonly providerId: string;
 }
 
+/** Feedback from a failed, network-free prepare only. Context owns eviction;
+ * the Provider reports the cost of its complete projection without editing it. */
+export interface ProviderInputBudgetFeedback {
+  readonly estimate: PreparedRequestEstimate & { readonly estimatedTotalTokens: number };
+  readonly maxWireInputTokens: number;
+}
+
 export interface ContextCompileInput {
   runId: RunId;
   goal: string;
@@ -197,6 +204,10 @@ export interface ContextCompileInput {
   /** Remaining Run wall clock, independent of the model-request allowance. */
   wallClockBudget?: { readonly remainingMs: number; readonly finishReserveMs: number };
   context?: ContextOptions;
+  /** Lower, per-decision text selection target after Provider preparation.
+   * Does not change either configured input limit. Selection stops at the
+   * required-content floor so the Provider can measure that intact minimum. */
+  textTokenTarget?: number;
   enabledCategories?: readonly ToolCategory[];
   enabledToolNames?: readonly string[];
   memory?: MemoryState;

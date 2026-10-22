@@ -264,27 +264,29 @@ describe("LayeredRiskGuard", () => {
     };
     const guard = new LayeredRiskGuard({ assessor });
     for (const separator of ["\r", "\n", "\u0085", "\u2028", "\u2029"]) {
-      const candidate = context("local_edit", "Draft", "Enter two lines", "type", "current-uia-ref");
-      candidate.candidate.actions[0] = { ...candidate.candidate.actions[0]!, text: `first${separator}second` };
-      const decision = await guard.evaluate(candidate, new AbortController().signal);
-      expect(decision).toMatchObject({
-        decision: "require_approval",
-        path: "local",
-        reasonCode: "multiline_type_enter_boundary",
-        categories: ["external_commitment"],
-        modelRequestCount: 0,
-      });
-      expect(decision.reason).toContain("文字包含换行");
-      expect(decision.reason).toContain("作为回车");
-      expect(decision.reason).toContain("发送或提交");
-      expect(decision.reason).toContain("核对目标控件和完整文字");
+      for (const effect of ["local_edit", "unknown"] as const) {
+        const candidate = context(effect, "Draft", "Enter two lines", "type", "current-uia-ref");
+        candidate.candidate.actions[0] = { ...candidate.candidate.actions[0]!, text: `first${separator}second` };
+        const decision = await guard.evaluate(candidate, new AbortController().signal);
+        expect(decision).toMatchObject({
+          decision: "require_approval",
+          path: "local",
+          reasonCode: "multiline_type_enter_boundary",
+          categories: ["external_commitment"],
+          modelRequestCount: 0,
+        });
+        expect(decision.reason).toContain("文字包含换行");
+        expect(decision.reason).toContain("作为回车");
+        expect(decision.reason).toContain("发送或提交");
+        expect(decision.reason).toContain("核对目标控件和完整文字");
+      }
     }
     expect(reviewerCalls).toBe(0);
 
-    const high = context("external_commitment", "Send message", "Send the message", "type");
+    const high = context("financial", "Confirm payment", "Pay", "type");
     high.candidate.actions[0] = { ...high.candidate.actions[0]!, text: "first\nsecond" };
     const highDecision = await guard.evaluate(high, new AbortController().signal);
-    expect(highDecision).toMatchObject({ decision: "require_approval", path: "local", reasonCode: "declared_high_impact" });
+    expect(highDecision).toMatchObject({ decision: "require_approval", path: "local", reasonCode: "declared_high_impact", categories: ["financial", "external_commitment"] });
     expect(highDecision.reason).toContain("作为回车");
     expect(reviewerCalls).toBe(0);
   });

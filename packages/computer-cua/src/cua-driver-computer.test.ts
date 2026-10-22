@@ -3235,6 +3235,17 @@ describe("CuaDriverComputer", () => {
         }] }],
       }],
     };
+    const visibleDocument = {
+      source: "dom-document-v1", scope: "current-viewport", completeness: "partial", truncated: false,
+      blocks: [
+        { text: "Uncovered paragraph", frame: { x: 30, y: 80, width: 100, height: 25 } },
+        { text: "Covered paragraph must disappear", frame: { x: 210, y: 160, width: 80, height: 20 } },
+      ],
+      scrollRegions: [
+        { frame: { x: 20, y: 75, width: 100, height: 100 }, scrollTop: 30, scrollHeight: 400, clientHeight: 100 },
+        { frame: { x: 200, y: 150, width: 200, height: 100 }, scrollTop: 0, scrollHeight: 600, clientHeight: 100 },
+      ],
+    };
     const setBrowserState = (fake: ReturnType<typeof windowDriver>) => {
       const localButton = { x: 30, y: 40, width: 50, height: 30 };
       fake.setGroundingState({ elements_complete: true, elements: [
@@ -3249,6 +3260,7 @@ describe("CuaDriverComputer", () => {
       coordinateSpace: "css",
       viewportMetrics: { cssWidth: capture.width, cssHeight: capture.height, deviceScaleFactor: 1 },
       visibleText,
+      visibleDocument,
       candidates: [{ tagName: "button", ariaRole: "button", name: "Safe action", frame: { x: 30, y: 40, width: 50, height: 30 }, visible: true, interactive: true, state: { enabled: true } }],
     }));
 
@@ -3273,6 +3285,8 @@ describe("CuaDriverComputer", () => {
       const observation = await nativeComputer.observe(session, "native-visible-table" as ObservationId, signal);
       expect(observation.surfaceRef.kind).not.toBe("desktop");
       expect(observation.grounding?.visibleText?.regions[0]?.rows[0]?.cells[0]?.text).toBe("fixture visible table value");
+      expect(observation.grounding?.visibleDocument?.blocks).toHaveLength(2);
+      expect(observation.grounding?.visibleDocument?.blocks[0]?.bbox).toEqual({ x: 30, y: 80, width: 100, height: 25, coordinateSpace: "physical" });
       await nativeComputer.close(session);
     } finally {
       await rm(nativeDirectory, { recursive: true, force: true });
@@ -3308,6 +3322,13 @@ describe("CuaDriverComputer", () => {
       expect(observation.screenshot.data.byteLength).toBeGreaterThan(0);
       expect(observation.grounding?.visibleText).toBeUndefined();
       expect(JSON.stringify(observation.grounding)).not.toContain("fixture visible table value");
+      expect(observation.grounding?.visibleDocument).toMatchObject({
+        truncated: true, completeness: "partial",
+        blocks: [{ text: "Uncovered paragraph", bbox: { x: 160, y: 280, width: 200, height: 50, coordinateSpace: "physical" } }],
+        scrollRegions: [{ bbox: { x: 140, y: 270, width: 200, height: 200, coordinateSpace: "physical" },
+          scrollTop: 30, scrollHeight: 400, clientHeight: 100 }],
+      });
+      expect(JSON.stringify(observation.grounding)).not.toContain("Covered paragraph must disappear");
       const action = observation.grounding?.elements.find((element) => element.source === "dom" && element.name === "Safe action");
       expect(action?.bbox).toEqual({ x: 160, y: 200, width: 100, height: 60, coordinateSpace: "physical" });
       await desktopComputer.close(session);
@@ -3315,6 +3336,64 @@ describe("CuaDriverComputer", () => {
       await rm(desktopDirectory, { recursive: true, force: true });
     }
   });
+
+  it.each(["stable", "inventory-drift", "partial-inventory"] as const)(
+    "projects paragraph-only desktop evidence independently of controls, with %s inventory",
+    async (scenario) => {
+      const directory = await mkdtemp(join(tmpdir(), "computer-harness-desktop-document-only-"));
+      const bounds = { x: 100, y: 120, width: 960, height: 680 };
+      const fake = windowDriver(bounds, { width: 480, height: 340 });
+      fake.setPlatform("win32");
+      fake.setDesktopImageSize(1920, 1080);
+      fake.setForegroundTarget(fake.target);
+      fake.setGroundingState({ elements_complete: true, elements: [
+        { role: "Document", name: "Document", frame: bounds, enabled: true },
+      ] });
+      const browserTarget: ManagedBrowserTarget = {
+        kind: "managed-chromium", browser: "edge", profileId: "document-only-profile",
+        windowTarget: fake.target, tabId: "document-only-tab", generation: "document-only-generation", delivery: "loopback-cdp",
+      };
+      let raceEnabled = false;
+      const computer = new CuaDriverComputer({
+        socketPath: "fixture", screenshotDir: directory, platform: "win32", windowDeliveryMode: "foreground",
+        windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+        grounding: "hybrid-catalog-v1", browserTarget, driverFactory: () => fake.driver,
+        domGroundingTransport: createMockDomGroundingTransport((request) => {
+          if (raceEnabled && scenario === "inventory-drift") {
+            fake.setExtraWindow({ pid: 4321, windowId: 8765, appName: "Overlay", title: "Arrived during collection",
+              bounds: { x: 1500, y: 800, width: 100, height: 100 }, zIndex: 2, isOnScreen: true });
+          }
+          return {
+            candidates: [], complete: true, tabId: request.browserTarget.tabId, generation: request.browserTarget.generation,
+            coordinateSpace: "css", viewportMetrics: { cssWidth: 480, cssHeight: 340, deviceScaleFactor: 1 },
+            visibleDocument: { source: "dom-document-v1", scope: "current-viewport", completeness: "partial", truncated: false,
+              blocks: [{ text: "Paragraph without any interactive control", frame: { x: 20, y: 30, width: 200, height: 25 } }],
+              scrollRegions: [] },
+          };
+        }),
+      });
+      const signal = new AbortController().signal;
+      try {
+        const session = await computer.open({}, signal);
+        raceEnabled = true;
+        if (scenario === "partial-inventory") fake.setWindowInventoryComplete(false);
+        const observation = await computer.observe(session, `document-only-${scenario}` as ObservationId, signal);
+        expect(observation.surfaceRef.kind).toBe("desktop");
+        if (scenario === "stable") {
+          expect(observation.grounding?.visibleDocument?.blocks).toEqual([{
+            text: "Paragraph without any interactive control",
+            bbox: { x: 140, y: 180, width: 400, height: 50, coordinateSpace: "physical" },
+          }]);
+          expect(observation.grounding?.elements.filter((element) => element.source === "dom")).toEqual([]);
+        } else {
+          expect(observation.grounding?.visibleDocument).toBeUndefined();
+        }
+        await computer.close(session);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("uses a dedicated desktop grounding probe without widening the ordinary window registry", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-desktop-grounding-dedicated-probe-"));
