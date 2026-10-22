@@ -793,6 +793,41 @@ describe("managed browser companion through ApplicationSession and the real tool
     }
   });
 
+  it.each([
+    ["http://fixture.example/entry", false, 1],
+    ["https://fixture.example/entry", false, 1],
+    ["about:blank", false, 0],
+    [undefined, false, 0],
+    ["https://fixture.example/entry", true, 1],
+  ] as const)("uses desktop startup activation only for explicit HTTP(S) with no native selection: %s / %s", async (url, nativeSelected, expectedActivations) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-companion-startup-gate-"));
+    const fixture = await createFixture(outputDir, {
+      companion: true,
+      ...(url === undefined ? {} : { managedBrowserUrl: url }),
+      ...(nativeSelected ? { initialTarget: NATIVE_TARGET, allowedTargets: [NATIVE_TARGET] } : {}),
+      steps: [{ kind: "finish" }],
+    });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
+      expect(outcome).toBe("succeeded");
+      const calls = fixture.metrics.delegateDriver.calls;
+      expect(calls.filter((call) => call.name === "bring_to_front")).toHaveLength(expectedActivations);
+      if (expectedActivations === 1) {
+        const expectedTarget = nativeSelected ? NATIVE_TARGET : BROWSER_TARGET;
+        expect(calls.find((call) => call.name === "bring_to_front")?.input)
+          .toMatchObject({ pid: expectedTarget.pid, window_id: expectedTarget.windowId });
+        if (!nativeSelected) expect(calls.findIndex((call) => call.name === "bring_to_front"))
+          .toBeLessThan(calls.findIndex((call) => call.name === "get_desktop_state"));
+      }
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations).toHaveLength(1);
+      expect(observations[0]?.observation.surfaceRef.kind).toBe(nativeSelected ? "native_window" : "desktop");
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the persistent browser companion and cross-window tools in visual mode without grounding collection", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-visual-only-"));
     const fixture = await createFixture(outputDir, {

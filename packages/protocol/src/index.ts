@@ -662,6 +662,32 @@ export interface GroundingVisibleText {
   readonly regions: readonly GroundingVisibleTextRegion[];
 }
 
+/**
+ * Untrusted, partial main-document evidence from the catalog's current pixels.
+ * Whole visible text nodes only; omission never establishes absence. Identity
+ * and URL belong exclusively to the containing observation-bound catalog.
+ */
+export interface GroundingVisibleDocument {
+  readonly source: "dom-document-v1";
+  readonly scope: "current-viewport";
+  readonly completeness: "partial";
+  readonly truncated: boolean;
+  readonly limits: {
+    readonly maxBlocks: number;
+    readonly maxCharacters: number;
+    readonly maxBlockCharacters: number;
+    readonly maxScrollRegions: number;
+  };
+  readonly blocks: readonly { readonly text: string; readonly bbox: GroundingBoundingBox }[];
+  /** Actual native scroll metrics, not inferred CSS translations or scrollability. */
+  readonly scrollRegions: readonly {
+    readonly bbox: GroundingBoundingBox;
+    readonly scrollTop: number;
+    readonly scrollHeight: number;
+    readonly clientHeight: number;
+  }[];
+}
+
 /** Deterministic, runtime-owned projection metadata for a bounded catalog. */
 export interface GroundingSelectionTrace {
   readonly strategy: "deterministic-lexical-v1" | "bounded-fusion-v1";
@@ -724,6 +750,8 @@ export interface GroundingCatalog {
   readonly elements: readonly GroundingElement[];
   /** Independently bounded static evidence; never participates in the interactive hot set. */
   readonly visibleText?: GroundingVisibleText;
+  /** Independently bounded visible prose and native scrolling evidence; not actions. */
+  readonly visibleDocument?: GroundingVisibleDocument;
   /** Present when Runtime narrowed an adapter catalog for persistence/Context. */
   readonly selection?: GroundingSelectionTrace;
 }
@@ -1300,6 +1328,21 @@ export interface ContextTrace {
     readonly projectedCellCount: number;
     readonly estimatedTokens: number;
     readonly omittedReason?: "budget" | "observation_mismatch";
+  };
+  visibleDocument?: {
+    readonly present: boolean;
+    readonly projected: boolean;
+    readonly truncated: boolean;
+    readonly completeness: "partial";
+    readonly source: "dom-document-v1";
+    readonly scope: "current-viewport";
+    readonly observationId: ObservationId;
+    readonly candidateBlockCount: number;
+    readonly projectedBlockCount: number;
+    readonly candidateScrollRegionCount: number;
+    readonly projectedScrollRegionCount: number;
+    readonly estimatedTokens: number;
+    readonly omittedReason?: "observation_mismatch" | "page_url_mismatch" | "budget";
   };
   assistantPreferences?: ContextAssistantPreferencesTrace;
   observationIncluded: boolean;

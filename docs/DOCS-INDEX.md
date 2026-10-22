@@ -13,3 +13,5 @@
 项目许可见[LICENSE](../LICENSE)，第三方说明见[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md)。
 
 旧方案、详细题卡、评分依据、逐次运行和部署记录集中在[历史资料](./history/README.md)，仅供追溯；不作为用户安装的额外必读步骤。历史事实不等于当前默认配置或现行部署状态。
+
+最新修复与运行记录：[2026-10-22 未发布修复及两种模式共 16 轮 Windows 实跑](./history/2026-10-22-member-c-unpublished-repairs/README.md)。包含失败与未交付轮次，不代表任务已全部通过。

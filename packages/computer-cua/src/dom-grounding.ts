@@ -10,6 +10,7 @@ import type {
   GroundingVisibleText,
   GroundingVisibleTextCell,
   GroundingVisibleTextRegion,
+  GroundingVisibleDocument,
   Viewport,
 } from "@computer-harness/protocol";
 
@@ -91,6 +92,8 @@ export interface DomGroundingTransportResult {
   readonly pageUrl?: unknown;
   /** Adapter-private bounded rendered table payload, collected with candidates. */
   readonly visibleText?: unknown;
+  /** Whole visible text nodes and actual native scroll metrics from that evaluation. */
+  readonly visibleDocument?: unknown;
   readonly complete?: boolean;
   readonly degraded?: boolean;
   readonly tabId?: string;
@@ -271,6 +274,7 @@ export function materializeDomGrounding(
   }
   const truncated = result.degraded === true || result.candidates.length > publicElements.length || result.candidates.length > maxElements;
   const visibleText = materializeVisibleText(request, result, cssProjection);
+  const visibleDocument = materializeVisibleDocument(request, result, cssProjection);
   return {
     catalog: {
       version: "grounding-catalog-v2",
@@ -283,6 +287,7 @@ export function materializeDomGrounding(
       maxElements,
       elements: publicElements,
       ...(visibleText === undefined ? {} : { visibleText }),
+      ...(visibleDocument === undefined ? {} : { visibleDocument }),
     },
     privateElements,
   };
@@ -390,6 +395,73 @@ function materializeVisibleText(
     limits: VISIBLE_TEXT_LIMITS,
     regions,
   };
+}
+
+const VISIBLE_DOCUMENT_LIMITS = {
+  maxBlocks: 32,
+  maxCharacters: 4800,
+  maxBlockCharacters: 480,
+  maxScrollRegions: 4,
+} as const;
+
+/** Fail closed on geometry; never clip or substring document evidence. */
+function materializeVisibleDocument(
+  request: DomGroundingCollectRequest,
+  result: DomGroundingTransportResult,
+  project: ((frame: DomGroundingContentRect) => DomGroundingContentRect) | undefined,
+): GroundingVisibleDocument | undefined {
+  const raw = record(result.visibleDocument);
+  if (raw?.source !== "dom-document-v1" || raw.scope !== "current-viewport" ||
+      raw.completeness !== "partial" || !Array.isArray(raw.blocks) || !Array.isArray(raw.scrollRegions) ||
+      result.coordinateSpace !== "css" || project === undefined ||
+      result.tabId !== request.browserTarget.tabId || result.generation !== request.browserTarget.generation) return undefined;
+  const metrics = result.viewportMetrics;
+  if (metrics === undefined) return undefined;
+  const content = project({ x: 0, y: 0, width: metrics.cssWidth, height: metrics.cssHeight });
+  const scaleX = content.width / metrics.cssWidth;
+  const scaleY = content.height / metrics.cssHeight;
+  // A reduced capture may differ from devicePixelRatio, but one page cannot
+  // justify incompatible axis scales. Keep drift out of static text evidence.
+  if (![scaleX, scaleY].every(Number.isFinite) || scaleX <= 0 || scaleY <= 0 ||
+      Math.abs(scaleX - scaleY) > Math.max(scaleX, scaleY) * 0.01) return undefined;
+  const projectFrame = (value: unknown): GroundingVisibleDocument["blocks"][number]["bbox"] | undefined => {
+    const frame = readFrame(value);
+    if (frame === undefined || frame.x < 0 || frame.y < 0 ||
+        frame.x + frame.width > metrics.cssWidth || frame.y + frame.height > metrics.cssHeight) return undefined;
+    const physical = project(frame);
+    if (![physical.x, physical.y, physical.width, physical.height].every(Number.isFinite) ||
+        physical.x < 0 || physical.y < 0 || physical.width <= 0 || physical.height <= 0 ||
+        physical.x + physical.width > request.viewport.width || physical.y + physical.height > request.viewport.height) return undefined;
+    return { ...physical, coordinateSpace: "physical" };
+  };
+  const blocks: { text: string; bbox: GroundingVisibleDocument["blocks"][number]["bbox"] }[] = [];
+  const scrollRegions: GroundingVisibleDocument["scrollRegions"][number][] = [];
+  let characters = 0;
+  let truncated = raw.truncated === true || raw.blocks.length > VISIBLE_DOCUMENT_LIMITS.maxBlocks ||
+    raw.scrollRegions.length > VISIBLE_DOCUMENT_LIMITS.maxScrollRegions;
+  for (const candidate of raw.blocks.slice(0, VISIBLE_DOCUMENT_LIMITS.maxBlocks)) {
+    const block = record(candidate);
+    const bbox = projectFrame(block?.frame);
+    if (bbox === undefined || typeof block?.text !== "string" || !/\S/u.test(block.text) ||
+        /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(block.text)) { truncated = true; continue; }
+    if (block.text.length > VISIBLE_DOCUMENT_LIMITS.maxBlockCharacters ||
+        characters + block.text.length > VISIBLE_DOCUMENT_LIMITS.maxCharacters) { truncated = true; continue; }
+    blocks.push({ text: block.text, bbox });
+    characters += block.text.length;
+  }
+  for (const candidate of raw.scrollRegions.slice(0, VISIBLE_DOCUMENT_LIMITS.maxScrollRegions)) {
+    const region = record(candidate);
+    const bbox = projectFrame(region?.frame);
+    if (bbox === undefined || region === undefined ||
+        typeof region.scrollTop !== "number" || typeof region.scrollHeight !== "number" || typeof region.clientHeight !== "number" ||
+        ![region.scrollTop, region.scrollHeight, region.clientHeight].every(Number.isFinite) ||
+        region.scrollTop < 0 || region.clientHeight <= 0 || region.scrollHeight < region.clientHeight ||
+        region.scrollTop > region.scrollHeight - region.clientHeight) { truncated = true; continue; }
+    scrollRegions.push({ bbox, scrollTop: region.scrollTop, scrollHeight: region.scrollHeight, clientHeight: region.clientHeight });
+  }
+  if (blocks.length === 0 && scrollRegions.length === 0) return undefined;
+  return { source: "dom-document-v1", scope: "current-viewport", completeness: "partial", truncated,
+    limits: VISIBLE_DOCUMENT_LIMITS, blocks, scrollRegions };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

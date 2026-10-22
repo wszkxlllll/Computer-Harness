@@ -37,6 +37,8 @@ docs/history/*
 !docs/history/2026-10-20-release-convergence/**
 !docs/history/2026-10-20-product-docs/
 !docs/history/2026-10-20-product-docs/**
+!docs/history/2026-10-22-member-c-unpublished-repairs/
+!docs/history/2026-10-22-member-c-unpublished-repairs/**
 !docs/history/README.md
 /output/pdf/
 scripts/history/

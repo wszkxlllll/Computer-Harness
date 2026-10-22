@@ -738,13 +738,16 @@ const MANAGED_DOM_CLICK_POINT_SCRIPT = String.raw`
 `;
 
 /**
- * Read-only native-table evidence, independent of the interactive candidate cap.
- * Geometry/style uncertainty omits whole cells rather than exporting hidden or
- * partially rendered text. No accessibility labels, image OCR or input values.
+ * Read-only native-table/document evidence, independent of interactive caps.
+ * Shared geometry/paint proof omits whole cells or text nodes on uncertainty.
+ * No accessibility labels, image OCR, full-page text or editable values.
  */
-const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
-  const collectVisibleTables = () => {
+const MANAGED_VISIBLE_EVIDENCE_SCRIPT = String.raw`
+  const collectVisibleStaticEvidence = (documentEvidence = false) => {
     if (document.visibilityState !== "visible") return undefined;
+    if (documentEvidence && (!document.hasFocus() ||
+        window.visualViewport && (window.visualViewport.scale !== 1 || window.visualViewport.offsetLeft !== 0 ||
+          window.visualViewport.offsetTop !== 0))) return undefined;
     const limits = { maxRegions: 2, maxRows: 24, maxColumns: 12, maxCells: 192, maxCellCharacters: 320, maxCharacters: 4800 };
     const regions = [];
     let truncated = false;
@@ -769,6 +772,29 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       style[edge + "Style"] !== "hidden" && parseFloat(style[edge + "Width"]) !== 0 &&
       !transparentColor(style[edge + "Color"]);
     const pixels = (value) => /^-?(?:\d+(?:\.\d+)?|\.\d+)px$/u.test(value) ? Number.parseFloat(value) : NaN;
+    const nonOccludingOuterShadow = (value) => {
+      if (value === "none") return true;
+      // A fully transparent single shadow paints nothing, even when CSS keeps
+      // a zero-blur placeholder during a transition.
+      const single = /^(rgba?\([\d.,\s]+\))\s+-?[\d.]+px\s+-?[\d.]+px\s+[\d.]+px\s+-?[\d.]+px(?:\s+inset)?$/u.exec(value);
+      if (single && transparentColor(single[1])) return true;
+      // A single centered, zero-spread soft outer shadow is decoration behind
+      // its box, not an opaque displaced copy. The box itself is still checked
+      // below for overlap; offsets, spread, inset, multiple shadows and unknown
+      // serializations stay fail-closed rather than inventing paint bounds.
+      const match = /^rgba?\([\d.,\s]+\)\s+0px\s+0px\s+(\d+(?:\.\d+)?)px\s+0px$/u.exec(value);
+      return match !== null && Number(match[1]) > 0;
+    };
+    const axisAlignedTransform = (value) => {
+      if (value === "none") return true;
+      if (!documentEvidence) return false;
+      const match = /^matrix\(([^)]+)\)$/u.exec(value);
+      const values = match?.[1].split(",").map(Number);
+      // DOM Range and ancestor client rects already include these translations.
+      // They do not change CSS lengths or axis-aligned clipping arithmetic.
+      return values?.length === 6 && values.every(Number.isFinite) &&
+        values[0] === 1 && values[1] === 0 && values[2] === 0 && values[3] === 1;
+    };
     const inspectGeneratedPaint = (element, pseudo) => {
       const style = getComputedStyle(element, pseudo);
       if (!style.content || style.content === "none" || style.content === "normal" ||
@@ -801,7 +827,7 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       // pseudo's extent from its host rectangle, or from pointer-events:none.
       for (let current = element; current; current = current.parentElement) {
         const currentStyle = getComputedStyle(current);
-        if (currentStyle.transform !== "none" || currentStyle.filter !== "none" ||
+        if (!axisAlignedTransform(currentStyle.transform) || currentStyle.filter !== "none" ||
             currentStyle.perspective !== "none" || currentStyle.maskImage !== "none" ||
             currentStyle.clipPath !== "none" || currentStyle.mixBlendMode !== "normal" ||
             currentStyle.translate && currentStyle.translate !== "none" ||
@@ -863,7 +889,41 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
     const generatedPaintUnknown = (element, pseudo) => {
       let proofs = generatedPaintProofs.get(element);
       if (!proofs) { proofs = {}; generatedPaintProofs.set(element, proofs); }
-      if (proofs[pseudo] === undefined) proofs[pseudo] = inspectGeneratedPaint(element, pseudo);
+      if (proofs[pseudo] === undefined) {
+        let unknown = inspectGeneratedPaint(element, pseudo);
+        if (documentEvidence && unknown) {
+          const pseudoStyle = getComputedStyle(element, pseudo);
+          let containingBlockInsideClip = !["absolute", "fixed"].includes(pseudoStyle.position);
+          let clipBox;
+          let effectsSafe = true;
+          // Generated glyph extents are not a DOM Range. Only a real ancestor
+          // paint/overflow clip can bound them; a nearby host box is not proof.
+          for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+            const style = getComputedStyle(ancestor);
+            if (!axisAlignedTransform(style.transform) || style.filter !== "none" ||
+                style.translate && style.translate !== "none" || style.rotate && style.rotate !== "none" ||
+                style.scale && style.scale !== "none" || style.zoom && !["1", "normal"].includes(style.zoom) ||
+                style.perspective !== "none" || style.offsetPath && style.offsetPath !== "none" ||
+                style.backdropFilter && style.backdropFilter !== "none" ||
+                style.webkitBoxReflect && style.webkitBoxReflect !== "none" ||
+                style.animationName !== "none" || typeof ancestor.getAnimations !== "function" ||
+                ancestor.getAnimations({ subtree: false }).some((animation) => animation.pending || ["running", "paused"].includes(animation.playState))) effectsSafe = false;
+            const paintContainment = /(?:^|\s)(?:paint|strict|content)(?:\s|$)/u.test(style.contain);
+            if (pseudoStyle.position === "absolute" && style.position !== "static") containingBlockInsideClip = true;
+            if (!clipBox && (paintContainment || pseudoStyle.position !== "fixed" && containingBlockInsideClip &&
+                ["hidden", "clip", "auto", "scroll"].includes(style.overflowX) &&
+                ["hidden", "clip", "auto", "scroll"].includes(style.overflowY))) {
+              const box = ancestor.getBoundingClientRect();
+              if ([box.left, box.top, box.right, box.bottom].every(Number.isFinite) && box.width > 0 && box.height > 0) clipBox = box;
+            }
+          }
+          if (effectsSafe && clipBox) {
+            generatedPaintBoxes.push(clipBox);
+            unknown = false;
+          }
+        }
+        proofs[pseudo] = unknown;
+      }
       return proofs[pseudo];
     };
     let uninspectedPaint = false;
@@ -879,6 +939,12 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       // pretend that a main-document rectangle scan proves its non-occlusion.
       if (style.display !== "none" && Number(style.opacity) !== 0) {
         if (node.shadowRoot || node.localName.includes("-")) uninspectedPaint = true;
+        // Effects with no certified paint extent can cover text beyond their
+        // layout box. Do not treat their non-intersecting host as clearance.
+        if (documentEvidence && (style.filter !== "none" || !nonOccludingOuterShadow(style.boxShadow) ||
+            style.textShadow !== "none" || edgeHasPaint(style, "outline") ||
+            style.backdropFilter && style.backdropFilter !== "none" ||
+            style.webkitBoxReflect && style.webkitBoxReflect !== "none")) uninspectedPaint = true;
         for (const pseudo of ["::before", "::after"]) {
           if (generatedPaintUnknown(node, pseudo)) uninspectedPaint = true;
         }
@@ -887,8 +953,8 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       node = walker.nextNode();
     }
     // An uninspected node could occlude a cell; fail closed for this collection.
-    if (node) return { source: "dom-table-v1", scope: "current-viewport", completeness: "partial", truncated: true, limits, regions };
-    if (uninspectedPaint) return { source: "dom-table-v1", scope: "current-viewport", completeness: "partial", truncated: false, limits, regions };
+    if (node) return documentEvidence ? undefined : { source: "dom-table-v1", scope: "current-viewport", completeness: "partial", truncated: true, limits, regions };
+    if (uninspectedPaint) return documentEvidence ? undefined : { source: "dom-table-v1", scope: "current-viewport", completeness: "partial", truncated: false, limits, regions };
     const insideViewport = (rect) => Number.isFinite(rect.x) && Number.isFinite(rect.y) &&
       rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.y >= 0 &&
       rect.right <= cssWidth && rect.bottom <= cssHeight;
@@ -897,7 +963,7 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
     const styleSafe = (element, style) => {
       if (element.hidden || style.display === "none" || style.visibility !== "visible" ||
           style.contentVisibility !== "visible" || Number(style.opacity) !== 1 ||
-          style.transform !== "none" || style.filter !== "none" ||
+          !axisAlignedTransform(style.transform) || style.filter !== "none" ||
           style.clipPath !== "none" || style.perspective !== "none" ||
           style.maskImage !== "none" || style.mixBlendMode !== "normal") return false;
       if (style.display === "list-item") return false;
@@ -986,7 +1052,7 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       }
       return true;
     };
-    const rectVisible = (rect, owner) => {
+    const rectVisible = (rect, owner, regionProof = false) => {
       if (!insideViewport(rect)) return false;
       for (let ancestor = owner; ancestor; ancestor = ancestor.parentElement) {
         const style = getComputedStyle(ancestor);
@@ -1010,6 +1076,7 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       for (const item of inspected) {
         const other = item.element;
         if (other === owner || other.contains(owner)) continue;
+        if (regionProof && owner.contains(other) && !["absolute", "fixed", "sticky"].includes(item.style.position)) continue;
         if (item.style.display === "none" || item.style.visibility !== "visible" || Number(item.style.opacity) === 0) continue;
         const paint = directLayoutPaint(item);
         if (item.textPaintUnknown) return false;
@@ -1035,6 +1102,90 @@ const MANAGED_VISIBLE_TABLE_SCRIPT = String.raw`
       }
       return true;
     };
+    if (documentEvidence) {
+      const documentLimits = { maxBlocks: 32, maxCharacters: 4800, maxBlockCharacters: 480, maxScrollRegions: 4 };
+      const blocks = [];
+      const scrollRegions = [];
+      let documentCharacters = 0;
+      let documentTruncated = false;
+      const safeAncestors = (owner) => {
+        for (let ancestor = owner; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          if (ancestor.namespaceURI !== "http://www.w3.org/1999/xhtml" || ancestor.shadowRoot ||
+              ancestor.localName.includes("-") || ancestor.isContentEditable ||
+              ["input", "textarea", "select", "option", "script", "style", "template", "noscript", "iframe", "object", "embed"].includes(ancestor.localName) ||
+              !styleSafe(ancestor, style) ||
+              style.translate && style.translate !== "none" || style.rotate && style.rotate !== "none" ||
+              style.scale && style.scale !== "none" || style.zoom && !["1", "normal"].includes(style.zoom) ||
+              style.offsetPath && style.offsetPath !== "none" ||
+              style.backdropFilter && style.backdropFilter !== "none" ||
+              style.webkitBoxReflect && style.webkitBoxReflect !== "none" ||
+              style.textShadow !== "none" || style.textDecorationLine !== "none" ||
+              style.webkitTextStrokeWidth && parseFloat(style.webkitTextStrokeWidth) !== 0 ||
+              style.textEmphasisStyle && style.textEmphasisStyle !== "none" ||
+              style.textOverflow === "ellipsis" && (ancestor.scrollWidth > ancestor.clientWidth || ancestor.scrollHeight > ancestor.clientHeight) ||
+              style.animationName !== "none" || typeof ancestor.getAnimations !== "function" ||
+              ancestor.getAnimations({ subtree: false }).some((animation) => animation.pending || ["running", "paused"].includes(animation.playState))) return false;
+        }
+        return true;
+      };
+      const textNodes = document.createTreeWalker(document.documentElement, 4);
+      let textNode = textNodes.nextNode();
+      let visited = 0;
+      while (textNode && visited < 4096) {
+        visited += 1;
+        const owner = textNode.parentElement;
+        // Never read a form/editable value, or use a parent box as text proof.
+        if (owner && safeAncestors(owner)) {
+          const text = textNode.data;
+          if (/\S/u.test(text)) {
+            if (blocks.length >= documentLimits.maxBlocks || text.length > documentLimits.maxBlockCharacters ||
+                documentCharacters + text.length > documentLimits.maxCharacters) {
+              documentTruncated = true;
+              textNode = textNodes.nextNode();
+              continue;
+            }
+            const style = getComputedStyle(owner);
+            const range = document.createRange();
+            range.selectNodeContents(textNode);
+            const rects = range.getClientRects();
+            if (!/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(text) &&
+                /^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/u.test(style.color) &&
+                (!style.webkitTextFillColor || /^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/u.test(style.webkitTextFillColor)) &&
+                rects.length > 0 && rects.length <= 64 && Array.prototype.every.call(rects, (rect) => rectVisible(rect, owner))) {
+              const box = range.getBoundingClientRect();
+              if (insideViewport(box)) {
+                blocks.push({ text, frame: frameOf(box) });
+                documentCharacters += text.length;
+              } else documentTruncated = true;
+            } else documentTruncated = true;
+          }
+        }
+        textNode = textNodes.nextNode();
+      }
+      if (textNode) documentTruncated = true;
+      const scrollingElement = document.scrollingElement;
+      for (const item of inspected) {
+        const element = item.element;
+        const viewportRegion = element === scrollingElement;
+        if (!viewportRegion && !["auto", "scroll"].includes(item.style.overflowY)) continue;
+        if (!safeAncestors(element)) continue;
+        const scrollTop = element.scrollTop, scrollHeight = element.scrollHeight, clientHeight = element.clientHeight;
+        if (![scrollTop, scrollHeight, clientHeight].every(Number.isFinite) || scrollTop < 0 || clientHeight <= 0 ||
+            scrollHeight < clientHeight || scrollTop > scrollHeight - clientHeight) continue;
+        const x = viewportRegion ? 0 : item.rect.left + element.clientLeft;
+        const y = viewportRegion ? 0 : item.rect.top + element.clientTop;
+        const width = element.clientWidth;
+        const height = clientHeight;
+        const rect = { x, y, left: x, top: y, right: x + width, bottom: y + height, width, height };
+        if (!rectVisible(rect, element, true)) { documentTruncated = true; continue; }
+        if (scrollRegions.length >= documentLimits.maxScrollRegions) { documentTruncated = true; continue; }
+        scrollRegions.push({ frame: frameOf(rect), scrollTop, scrollHeight, clientHeight });
+      }
+      if (blocks.length === 0 && scrollRegions.length === 0) return undefined;
+      return { source: "dom-document-v1", scope: "current-viewport", completeness: "partial",
+        truncated: documentTruncated, limits: documentLimits, blocks, scrollRegions };
+    }
     const cellText = (cell, tableBox) => {
       const box = cell.getBoundingClientRect();
       if (!insideViewport(box) || box.left < tableBox.left || box.top < tableBox.top ||
@@ -1158,7 +1309,7 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const cssWidth = Number(window.innerWidth);
   const cssHeight = Number(window.innerHeight);
   const deviceScaleFactor = Number(window.devicePixelRatio);
-  ${MANAGED_VISIBLE_TABLE_SCRIPT}
+  ${MANAGED_VISIBLE_EVIDENCE_SCRIPT}
   const maxCandidates = 256;
   const candidates = [];
   const seen = new Set();
@@ -1368,7 +1519,8 @@ export const MANAGED_DOM_EVALUATION_SCRIPT = String.raw`(function() {
   const pageUrl = window.location?.href;
   return {
     candidates,
-    visibleText: collectVisibleTables(),
+    visibleText: collectVisibleStaticEvidence(),
+    visibleDocument: collectVisibleStaticEvidence(true),
     navigationKey: typeof performance !== "undefined" && Number.isFinite(performance.timeOrigin) ? String(performance.timeOrigin) : undefined,
     ...(typeof pageUrl === "string" ? { pageUrl } : {}),
     // Main-document completeness does not cover visible iframe contents,
@@ -1800,10 +1952,13 @@ export class ManagedBrowserHost {
       return {
         candidates: value.candidates as DomGroundingRawCandidate[],
         ...(isGroundingWebUrl(value.pageUrl) ? { pageUrl: value.pageUrl } : {}),
-        // Do not attach table text if navigation raced the active-page check.
+        // Do not attach static text if navigation raced the active-page check.
         ...(isRecord(value.visibleText) && selected.navigationKey !== undefined &&
           value.navigationKey === selected.navigationKey && value.pageUrl === selected.page.url
           ? { visibleText: value.visibleText } : {}),
+        ...(isRecord(value.visibleDocument) && selected.navigationKey !== undefined &&
+          value.navigationKey === selected.navigationKey && value.pageUrl === selected.page.url
+          ? { visibleDocument: value.visibleDocument } : {}),
         complete: value.complete === true,
         coordinateSpace: "css",
         viewportMetrics,

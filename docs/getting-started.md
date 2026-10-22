@@ -126,3 +126,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Co
 | Host 端口已占用 | 以 `-HostPort <未占用端口>` 启动，并在电脑打开对应端口的 `/connect` 页面。 |
 
 Relay 配对、自动化和手机真机验收是不同证据。成功扫码或看到任务页面，不等于输入修复、真实任务结果、手机语音和 macOS 均已验收。
+
+## 7. 本地输入预算收敛
+
+本地`prepare`的wire预算收敛与网络重试分开：Provider在完整投影后返回结构化成本，Runtime只在请求尚未发送时让Context降低本次文本选择目标，每个decision最多重编译8次。配置的文本／wire上限不变，本地重编译不增加模型请求次数，也不重新执行GUI。Context保留Goal、所有用户纠正、当前观察、最近GUI调用及结果，以及最新reasoning工具轮次的continuation和配对结果；只裁剪允许省略的完整历史组与可选投影。
+
+必需内容本身仍超限、反馈无效或本地收敛次数耗尽时明确按预算失败，不能把它改成放宽上限或无限重试。取消、用户纠正和墙钟收尾变化在准备后重新处理，旧输入不会因此继续发送。仅有首次请求通过或单次编译低于文本上限，不能证明长任务后续请求的wire预算已满足。可选正文证据及其来源绑定见[技术说明](./technical-guide.md#视觉与可选结构定位)。

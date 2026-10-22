@@ -15,6 +15,7 @@ import type {
   GroundingCatalog,
   GroundingBrowserRegion,
   GroundingElement,
+  GroundingVisibleDocument,
   ObservationCapture,
   ObservationId,
   SurfaceTransitionReason,
@@ -5091,7 +5092,8 @@ async function readAuthorizedDesktopGrounding(
       false,
       input.platform === "darwin",
     );
-    if (grounding === undefined || grounding.elements.size === 0 || grounding.browserTarget === undefined) return undefined;
+    if (grounding === undefined || grounding.browserTarget === undefined ||
+        grounding.elements.size === 0 && grounding.catalog.visibleDocument === undefined) return undefined;
     if (grounding.browserTarget.profileId !== activeBrowserTarget.profileId ||
         windowIdentityKey(grounding.browserTarget.windowTarget) !== windowIdentityKey(activeBrowserTarget.windowTarget)) {
       return undefined;
@@ -5106,7 +5108,7 @@ async function readAuthorizedDesktopGrounding(
 
     const after = await listWindowInventory(driver, session, signal, undefined, true, input.relationshipProbe, input.platform);
     if (!sameForegroundWindowSnapshot(before, after, target)) return undefined;
-    return projectGroundingToDesktop(grounding, capture, desktopViewport, target, after, input.platform);
+    return projectGroundingToDesktop(grounding, capture, desktopViewport, target, after, input.platform, before);
   } catch (error) {
     if (signal.aborted) signal.throwIfAborted();
     // Desktop capture remains usable when an optional authorized grounding
@@ -5218,6 +5220,7 @@ function projectGroundingToDesktop(
   target: CuaWindowInfo,
   inventory: CuaWindowInventory,
   platform: NodeJS.Platform,
+  beforeInventory: CuaWindowInventory,
 ): PrivateGrounding | undefined {
   const bounds = capture.binding.bounds;
   const transform = desktopGroundingCoordinateTransform(capture.viewport, bounds, platform, capture.nativeToDesktopScale);
@@ -5268,12 +5271,56 @@ function projectGroundingToDesktop(
     });
     publicElements.push(element);
   }
-  if (elements.size === 0) return undefined;
-  // Table text still uses window-capture coordinates and has no trustworthy
-  // desktop overlay intersection test. Keep it available to native-window
-  // observations only until both geometry and occlusion can be proven.
-  const { visibleText: windowLocalVisibleText, ...desktopCatalog } = grounding.catalog;
+  // Existing native-table evidence intentionally stays window-local. Document
+  // evidence has a separate whole-box projection and complete, stable inventory
+  // proof; never infer non-occlusion from a partial desktop inventory.
+  const { visibleText: windowLocalVisibleText, visibleDocument: windowLocalDocument, ...desktopCatalog } = grounding.catalog;
   void windowLocalVisibleText;
+  let visibleDocument: GroundingCatalog["visibleDocument"];
+  const stableInventory = inventory.complete && inventory.truncated !== true &&
+    beforeInventory.complete && beforeInventory.truncated !== true &&
+    inventory.windows.length === beforeInventory.windows.length &&
+    new Set(inventory.windows.map((window) => windowIdentityKey(window.target))).size === inventory.windows.length &&
+    new Set(beforeInventory.windows.map((window) => windowIdentityKey(window.target))).size === beforeInventory.windows.length &&
+    inventory.windows.every((window) => {
+      const previous = beforeInventory.windows.find((item) => windowIdentityKey(item.target) === windowIdentityKey(window.target));
+      return previous !== undefined && window.zIndex !== undefined && previous.zIndex === window.zIndex &&
+        window.isOnScreen !== undefined && previous.isOnScreen === window.isOnScreen &&
+        previous.minimized === window.minimized && sameWindowGeometry(previous.bounds, window.bounds) &&
+        [window.bounds.x, window.bounds.y, window.bounds.width, window.bounds.height].every(Number.isFinite) &&
+        window.bounds.width > 0 && window.bounds.height > 0;
+    });
+  if (windowLocalDocument !== undefined && stableInventory) {
+    const projectEvidenceBox = (local: GroundingVisibleDocument["blocks"][number]["bbox"]) => {
+      if (local.coordinateSpace !== "physical" || ![local.x, local.y, local.width, local.height].every(Number.isFinite) ||
+          local.x < 0 || local.y < 0 || local.width <= 0 || local.height <= 0 ||
+          local.x + local.width > capture.viewport.width || local.y + local.height > capture.viewport.height) return undefined;
+      const bbox = {
+        x: windowFrame.x + local.x * transform.localToDesktopScaleX,
+        y: windowFrame.y + local.y * transform.localToDesktopScaleY,
+        width: local.width * transform.localToDesktopScaleX,
+        height: local.height * transform.localToDesktopScaleY,
+        coordinateSpace: "physical" as const,
+      };
+      if (bbox.x < 0 || bbox.y < 0 || bbox.x + bbox.width > desktopViewport.width || bbox.y + bbox.height > desktopViewport.height ||
+          isOccludedDesktopGroundingCandidate(bbox, target, inventory, transform.nativeToDesktopScaleX, transform.nativeToDesktopScaleY)) return undefined;
+      return bbox;
+    };
+    const blocks = windowLocalDocument.blocks.flatMap((block) => {
+      const bbox = projectEvidenceBox(block.bbox);
+      return bbox === undefined ? [] : [{ text: block.text, bbox }];
+    });
+    const scrollRegions = windowLocalDocument.scrollRegions.flatMap((region) => {
+      const bbox = projectEvidenceBox(region.bbox);
+      return bbox === undefined ? [] : [{ ...region, bbox }];
+    });
+    if (blocks.length > 0 || scrollRegions.length > 0) {
+      visibleDocument = { ...windowLocalDocument, blocks, scrollRegions,
+        truncated: windowLocalDocument.truncated || blocks.length !== windowLocalDocument.blocks.length ||
+          scrollRegions.length !== windowLocalDocument.scrollRegions.length };
+    }
+  }
+  if (elements.size === 0 && visibleDocument === undefined) return undefined;
   return {
     ...grounding,
     windowBinding: capture.binding,
@@ -5282,6 +5329,7 @@ function projectGroundingToDesktop(
     elements,
     catalog: {
       ...desktopCatalog,
+      ...(visibleDocument === undefined ? {} : { visibleDocument }),
       ...(publicElements.length === grounding.catalog.elements.length ? {} : { completeness: "partial" as const }),
       elements: publicElements,
     },
@@ -5543,7 +5591,9 @@ async function readDomGroundingCatalog(
     // this observation and must be re-observed before reuse.
     if (!isBoundedBrowserIdentity(result.tabId) || !isBoundedBrowserIdentity(result.generation)) return emptyDomGrounding(observationId, computerSessionId);
     const activeBrowserTarget: ManagedBrowserTarget = { ...browserTarget, tabId: result.tabId, generation: result.generation };
-    const materialized = materializeDomGrounding({ observationId, computerSessionId, viewport, browserTarget: activeBrowserTarget }, result, GROUNDING_MAX_ELEMENTS, trustedContentRect);
+    // Adopt the latest attested identity for the next capture, but do not let
+    // document text from a newly discovered tab/document describe old pixels.
+    const materialized = materializeDomGrounding({ observationId, computerSessionId, viewport, browserTarget }, result, GROUNDING_MAX_ELEMENTS, trustedContentRect);
     const elements = new Map<string, PrivateGroundingElement>();
     for (const [elementRef, privateElement] of materialized.privateElements) {
       elements.set(elementRef, {
@@ -5658,6 +5708,7 @@ function mergeGroundings(
       computerSessionId,
       ...(isGroundingWebUrl(dom.catalog.pageUrl) ? { pageUrl: dom.catalog.pageUrl } : {}),
       ...(dom.catalog.visibleText === undefined ? {} : { visibleText: dom.catalog.visibleText }),
+      ...(dom.catalog.visibleDocument === undefined ? {} : { visibleDocument: dom.catalog.visibleDocument }),
       completeness: truncated ? "partial" : "complete",
       degraded: uia.catalog.degraded || dom.catalog.degraded,
       maxElements: GROUNDING_MAX_ELEMENTS,

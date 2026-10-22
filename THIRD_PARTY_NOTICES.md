@@ -56,6 +56,8 @@ Computer Harness 自行维护 `computer-cua` adapter、窗口/Surface Registry �
 | CUA Driver daemon（非 npm 包） | 0.22.2 | MIT | Runtime 前置条件；使用者按平台单独取得，不包含在 pnpm 安装、Computer Harness 源码仓库或 Web bundle 中。 | [CUA 0.22.2 官方 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2) 与同 tag [LICENSE.md](https://github.com/trycua/cua/blob/cua-driver-rs-v0.22.2/LICENSE.md)。 |
 | CUA Driver daemon（非 npm 包，Linux 配对） | 0.32.0 | MIT | Linux Runtime 前置条件；需与本平台 SDK 版本一致，由使用者单独取得，不随源码或 pnpm 安装交付。 | [CUA 0.32.0 官方 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.32.0) 与同 tag [LICENSE.md](https://github.com/trycua/cua/blob/cua-driver-rs-v0.32.0/LICENSE.md)。 |
 
+本仓库另保存基于 CUA 候选 `7852ab1983b60c0ce581b8736c9da13eaf04640a` 的 [Windows ComboBox 列表源码补丁](./patches/cua-driver/7852ab1-windows-owned-combo-popup.md)，并附[原生源码 MIT 许可](./patches/cua-driver/7852ab1-windows-owned-combo-popup.LICENSE.md)，Copyright (c) 2025 Cua AI, Inc.。此项只交付补丁，不包含 daemon 二进制，不改变 SDK／binding 的许可及上方平台版本配对。
+
 已安装的 Windows x64 binding 附带以下 `node-runtime-NOTICE.md` 声明。其余平台包未安装在本次审计主机上；它们的 metadata 已核对，具体 tarball 内文件仍需在向对应平台分发前逐包检查。
 
 > `cua_driver_node_runtime.node` is a compatibility build derived from the N-API runtime in `uniffi-bindgen-react-native` 0.31.0-3, copyright its contributors and licensed under the Mozilla Public License 2.0. The corresponding source is the pinned npm development dependency plus the deterministic transformations in `scripts/build-node-runtime.mjs`. The source and build script are available in the Cua repository at the release tag that matches this package.

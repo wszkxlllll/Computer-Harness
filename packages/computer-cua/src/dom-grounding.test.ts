@@ -42,6 +42,67 @@ describe("managed DOM grounding transport gate", () => {
     expect(materialized.privateElements.size).toBe(7);
   });
 
+  it("projects whole document blocks and native scroll geometry without clipping or slicing rejected nodes", () => {
+    const result = materializeDomGrounding(request, {
+      candidates: [], tabId: request.browserTarget.tabId, generation: request.browserTarget.generation,
+      coordinateSpace: "css", viewportMetrics: { cssWidth: 500, cssHeight: 350, deviceScaleFactor: 2 },
+      visibleDocument: {
+        source: "dom-document-v1", scope: "current-viewport", completeness: "partial", truncated: false,
+        blocks: [
+          { text: "Visible heading", frame: { x: 10, y: 20, width: 120, height: 25 } },
+          { text: "Partially outside", frame: { x: 480, y: 40, width: 40, height: 20 } },
+          { text: "x".repeat(481), frame: { x: 10, y: 80, width: 200, height: 30 } },
+          { text: "Later whole paragraph", frame: { x: 10, y: 120, width: 200, height: 30 } },
+        ],
+        scrollRegions: [
+          { frame: { x: 20, y: 160, width: 200, height: 150 }, scrollTop: 100, scrollHeight: 800, clientHeight: 150 },
+          { frame: { x: 240, y: 160, width: 200, height: 150 }, scrollTop: 900, scrollHeight: 800, clientHeight: 150 },
+        ],
+      },
+    }, 256, { x: 0, y: 100, width: 1000, height: 700 });
+    expect(result.catalog.visibleDocument).toMatchObject({
+      completeness: "partial", truncated: true,
+      blocks: [
+        { text: "Visible heading", bbox: { x: 20, y: 140, width: 240, height: 50, coordinateSpace: "physical" } },
+        { text: "Later whole paragraph", bbox: { x: 20, y: 340, width: 400, height: 60, coordinateSpace: "physical" } },
+      ],
+      scrollRegions: [{ bbox: { x: 40, y: 420, width: 400, height: 300, coordinateSpace: "physical" },
+        scrollTop: 100, scrollHeight: 800, clientHeight: 150 }],
+    });
+    expect(result.catalog.elements).toEqual([]);
+  });
+
+  it("omits document evidence on identity drift and never invents an empty coverage claim", () => {
+    const raw = {
+      candidates: [], tabId: request.browserTarget.tabId, generation: request.browserTarget.generation,
+      coordinateSpace: "css" as const, viewportMetrics: { cssWidth: 500, cssHeight: 350, deviceScaleFactor: 2 },
+      visibleDocument: { source: "dom-document-v1", scope: "current-viewport", completeness: "partial", truncated: false,
+        blocks: [{ text: "Current paragraph", frame: { x: 10, y: 10, width: 200, height: 30 } }], scrollRegions: [] },
+    };
+    const contentRect = { x: 0, y: 100, width: 1000, height: 700 };
+    expect(materializeDomGrounding(request, { ...raw, tabId: "other-tab" }, 256, contentRect).catalog.visibleDocument).toBeUndefined();
+    expect(materializeDomGrounding(request, { ...raw, generation: "other-document" }, 256, contentRect).catalog.visibleDocument).toBeUndefined();
+    expect(materializeDomGrounding(request, { ...raw, visibleDocument: { ...raw.visibleDocument, blocks: [] } }, 256, contentRect).catalog.visibleDocument).toBeUndefined();
+    expect(materializeDomGrounding(request, raw, 256, { ...contentRect, width: 900 }).catalog.visibleDocument).toBeUndefined();
+  });
+
+  it("enforces the document character budget by omitting entire blocks while retaining a later fitting node", () => {
+    const full = "a".repeat(479);
+    const result = materializeDomGrounding(request, {
+      candidates: [], tabId: request.browserTarget.tabId, generation: request.browserTarget.generation,
+      coordinateSpace: "css", viewportMetrics: { cssWidth: 500, cssHeight: 350, deviceScaleFactor: 2 },
+      visibleDocument: { source: "dom-document-v1", scope: "current-viewport", completeness: "partial", truncated: false,
+        blocks: [
+          ...Array.from({ length: 10 }, (_, index) => ({ text: full, frame: { x: 10, y: index * 20, width: 200, height: 18 } })),
+          { text: "This whole node cannot fit", frame: { x: 10, y: 210, width: 200, height: 18 } },
+          { text: "Final", frame: { x: 10, y: 240, width: 50, height: 18 } },
+        ], scrollRegions: [] },
+    }, 256, { x: 0, y: 100, width: 1000, height: 700 });
+    expect(result.catalog.visibleDocument?.blocks.map((block) => block.text)).toEqual([...Array(10).fill(full), "Final"]);
+    expect(result.catalog.visibleDocument?.truncated).toBe(true);
+    expect(result.catalog.visibleDocument?.limits).toEqual({ maxBlocks: 32, maxCharacters: 4800, maxBlockCharacters: 480, maxScrollRegions: 4 });
+  });
+
   it("keeps refs observation-bound and preserves screenshot fallback when transport is absent", async () => {
     const transport = createMockDomGroundingTransport({ candidates: [] });
     const first = await transport.collect(request, new AbortController().signal);

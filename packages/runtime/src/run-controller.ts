@@ -81,6 +81,7 @@ import { boundedRecoveryIntent, projectCurrentMonitorGuidance, projectMonitorCan
 import { canonicalizeSourceLinkedFinish, isWellFormedSourceLinkedFinishReport, validateSourceLinkedFinishContract } from "./source-linked-finish.js";
 
 const MAX_PROVIDER_RETRIES = 1;
+const MAX_LOCAL_BUDGET_RECOMPILES = 8;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
 const PROVIDER_RETRY_DELAY_CAP_MS = 5_000;
 // One HTTP deadline per attempt, plus the bounded delay for the sole retry.
@@ -781,7 +782,7 @@ export class RunController {
     return undefined;
   }
 
-  private async compileModelContext(goal: string): Promise<ModelInput> {
+  private async compileModelContext(goal: string, textTokenTarget?: number): Promise<ModelInput> {
     const recovery = this.isBoundWindowRecoveryActive();
     const currentWindow = this.currentWindowMetadata();
     const windowSwitchState = this.windowSwitchAvailable()
@@ -800,6 +801,7 @@ export class RunController {
         ? `${goal}\n\nHarness recovery control: the previously bound window was closed after a completed action. Use only the offered list_windows or switch_window control. Do not repeat the completed action or perform ordinary GUI work until a fresh observation is supplied.`
         : goal,
       recentEvents: recovery ? this.recoveryContextEvents() : this.events,
+      ...(textTokenTarget === undefined ? {} : { textTokenTarget }),
       ...(requestBudget === undefined ? {} : { requestBudget }),
       ...(wallClockBudget === undefined ? {} : { wallClockBudget }),
       enabledCategories: recovery ? ["side", "computer"] : [...this.enabledCategories],
@@ -947,6 +949,8 @@ export class RunController {
           const generatePrepared = this.provider.generatePrepared?.bind(this.provider);
           const canPrepareProvider = prepareProvider !== undefined && generatePrepared !== undefined;
           let prepared: PreparedProviderRequest | undefined;
+          let textTokenTarget: number | undefined;
+          let budgetRecompiles = 0;
           let retryCount = 0;
           let providerFailed = false;
           let decisionInvalidated = false;
@@ -961,7 +965,7 @@ export class RunController {
             if (compiledClosing !== this.closingDecision()) {
               compiledClosing = this.closingDecision();
               localRequestPreparation = true;
-              context = await this.compileModelContext(goal);
+              context = await this.compileModelContext(goal, textTokenTarget);
               localRequestPreparation = false;
               requestContext = retryCount > 0 && providerErrorDetails(retryError).retryMode !== "same_input"
                 ? addProviderRetryFeedback(context, retryError, retryCount, MAX_PROVIDER_RETRIES)
@@ -981,8 +985,14 @@ export class RunController {
             }
             if (canPrepareProvider && prepared === undefined) {
               localRequestPreparation = true;
-              prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
-              localRequestPreparation = false;
+              let preparationFailed = false;
+              let preparationError: unknown;
+              try {
+                prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+              } catch (error) {
+                preparationFailed = true;
+                preparationError = error;
+              }
               const afterPrepare = await this.drainCommands();
               this.throwIfAborted();
               if ((this.snapshot.status as string) === "paused" || afterPrepare.correction) {
@@ -994,6 +1004,20 @@ export class RunController {
                 break;
               }
               if (compiledClosing !== this.closingDecision()) continue;
+              if (preparationFailed) {
+                const nextTarget = preparationTextTarget(preparationError, requestContext, textTokenTarget);
+                if (nextTarget === undefined || budgetRecompiles >= MAX_LOCAL_BUDGET_RECOMPILES) throw preparationError;
+                textTokenTarget = nextTarget;
+                budgetRecompiles += 1;
+                // No request has started and no GUI action is replayed. Only
+                // Context may evict optional, complete history groups.
+                context = await this.compileModelContext(goal, textTokenTarget);
+                requestContext = retryCount > 0 && providerErrorDetails(retryError).retryMode !== "same_input"
+                  ? addProviderRetryFeedback(context, retryError, retryCount, MAX_PROVIDER_RETRIES)
+                  : context;
+                continue;
+              }
+              localRequestPreparation = false;
             }
             if (retryCount > 0) {
               const rejection = this.providerRetryRejectionReason(retryError, retryCount - 1, retryWindowStartedAt, 0);
@@ -1291,7 +1315,7 @@ export class RunController {
           });
           outcome = "outcome_unknown";
         } else {
-          const budgetBlocked = typeof error === "object" && error !== null && "code" in error && (error.code === "GLM_INPUT_TOO_LARGE" || error.code === "CONTEXT_INPUT_TOO_LARGE");
+          const budgetBlocked = isInputBudgetError(error);
           await this.commitEvent({
             type: "runtime.error",
             category: localRequestPreparation && budgetBlocked ? "budget" : "runtime",
@@ -1299,7 +1323,7 @@ export class RunController {
           });
           outcome = "failed";
         }
-        const budgetBlocked = typeof error === "object" && error !== null && "code" in error && (error.code === "GLM_INPUT_TOO_LARGE" || error.code === "CONTEXT_INPUT_TOO_LARGE");
+        const budgetBlocked = isInputBudgetError(error);
         outcome = await this.commitRunFinished({ outcome, ...(localRequestPreparation ? { summary: this.providerFailureProgressSummary(budgetBlocked ? "输入预算检查未通过，该请求未发送，任务完成未确认。" : "本地模型请求准备未完成，该请求未发送，任务完成未确认。") } : {}) });
       }
       return outcome;
@@ -4471,6 +4495,32 @@ function groundingBoxesOverlap(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isInputBudgetError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  return error.code === "CONTEXT_INPUT_TOO_LARGE" || error.code === "GLM_INPUT_TOO_LARGE" ||
+    error.code === "ARK_INPUT_TOO_LARGE" || error.code === "DEEPSEEK_INPUT_TOO_LARGE";
+}
+
+function preparationTextTarget(error: unknown, input: ModelInput, previousTarget: number | undefined): number | undefined {
+  if (!isInputBudgetError(error) || typeof error !== "object" || error === null || !("inputBudget" in error)) return undefined;
+  const feedback = error.inputBudget;
+  if (typeof feedback !== "object" || feedback === null || !("estimate" in feedback) || !("maxWireInputTokens" in feedback)) return undefined;
+  const estimate = feedback.estimate;
+  if (typeof estimate !== "object" || estimate === null || !("estimatedTotalTokens" in estimate) ||
+      !("estimationMethod" in estimate) || estimate.estimationMethod !== "provider_projection") return undefined;
+  const maxText = input.contextBudget?.maxInputTokens;
+  const maxWire = input.contextBudget?.maxWireInputTokens;
+  const compiledText = input.contextBudget?.estimatedInputTokens;
+  const estimatedWire = estimate.estimatedTotalTokens;
+  if (maxText === undefined || maxWire === undefined || compiledText === undefined || typeof estimatedWire !== "number" ||
+      !Number.isSafeInteger(maxText) || maxText < 1 || !Number.isSafeInteger(maxWire) || maxWire < maxText ||
+      !Number.isSafeInteger(compiledText) || compiledText < 1 || !Number.isSafeInteger(estimatedWire) ||
+      feedback.maxWireInputTokens !== maxWire || estimatedWire <= maxWire) return undefined;
+  const currentTarget = Math.min(maxText, previousTarget ?? maxText);
+  if (currentTarget <= 1) return undefined;
+  return Math.max(1, Math.min(currentTarget - 1, compiledText - (estimatedWire - maxWire)));
 }
 
 function providerErrorDetails(error: unknown): { code?: string; retryable?: boolean; retryMode?: "same_input" | "feedback" } {

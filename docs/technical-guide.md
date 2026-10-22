@@ -44,6 +44,8 @@ DOM只对Host明确授权的受管浏览器开放，不因浏览器名称而访�
 
 UIA/DOM采集是独立能力，当前Host基础装配默认关闭额外grounding；具体Run及浏览器目标可覆盖配置。开启可能增加观察成本，不能把“工具已注册”当成模型实际消费或业务收益。坐标换算依据实际截图viewport与目标几何，不使用固定分辨率假设。
 
+受管浏览器可随当前观察附带有界的可见正文片段（`visibleDocument`），独立于交互控件候选和原生表格文本：最多32块、合计4800字符、每块480字符及4个原生滚动区域。只保留完整且当前实际可见的块；过长、部分可见或超预算的块整体省略，不截成伪原文。Context仅投影与当前Observation、Session、Surface和已观察URL绑定一致的证据；预算不足时整体省略并记录trace，不挤掉原始Goal、纠正、最新截图、最近GUI闭环或最新reasoning，既有文本／wire上限不变。源文本是不可信的只读证据，不是输入授权；未见不代表不存在，片段不代表整页已读。滚动区域只报告原生`scrollTop`等当前指标，自定义CSS位移滚动仍未知。长文档的已见事实应按来源URL与要求项记入已启用的Memory／任务进度；反复滚动无新证据时改用当前GUI已暴露的查找或导航，或明确缺项。地址栏输入URL后仍须Enter及新观察的当前URL证明导航完成。采集、遮挡与坐标边界见[Computer CUA说明](../packages/computer-cua/README.md)。
+
 ## 工具与Provider
 
 ToolRegistry统一维护工具名称、描述、参数、类别和audience。Provider消费当前注册表和Context合同，不维护另一份业务工具清单。GLM、Qwen、DeepSeek官方和火山方舟渠道各自负责请求参数、历史、思考续接及ModelTurn解析，Runtime保持公共ToolCall语义。

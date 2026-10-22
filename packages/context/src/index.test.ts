@@ -4,10 +4,14 @@ import { estimateEventTokens } from "./budget.js";
 import type {
   AssetId,
   ActionId,
+  ActionIntent,
   ComputerSessionId,
   EventId,
+  GroundingCatalog,
+  GroundingVisibleDocument,
   MemoryState,
   ObservationId,
+  ObservationFrame,
   RunId,
   RunAssistantPreferencesSnapshot,
   RuntimeEvent,
@@ -17,6 +21,7 @@ import type {
   ToolCallId,
 } from "@computer-harness/protocol";
 import { createDefaultComputerTools, createDefaultToolRegistry, windowSwitchTools } from "@computer-harness/runtime";
+import type { ModelInput } from "@computer-harness/runtime";
 import { DefaultContextCompiler, selectMemoryForContext } from "./index.js";
 import { formatWindowSwitchState } from "./projections.js";
 
@@ -50,6 +55,43 @@ function observation(id: string) {
       byteLength: 1,
     },
   };
+}
+
+function documentObservation(id: string, text: string, scrollTop = 0): ObservationFrame {
+  const latest = observation(id);
+  return {
+    ...latest,
+    grounding: {
+      version: "grounding-catalog-v2",
+      source: "dom",
+      observationId: latest.id,
+      computerSessionId: latest.computerSessionId,
+      surfaceRef: latest.surfaceRef,
+      pageUrl: "https://example.test/guide",
+      completeness: "partial",
+      degraded: false,
+      maxElements: 16,
+      elements: [],
+      visibleDocument: {
+        source: "dom-document-v1",
+        scope: "current-viewport",
+        completeness: "partial",
+        truncated: false,
+        limits: { maxBlocks: 32, maxCharacters: 4800, maxBlockCharacters: 480, maxScrollRegions: 4 },
+        blocks: [{ text, bbox: { x: 40, y: 100, width: 600, height: 40, coordinateSpace: "physical" } }],
+        scrollRegions: [{
+          bbox: { x: 20, y: 80, width: 740, height: 480, coordinateSpace: "physical" },
+          scrollTop, scrollHeight: 2400, clientHeight: 480,
+        }],
+      },
+    },
+  };
+}
+
+function projectedDocument(input: ModelInput): (GroundingVisibleDocument & { observationId: ObservationId; pageUrl: string }) | undefined {
+  const block = input.messages.flatMap((message) => message.content).find((part) =>
+    part.type === "text" && part.text.includes('"source":"dom-document-v1"'));
+  return block?.type === "text" ? JSON.parse(block.text.split("\n").at(-1)!) : undefined;
 }
 
 describe("DefaultContextCompiler", () => {
@@ -553,6 +595,123 @@ describe("DefaultContextCompiler", () => {
     expect(input.contextBudget?.trace?.grounding).toMatchObject({ source: "hybrid", strategy: "bounded-fusion-v1", deduplicatedElementCount: 1, recovery: { reason: "no_observed_change", attempt: 1, localIntentSource: "user_correction" } });
   });
 
+  it("projects only the latest complete visible document blocks and native scroll metrics independently of interactive refs", async () => {
+    const first = documentObservation("document-before-scroll", "Opening paragraph — ９:００");
+    const latest = documentObservation("document-after-scroll", "Observed second section\nExact punctuation: ，；。", 400);
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools());
+    const input = await compiler.compile({
+      runId, goal: "Compare observed sections without guessing unobserved coverage",
+      recentEvents: [
+        event(0, { type: "observation.created", observation: first }),
+        event(1, { type: "observation.created", observation: latest }),
+      ],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    const projected = projectedDocument(input);
+    expect(projected).toEqual({
+      observationId: latest.id,
+      pageUrl: latest.grounding!.pageUrl,
+      surface: "desktop",
+      ...latest.grounding!.visibleDocument,
+    });
+    expect(projected?.blocks).toHaveLength(1);
+    expect(projected?.scrollRegions[0]?.scrollTop).toBe(400);
+    expect(JSON.stringify(input.messages)).not.toContain(first.grounding!.visibleDocument!.blocks[0]!.text);
+    expect(input.contextBudget?.trace?.visibleDocument).toMatchObject({
+      present: true, projected: true, truncated: false, completeness: "partial",
+      observationId: latest.id, candidateBlockCount: 1, projectedBlockCount: 1,
+      candidateScrollRegionCount: 1, projectedScrollRegionCount: 1,
+    });
+    expect(input.contextBudget?.trace?.visibleDocument?.estimatedTokens).toBeGreaterThan(0);
+    expect(input.messages.flatMap((message) => message.content).some((block) =>
+      block.type === "image" && block.asset.assetId === latest.screenshot.assetId)).toBe(true);
+  });
+
+  it.each([
+    ["observation", { observationId: "older-document" as ObservationId }],
+    ["session", { computerSessionId: "other-session" as ComputerSessionId }],
+    ["surface", { surfaceRef: { ...desktopSurfaceRef, surfaceId: "other-surface" as SurfaceId } }],
+    ["generation", { surfaceRef: { ...desktopSurfaceRef, generation: 2 } }],
+    ["surface kind", { surfaceRef: { ...desktopSurfaceRef, kind: "native_window" as const } }],
+    ["parent surface", { surfaceRef: { ...desktopSurfaceRef, parentSurfaceId: "other-parent" as SurfaceId } }],
+  ] satisfies readonly [string, Partial<GroundingCatalog>][])("omits visible document evidence with a mismatched %s", async (_name, patch) => {
+    const current = documentObservation("document-mismatch", "This fragment belongs to a different capture");
+    const latest = { ...current, grounding: { ...current.grounding!, ...patch } };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId, goal: "Read the current page",
+      recentEvents: [event(0, { type: "observation.created", observation: latest })],
+      latestObservation: latest,
+    }, new AbortController().signal);
+    expect(projectedDocument(input)).toBeUndefined();
+    expect(input.contextBudget?.trace?.visibleDocument).toMatchObject({
+      projected: false, projectedBlockCount: 0, projectedScrollRegionCount: 0,
+      omittedReason: "observation_mismatch",
+    });
+    expect(JSON.stringify(input.messages)).not.toContain(current.grounding!.visibleDocument!.blocks[0]!.text);
+  });
+
+  it.each([
+    ["different page", "https://example.test/other-guide"],
+    ["missing URL", undefined],
+    ["unproven URL", "file:///private/guide"],
+  ])("omits visible document evidence for a same-id shortcut with %s", async (_name, pageUrl) => {
+    const committed = documentObservation("document-url-mismatch", "Do not attribute this fragment to another URL");
+    const { pageUrl: _committedPageUrl, ...catalog } = committed.grounding!;
+    const shortcut = { ...committed, grounding: { ...catalog, ...(pageUrl === undefined ? {} : { pageUrl }) } };
+    const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({
+      runId, goal: "Read the current page",
+      recentEvents: [event(0, { type: "observation.created", observation: committed })],
+      latestObservation: shortcut,
+    }, new AbortController().signal);
+    expect(projectedDocument(input)).toBeUndefined();
+    expect(input.contextBudget?.trace?.visibleDocument).toMatchObject({
+      projected: false, projectedBlockCount: 0, omittedReason: "page_url_mismatch",
+    });
+  });
+
+  it("omits the entire visible document under budget without displacing Goal corrections latest GUI closure or current reasoning", async () => {
+    const latest = documentObservation("document-budget", "A complete paragraph that must not become a substring. ".repeat(8));
+    const before = observation("document-budget-before-scroll");
+    const guiCall = { id: "document-scroll" as ToolCallId, name: "scroll", arguments: { x: 400, y: 300, direction: "down", ticks: 2 } };
+    const reasoningCall = { id: "document-memory" as ToolCallId, name: "memory_write_fact", arguments: { key: "source gap", value: "not observed" } };
+    const guiAction: ActionIntent = {
+      actionId: "document-scroll-action" as ActionId, basedOn: before.id, kind: "scroll",
+      point: { x: 400, y: 300 }, direction: "down", ticks: 2,
+    };
+    const continuation = { providerId: "deepseek-v4.1-flash", kind: "reasoning_content" as const, content: "Retain exact current scoped reasoning" };
+    const goal = "Preserve all required original fields and sources";
+    const events = [
+      event(0, { type: "observation.created", observation: before }),
+      event(1, { type: "model.response.received", turn: { type: "tool_calls", calls: [guiCall] } }),
+      event(2, { type: "action.proposed", callId: guiCall.id, action: guiAction }),
+      event(3, { type: "action.execution.started", action: guiAction }),
+      event(4, { type: "action.execution.completed", receipt: { actionId: guiAction.actionId, status: "completed" } }),
+      event(5, { type: "tool.call.completed", result: { callId: guiCall.id, status: "completed", output: { scrolled: true } } }),
+      event(6, { type: "observation.created", observation: latest }),
+      event(7, { type: "user.input.received", text: "Retain the source applicability dates" }),
+      event(8, { type: "model.response.received", turn: { type: "tool_calls", calls: [reasoningCall], continuation } }),
+      event(9, { type: "tool.call.completed", result: { callId: reasoningCall.id, status: "completed", output: { factId: "document-fact" } } }),
+    ];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { maxInputTokens: 16_384, maxWireInputTokens: 24_576 });
+    const complete = await compiler.compile({ runId, goal, recentEvents: events, latestObservation: latest }, new AbortController().signal);
+    expect(projectedDocument(complete)?.blocks).toEqual(latest.grounding!.visibleDocument!.blocks);
+    const limited = await compiler.compile({ runId, goal, recentEvents: events, latestObservation: latest, textTokenTarget: 1 }, new AbortController().signal);
+    expect(projectedDocument(limited)).toBeUndefined();
+    expect(limited.contextBudget?.trace?.visibleDocument).toMatchObject({
+      projected: false, truncated: true, candidateBlockCount: 1, projectedBlockCount: 0, omittedReason: "budget",
+      estimatedTokens: complete.contextBudget!.trace!.visibleDocument!.estimatedTokens,
+    });
+    const blocks = limited.messages.flatMap((message) => message.content);
+    expect(blocks.some((block) => block.type === "text" && block.text === goal)).toBe(true);
+    expect(blocks.some((block) => block.type === "text" && block.text === "Retain the source applicability dates")).toBe(true);
+    expect(blocks.filter((block) => block.type === "tool_call").map((block) => block.call.id)).toEqual([guiCall.id, reasoningCall.id]);
+    expect(blocks.filter((block) => block.type === "tool_result").map((block) => block.result.callId)).toEqual([guiCall.id, reasoningCall.id]);
+    expect(blocks.some((block) => block.type === "provider_continuation" && block.continuation.content === continuation.content)).toBe(true);
+    expect(blocks.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId)).toBe(true);
+    expect(limited.contextBudget?.maxInputTokens).toBe(16_384);
+    expect(limited.contextBudget?.maxWireInputTokens).toBe(24_576);
+  });
+
   it("rejects a shortcut that disagrees with the latest observation event and honors cancellation", async () => {
     // Cancellation remains independent of browser readiness guidance.
     const latest = observation("obs-latest");
@@ -593,6 +752,38 @@ describe("DefaultContextCompiler", () => {
     ];
     const input = await new DefaultContextCompiler(createDefaultComputerTools()).compile({ runId, goal: "continue", recentEvents: events, latestObservation: first }, new AbortController().signal);
     expect(input.messages.some((message) => message.content.some((block) => block.type === "provider_continuation" && block.continuation.content === "keep this for GLM"))).toBe(true);
+  });
+
+  it("keeps the latest non-GUI reasoning turn and all its results at a soft selection floor", async () => {
+    const latest = observation("obs-reasoning-floor");
+    const calls = [
+      { id: "plan-one" as ToolCallId, name: "plan", arguments: { text: "revised plan" } },
+      { id: "plan-two" as ToolCallId, name: "progress", arguments: { text: "current status" } },
+    ];
+    const continuation = { providerId: "deepseek-v4.1-flash", kind: "reasoning_content" as const, content: "required current tool reasoning" };
+    const events: RuntimeEvent[] = [
+      event(0, { type: "observation.created", observation: latest }),
+      event(1, { type: "model.response.received", turn: { type: "finish", summary: "old optional text ".repeat(300) } }),
+      event(2, { type: "user.input.received", text: "Preserve the revised Goal." }),
+      event(3, { type: "model.response.received", turn: { type: "tool_calls", calls, continuation } }),
+      event(4, { type: "tool.call.completed", result: { callId: calls[0]!.id, status: "completed", output: { accepted: true } } }),
+      event(5, { type: "tool.call.completed", result: { callId: calls[1]!.id, status: "completed", output: { accepted: true } } }),
+    ];
+    const compiler = new DefaultContextCompiler(createDefaultComputerTools(), { maxInputTokens: 16_384, maxWireInputTokens: 24_576 });
+    const input = await compiler.compile({ runId, goal: "Current Goal", recentEvents: events, latestObservation: latest, textTokenTarget: 1 }, new AbortController().signal);
+    const blocks = input.messages.flatMap((message) => message.content);
+    expect(blocks.some((block) => block.type === "provider_continuation" && block.continuation.content === continuation.content)).toBe(true);
+    expect(blocks.filter((block) => block.type === "tool_call").map((block) => block.call.id)).toEqual(calls.map((call) => call.id));
+    expect(blocks.filter((block) => block.type === "tool_result").map((block) => block.result.callId)).toEqual(calls.map((call) => call.id));
+    expect(blocks.some((block) => block.type === "text" && block.text === "Preserve the revised Goal.")).toBe(true);
+    expect(blocks.some((block) => block.type === "text" && block.text.includes("old optional text"))).toBe(false);
+    expect(blocks.some((block) => block.type === "image" && block.asset.assetId === latest.screenshot.assetId)).toBe(true);
+    expect(input.contextBudget?.maxInputTokens).toBe(16_384);
+    expect(input.contextBudget?.maxWireInputTokens).toBe(24_576);
+    await expect(compiler.compile({
+      runId, goal: "Current Goal", recentEvents: events, latestObservation: latest,
+      context: { maxInputTokens: 100 }, textTokenTarget: 1,
+    }, new AbortController().signal)).rejects.toMatchObject({ code: "CONTEXT_INPUT_TOO_LARGE" });
   });
 
   it("injects the latest run plan after user corrections", async () => {

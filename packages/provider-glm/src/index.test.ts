@@ -108,6 +108,28 @@ describe("GLM provider adapter", () => {
     } }, { signal: new AbortController().signal })).rejects.toMatchObject({ code: "GLM_INPUT_TOO_LARGE" });
   });
 
+  it("reports the complete numeric projection on a local wire rejection and sends only an admitted preparation", async () => {
+    const client = new Client({ choices: [{ message: { content: "admitted" } }] });
+    const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
+    const signal = new AbortController().signal;
+    const measured = await adapter.prepare(input(), { signal });
+    const total = measured.estimate?.estimatedTotalTokens;
+    if (total === undefined) throw new Error("fixture has no complete projection estimate");
+    const value: ModelInput = {
+      ...input(),
+      contextBudget: { mode: "raw", estimatedInputTokens: 1, selectedHistoryEvents: 0, omittedHistoryEvents: 0, maxInputTokens: 100, maxWireInputTokens: total - 1 },
+    };
+    await expect(adapter.prepare(value, { signal })).rejects.toMatchObject({
+      code: "GLM_INPUT_TOO_LARGE",
+      inputBudget: { estimate: measured.estimate, maxWireInputTokens: total - 1 },
+    });
+    expect(client.postCount).toBe(0);
+    value.contextBudget!.maxWireInputTokens = total;
+    const admitted = await adapter.prepare(value, { signal });
+    await expect(adapter.generatePrepared(admitted, { signal })).resolves.toMatchObject({ type: "finish", summary: "admitted" });
+    expect(client.postCount).toBe(1);
+  });
+
   it("uses an immutable input snapshot when parsing a prepared response", async () => {
     const client = new Client({ choices: [{ message: { content: "", tool_calls: [{ id: "snapshot-call", function: { name: "click", arguments: JSON.stringify({ x: 400, y: 300 }) } }] } }] });
     const adapter = new GlmAdapter({ apiKey: "key", profile: normalizedProfile, assetReader: new Reader(), httpClient: client });
