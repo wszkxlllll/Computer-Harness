@@ -23,14 +23,14 @@
 
 ```bash
 # 1. 检查轨迹并生成本次证据锚点；没有人审时默认 inconclusive。
-node scripts/stage4-local/evaluate-trajectory.mjs \
+node scripts/history/2026-10-24/stage4-local/evaluate-trajectory.mjs \
   --trajectory <run-dir>/trajectory.jsonl \
   --manifest eval/candidates/medical/medical-d01-manifest.v0.json \
   --family query_department_campus --variant v1 \
   --output <workspace-output>/assessment-pending.json
 
 # 2. 操作者读取截图/页面真值和回执，独立填写人工复核文件，再重新评估。
-node scripts/stage4-local/evaluate-trajectory.mjs \
+node scripts/history/2026-10-24/stage4-local/evaluate-trajectory.mjs \
   --trajectory <run-dir>/trajectory.jsonl \
   --manifest eval/candidates/medical/medical-d01-manifest.v0.json \
   --family query_department_campus --variant v1 \
@@ -114,7 +114,7 @@ node scripts/stage4-local/evaluate-trajectory.mjs \
 ## 批量评估
 
 ```bash
-node scripts/stage4-local/batch-evaluate.mjs \
+node scripts/history/2026-10-24/stage4-local/batch-evaluate.mjs \
   --runs-root <runs-dir> --manifests <manifest-file-or-dir> \
   --family <id> --variant <id> --smoke --output-dir <workspace-output>/batch
 ```
@@ -128,4 +128,4 @@ node scripts/stage4-local/batch-evaluate.mjs \
 - 根TypeScript与CUA spike no-emit检查通过；实际CLI 4种导入组合通过，本地服务无外部网络请求。
 - 没有D01真实入口/GUI、页面真值自动采集、自动click grounding、人工评分一致性或真实任务校准验收。不加OCR/VLM依赖，不将安全初终态/文本启发式冒充已实现能力。
 
-回归命令：`node --test scripts/stage4-local/evaluate-trajectory.test.mjs`。
+回归命令：`node --test scripts/history/2026-10-24/stage4-local/evaluate-trajectory.test.mjs`。

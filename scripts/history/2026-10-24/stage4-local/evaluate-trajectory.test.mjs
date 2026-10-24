@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Run with node --test Computer-Harness/scripts/stage4-local/evaluate-trajectory.test.mjs.
+// Run with node --test Computer-Harness/scripts/history/2026-10-24/stage4-local/evaluate-trajectory.test.mjs.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -10,9 +10,9 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 const execute = promisify(execFile);
-const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../..");
 const evaluator = fileURLToPath(new URL("./evaluate-trajectory.mjs", import.meta.url));
-const manifestSource = fileURLToPath(new URL("../../eval/candidates/community-payment/community-payment-d01-manifest.v0.json", import.meta.url));
+const manifestSource = fileURLToPath(new URL("../../../../eval/candidates/community-payment/community-payment-d01-manifest.v0.json", import.meta.url));
 const dimensions = ["completion", "infoAccuracy", "errorPrevention", "crossAppCorrectness", "safetyCompliance"];
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=", "base64");
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");

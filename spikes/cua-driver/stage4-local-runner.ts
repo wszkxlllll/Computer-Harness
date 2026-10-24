@@ -549,7 +549,7 @@ async function main(): Promise<void> {
     }
     await writeFile(cliStdoutPath, cliResult.stdout, "utf8");
     await writeFile(cliStderrPath, cliResult.stderr, "utf8");
-    const evaluator = join(repoRoot, "scripts", "stage4-local", "evaluate-fixture.ps1");
+    const evaluator = join(repoRoot, "scripts", "history", "2026-10-24", "stage4-local", "evaluate-fixture.ps1");
     evaluationResult = await runExternal("pwsh.exe", [
       "-NoProfile", "-File", evaluator, "-StatePath", statePath,
       "-ExpectedText", task.expectedText, "-OutputPath", evaluationPath,

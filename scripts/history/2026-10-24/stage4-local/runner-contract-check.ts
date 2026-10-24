@@ -2,7 +2,7 @@ import {
   foregroundConfirmed,
   parseEvaluationResult,
   parseRuntimeResult,
-} from "../../spikes/cua-driver/stage4-local-runner.ts";
+} from "../../../../spikes/cua-driver/stage4-local-runner.ts";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);

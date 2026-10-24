@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { OsworldBridgeClient, OsworldComputer } from "../../packages/computer-osworld/dist/index.js";
+import { OsworldBridgeClient, OsworldComputer } from "../../../../packages/computer-osworld/dist/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -131,14 +131,14 @@ async function gitCommit(root) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
-    process.stdout.write("Usage: node scripts/stage5-osworld/gate2-computer.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <verified snapshot> --task-id <id> --action <wait|click|double_click|right_click|type|keypress|hotkey|scroll|drag> [--python python] [--vmrun-path <vmrun.exe>] [--x <n> --y <n>] [--to-x <n> --to-y <n>] [--text <text>] [--key <key>] [--keys CTRL,L] [--output <dir>]\n");
+    process.stdout.write("Usage: node scripts/history/2026-10-24/stage5-osworld/gate2-computer.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <verified snapshot> --task-id <id> --action <wait|click|double_click|right_click|type|keypress|hotkey|scroll|drag> [--python python] [--vmrun-path <vmrun.exe>] [--x <n> --y <n>] [--to-x <n> --to-y <n>] [--text <text>] [--key <key>] [--keys CTRL,L] [--output <dir>]\n");
     return;
   }
   const osworldRoot = resolve(required(argv, "--osworld-root"));
   const vmx = resolve(required(argv, "--path-to-vm"));
   const taskId = required(argv, "--task-id");
   const python = value(argv, "--python") ?? "python";
-  const bridgeScript = resolve(value(argv, "--bridge-script") ?? fileURLToPath(new URL("../../integrations/osworld/bridge.py", import.meta.url)));
+  const bridgeScript = resolve(value(argv, "--bridge-script") ?? fileURLToPath(new URL("../../../../integrations/osworld/bridge.py", import.meta.url)));
   const output = resolve(value(argv, "--output") ?? `runs/stage5-gate2-${Date.now()}`);
   await assertFreshOutput(output);
   const osworldCommit = await gitCommit(osworldRoot);

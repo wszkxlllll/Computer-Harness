@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { OsworldBridgeClient, OsworldComputer } from "../../packages/computer-osworld/dist/index.js";
+import { OsworldBridgeClient, OsworldComputer } from "../../../../packages/computer-osworld/dist/index.js";
 
 const execFileAsync = promisify(execFile);
 const ID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/giu;
@@ -79,7 +79,7 @@ function candidateIds(documentText, includeReserve, selectedLabels) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
-    process.stdout.write("Usage: node scripts/stage5-osworld/preflight-batch.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <name> --candidate-doc <path> --python <python> --vmrun-path <vmrun> --output <dir> [--include-reserve] [--labels V06,V07]\n");
+    process.stdout.write("Usage: node scripts/history/2026-10-24/stage5-osworld/preflight-batch.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <name> --candidate-doc <path> --python <python> --vmrun-path <vmrun> --output <dir> [--include-reserve] [--labels V06,V07]\n");
     return;
   }
   const osworldRoot = resolve(required(argv, "--osworld-root"));
@@ -96,7 +96,7 @@ async function main() {
   if (taskIds.length === 0) throw new Error("candidate document did not contain task IDs");
   await mkdir(output, { recursive: true });
   const osworldCommit = (await execFileAsync("git", ["-C", osworldRoot, "rev-parse", "HEAD"])).stdout.trim();
-  const bridgeScript = resolve(fileURLToPath(new URL("../../integrations/osworld/bridge.py", import.meta.url)));
+  const bridgeScript = resolve(fileURLToPath(new URL("../../../../integrations/osworld/bridge.py", import.meta.url)));
   const token = process.env.OSWORLD_BRIDGE_TOKEN;
   const child = spawn(python, [bridgeScript, "--osworld-root", osworldRoot, "--path-to-vm", vmx, "--snapshot-name", snapshotName, "--osworld-version", osworldCommit, "--vmrun-path", vmrunPath], {
     env: { ...process.env, ...(token === undefined ? {} : { OSWORLD_BRIDGE_TOKEN: token }) },

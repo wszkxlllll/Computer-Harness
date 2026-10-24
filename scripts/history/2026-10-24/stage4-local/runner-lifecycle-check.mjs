@@ -10,7 +10,7 @@ import vm from "node:vm";
 import ts from "typescript";
 
 const require = createRequire(import.meta.url);
-const filename = url.fileURLToPath(new URL("../../spikes/cua-driver/stage4-local-runner.ts", import.meta.url));
+const filename = url.fileURLToPath(new URL("../../../../spikes/cua-driver/stage4-local-runner.ts", import.meta.url));
 const source = readFileSync(filename, "utf8");
 const mainGuard = source.lastIndexOf("if (process.argv[1]");
 assert(mainGuard >= 0, "runner entry guard changed; update this test boundary");

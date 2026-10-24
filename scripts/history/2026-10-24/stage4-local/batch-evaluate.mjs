@@ -5,7 +5,7 @@
  * 逐份调用 evaluate-trajectory.mjs（D01 五维评分），汇总为 CSV + JSON 报告。
  *
  * Usage:
- *   node scripts/stage4-local/batch-evaluate.mjs \
+ *   node scripts/history/2026-10-24/stage4-local/batch-evaluate.mjs \
  *     [--runs-root <dir>]           # 默认 runs/（相对仓库根）
  *     [--manifests <dir-or-file>]   # 默认 eval/candidates（递归找 *.json）
  *     [--family <id>] [--variant <id>]  # 显式指定；缺省则从 manifest 取每个 family×variant 组合
@@ -28,8 +28,8 @@ import { dirname, join, relative, resolve, basename } from "path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const EVALUATOR_PATH = resolve(REPO_ROOT, "scripts/stage4-local/evaluate-trajectory.mjs");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const EVALUATOR_PATH = resolve(REPO_ROOT, "scripts/history/2026-10-24/stage4-local/evaluate-trajectory.mjs");
 
 // ---------------------------------------------------------------------------
 // CLI parsing

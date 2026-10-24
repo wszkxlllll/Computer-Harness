@@ -3,10 +3,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
-import { OsworldComputer } from "../packages/computer-osworld/dist/index.js";
-import { DefaultContextCompiler } from "../packages/context/dist/index.js";
-import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry } from "../packages/runtime/dist/index.js";
-import { FileAssetStore, JsonlRunEventWriter, readRuntimeEvents } from "../packages/trajectory/dist/index.js";
+import { OsworldComputer } from "../../../packages/computer-osworld/dist/index.js";
+import { DefaultContextCompiler } from "../../../packages/context/dist/index.js";
+import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry } from "../../../packages/runtime/dist/index.js";
+import { FileAssetStore, JsonlRunEventWriter, readRuntimeEvents } from "../../../packages/trajectory/dist/index.js";
 
 const WIDTH = 640;
 const HEIGHT = 360;
@@ -104,7 +104,7 @@ function makeOsworldBridge() {
 // computer-cua loads the native cua driver binding at module scope; import it
 // lazily so the osworld fixture also runs on hosts without that binding.
 async function loadCuaDriverComputer() {
-  const module = await import("../packages/computer-cua/dist/index.js");
+  const module = await import("../../../packages/computer-cua/dist/index.js");
   return module.CuaDriverComputer;
 }
 

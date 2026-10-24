@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { OsworldBridgeClient } from "../../packages/computer-osworld/dist/index.js";
+import { OsworldBridgeClient } from "../../../../packages/computer-osworld/dist/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -97,7 +97,7 @@ function positiveInteger(value, fallback, name) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
-    process.stdout.write("Usage: node scripts/stage5-osworld/run-task.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <verified snapshot> --task-id <id> [--model glm-5.3-flash|qwen3.8-flash] [--planning] [--max-steps <n>] [--max-model-requests <n>] [--qwen-coordinate-mode normalized_1000|actual_pixels] [--qwen-thinking disabled|low|medium|xhigh] [--qwen-output-mode native_tools|strict_json] [--cli <dist/index.js>] [--python python] [--vmrun-path <vmrun.exe>] [--output <dir>] [--env-file <path>]\n");
+    process.stdout.write("Usage: node scripts/history/2026-10-24/stage5-osworld/run-task.mjs --osworld-root <path> --path-to-vm <vmx> --snapshot-name <verified snapshot> --task-id <id> [--model glm-5.3-flash|qwen3.8-flash] [--planning] [--max-steps <n>] [--max-model-requests <n>] [--qwen-coordinate-mode normalized_1000|actual_pixels] [--qwen-thinking disabled|low|medium|xhigh] [--qwen-output-mode native_tools|strict_json] [--cli <dist/index.js>] [--python python] [--vmrun-path <vmrun.exe>] [--output <dir>] [--env-file <path>]\n");
     return;
   }
   const osworldRoot = resolve(required(argv, "--osworld-root"));
@@ -123,7 +123,7 @@ async function main() {
   const vmrunPath = value(argv, "--vmrun-path");
   const envFile = value(argv, "--env-file");
   const token = process.env.OSWORLD_BRIDGE_TOKEN;
-  const bridgeScript = resolve(value(argv, "--bridge-script") ?? fileURLToPath(new URL("../../integrations/osworld/bridge.py", import.meta.url)));
+  const bridgeScript = resolve(value(argv, "--bridge-script") ?? fileURLToPath(new URL("../../../../integrations/osworld/bridge.py", import.meta.url)));
   const bridge = spawn(python, [bridgeScript, "--osworld-root", osworldRoot, "--path-to-vm", vmx, "--snapshot-name", snapshotName, "--osworld-version", osworldCommit, ...(vmrunPath === undefined ? [] : ["--vmrun-path", resolve(vmrunPath)])], {
     env: { ...process.env, ...(token === undefined ? {} : { OSWORLD_BRIDGE_TOKEN: token }) },
     stdio: ["ignore", "pipe", "pipe"],

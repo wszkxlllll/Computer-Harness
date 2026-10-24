@@ -28,7 +28,7 @@ function parseArgs(argv) {
       output = argv[++i];
       if (!output) throw new Error("--output requires a JSON path");
     } else if (arg === "--help" || arg === "-h") {
-      process.stdout.write("Usage: node scripts/stage5-osworld/analyze-trajectory.mjs --root <runs-dir> [--root <runs-dir>] [--output <report.json>]\n");
+      process.stdout.write("Usage: node scripts/history/2026-10-24/stage5-osworld/analyze-trajectory.mjs --root <runs-dir> [--root <runs-dir>] [--output <report.json>]\n");
       process.exit(0);
     } else {
       throw new Error(`unknown argument: ${arg}`);

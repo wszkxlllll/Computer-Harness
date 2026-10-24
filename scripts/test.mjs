@@ -36,11 +36,11 @@ run(process.execPath, [
   "scripts/life-eval/supervision.test.mjs",
   "scripts/life-eval/summarize.test.mjs",
   "scripts/autonomous/batch-host.test.mjs",
-  "scripts/execution-segment-api-conformance-metrics.test.mjs",
+  "scripts/history/2026-10-24/execution-segment-api-conformance-metrics.test.mjs",
   "scripts/travel/metrics.test.mjs",
   "scripts/travel/travel.test.mjs",
   "scripts/travel/tui-collector.test.mjs",
   "scripts/travel/shanghai-pilot-policy.selftest.mjs",
   "scripts/voice/probe-qwen-asr.test.mjs",
-  "scripts/stage4-local/evaluate-trajectory.test.mjs",
+  "scripts/history/2026-10-24/stage4-local/evaluate-trajectory.test.mjs",
 ]);

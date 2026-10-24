@@ -181,7 +181,7 @@ new observation. The second observation is not a claim that an action happened.
 Create a disposable image on Windows:
 
 ```text
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-nonsensitive-fixture.ps1 -Output runs/api-conformance/non-sensitive-ui.png
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/history/2026-10-24/create-nonsensitive-fixture.ps1 -Output runs/api-conformance/non-sensitive-ui.png
 ```
 
 Run all providers whose keys are present in the selected environment file:
