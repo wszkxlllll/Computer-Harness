@@ -2,6 +2,8 @@
 
 手机用浏览器打开控制页面，电脑负责执行任务。电脑需要保持开机、联网，并停留在已登录的桌面；手机不用安装 App。
 
+本教程的安装版本固定为 `ca3ad4543cda7fe464048343addaa4b09d367f5e`。下方电脑端和 Relay 命令使用同一版本，完整复制即可。当前安装步骤覆盖 Windows；macOS 安装流程由平台成员后续补齐。
+
 两端通过一个 **Relay（中继服务）** 连接：电脑上的 Host 主动连到 Relay，手机也访问同一个 Relay。Host 运行在你要控制的电脑上；Relay 由团队管理员运行在有 HTTPS 地址的服务器上，可以供多台电脑使用。你的电脑不需要开放公网端口。
 
 先向提供服务的人领取三项连接资料：**Relay 的 HTTPS 地址、这台电脑的 Host ID、连接凭据**。这些资料由管理员准备，不需要使用者研究服务器配置。本项目目前没有向所有人开放的公共 Relay；团队自己的服务器也不是公共入口。如果你是第一次搭建服务的人，先完成本文末尾的[自行部署 Relay](#自行部署-relay)，然后回到下面的步骤。
@@ -17,10 +19,11 @@
 ```powershell
 git clone https://github.com/wszkxlllll/Computer-Harness.git
 Set-Location .\Computer-Harness
+git checkout --detach ca3ad4543cda7fe464048343addaa4b09d367f5e
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mobile.ps1
 ```
 
-已有源码时，在项目文件夹打开 PowerShell，只运行最后一行。准备程序会自动找到 Node、创建电脑配置、下载并校验与项目匹配的官方 CUA 驱动、安装锁定的依赖。它不会启动电脑控制任务。
+已有本教程版本的源码时，在项目文件夹打开 PowerShell，只运行最后一行。其他版本先与 Relay 维护者确认统一更新；已有代码修改时保留原目录，另建文件夹安装。准备程序会自动找到 Node、创建电脑配置、下载并校验与项目匹配的官方 CUA 驱动、安装锁定的依赖。它不会启动电脑控制任务。
 
 首次准备时，按顺序填写四项：
 
@@ -89,7 +92,7 @@ DASHSCOPE_WORKSPACE_ID=填入你的语音服务workspace_ID
 
 ### 已有配置怎么填写
 
-准备程序自动生成 `.harness.local.psd1` 中的 Node 路径；驱动位于 `.tools\cua-driver\0.22.2\bin\cua-driver.exe`。通常不用编辑这个文件。已有配置指向别处时，程序会保留原值；如果那个文件已不存在，按报错修正路径后再运行。
+准备程序首次运行时自动生成 `.harness.local.psd1` 中的 Node 路径；已有配置时优先使用其中的有效 `NodePath`，无需再次把 Node 加入 PATH。驱动位于 `.tools\cua-driver\0.22.2\bin\cua-driver.exe`。通常不用编辑这个文件。已有配置指向别处时，程序会保留原值；如果那个文件已不存在，按报错修正路径后再运行。
 
 已有 `.env` 不会被覆盖。需要补 Relay 连接资料时，在文件中填写下面四项；两个地址通常相同，ID 和凭据必须与管理员登记的完全一致：
 
@@ -137,14 +140,14 @@ Node 应安装在服务账号能执行的系统共享位置，如 `/usr/local/bi
 
 ### A. 下载并构建
 
-在服务器终端执行，`APPROVED_COMMIT` 换成实际准备交付的版本或完整 commit，与使用者电脑上的源码版本保持一致：
+在服务器终端执行。这里已固定为前文电脑端使用的同一版本，维护者无需另外选择提交。后续升级时统一更新电脑端和 Relay：
 
 ```sh
 test ! -e /opt/computer-harness || exit 1
 sudo install -d -o "$(id -un)" -g "$(id -gn)" /opt/computer-harness
 git clone https://github.com/wszkxlllll/Computer-Harness.git /opt/computer-harness
 cd /opt/computer-harness
-git checkout --detach APPROVED_COMMIT
+git checkout --detach ca3ad4543cda7fe464048343addaa4b09d367f5e
 node --version
 npm install --global pnpm@11.19.0
 pnpm install --frozen-lockfile

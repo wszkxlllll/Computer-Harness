@@ -313,7 +313,7 @@ Lightspeaker 基于开源 Computer-Use 技术，构建了连接手机交互、�
 项目源码、使用文档及授权声明的仓库入口如下：
 
 - 项目仓库：[Computer-Harness](https://github.com/wszkxlllll/Computer-Harness)。
-- 安装与使用：[开始使用](https://github.com/wszkxlllll/Computer-Harness/blob/main/docs/getting-started.md)。
+- Windows 安装与使用：[开始使用](https://github.com/wszkxlllll/Computer-Harness/blob/main/docs/getting-started.md)。
 - 系统实现：[技术文档](https://github.com/wszkxlllll/Computer-Harness/blob/main/docs/technical-guide.md)。
 - 项目许可：[LICENSE](https://github.com/wszkxlllll/Computer-Harness/blob/main/LICENSE)。
 - 第三方声明：[THIRD_PARTY_NOTICES](https://github.com/wszkxlllll/Computer-Harness/blob/main/THIRD_PARTY_NOTICES.md)。
