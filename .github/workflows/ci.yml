@@ -78,6 +78,15 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Windows setup script tests (PowerShell 5.1 and 7; offline)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-mobile.test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/setup-mobile.test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # The current root build script delegates to typecheck, and typecheck
       # emits the project references needed by the CLI. Run one pass only.
       - name: Typecheck and build

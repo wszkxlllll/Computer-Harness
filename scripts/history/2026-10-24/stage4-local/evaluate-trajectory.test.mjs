@@ -18,6 +18,19 @@ const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const explanation = "Operator inspected the synthetic before/after screenshots and action receipt.";
 
+async function createTestSymlink(t, target, path, type) {
+  try {
+    await symlink(target, path, type);
+    return true;
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES", "ENOSYS", "ENOTSUP"].includes(error.code)) {
+      t.skip("Windows host does not permit creating symbolic links");
+      return false;
+    }
+    throw error;
+  }
+}
+
 function observation(name) {
   return {
     type: "observation.created",
@@ -212,11 +225,13 @@ for (const inputName of ["trajectory", "manifestPath", "reviewPath"]) {
       let output;
       if (aliasKind === "parent directory symlink") {
         const parentAlias = join(f.directory, "parent-alias");
-        await symlink(dirname(input), parentAlias, "dir");
+        if (!await createTestSymlink(t, dirname(input), parentAlias, "dir")) return;
         output = join(parentAlias, basename(input));
       } else {
         output = join(f.directory, `alias-${inputName}-${aliasKind.replaceAll(" ", "-")}`);
-        if (aliasKind === "symlink") await symlink(input, output);
+        if (aliasKind === "symlink") {
+          if (!await createTestSymlink(t, input, output, "file")) return;
+        }
         else await link(input, output);
       }
       const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
@@ -242,11 +257,13 @@ for (const assetName of ["initial", "final"]) {
       if (aliasKind === "direct") output = asset;
       else if (aliasKind === "parent directory symlink") {
         const parentAlias = join(f.directory, `${assetName}-assets-alias`);
-        await symlink(dirname(asset), parentAlias, "dir");
+        if (!await createTestSymlink(t, dirname(asset), parentAlias, "dir")) return;
         output = join(parentAlias, basename(asset));
       } else {
         output = join(f.directory, `${assetName}-asset-${aliasKind}`);
-        if (aliasKind === "symlink") await symlink(asset, output);
+        if (aliasKind === "symlink") {
+          if (!await createTestSymlink(t, asset, output, "file")) return;
+        }
         else await link(asset, output);
       }
       const args = [evaluator, "--trajectory", f.trajectory, "--manifest", f.manifestPath,
@@ -538,12 +555,7 @@ test("asset symlink cannot escape the assets directory", async (t) => {
   const { f, review } = await prepared(t);
   await writeFile(join(f.directory, "outside.png"), png);
   await rm(join(f.directory, "assets", "final.png"));
-  try {
-    await symlink(join(f.directory, "outside.png"), join(f.directory, "assets", "final.png"), "file");
-  } catch (error) {
-    if (["EPERM", "EACCES", "ENOSYS"].includes(error.code)) { t.skip("Host does not permit creating file symlinks"); return; }
-    throw error;
-  }
+  if (!await createTestSymlink(t, join(f.directory, "outside.png"), join(f.directory, "assets", "final.png"), "file")) return;
   inconclusive(await f.invoke({ review }));
 });
 
