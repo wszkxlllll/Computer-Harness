@@ -64,15 +64,16 @@ Provider、Computer、Context、Planning 与 Run Memory 通过组件装配协作
 
 **电脑执行，手机掌握。** 手机使用Web界面，无需安装原生App。
 
-1. **准备电脑。** 按[开始使用](./docs/getting-started.md)安装基础环境，运行准备程序；它会自动配置 Node 路径、下载并校验官方 CUA 驱动、安装依赖。填写管理员提供的连接资料和自己的模型密钥即可。
-2. **连接手机。** Windows 电脑完成准备后，运行下方命令，打开电脑上的连接页面，手机扫码后在电脑确认。macOS 安装流程由 Mac 成员后续补齐，不使用 Windows 启动脚本。
+1. **下载。** 从 [v0.1.0-rc.1 版本页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.1)下载 **Source code (zip)** 并全部解压。Windows 电脑准备好 Node.js 和 Edge，进入含有 `package.json` 的文件夹，在地址栏输入 `powershell`。
+2. **准备并启动。** 按顺序运行下面两行，填写连接资料和模型密钥；准备程序自动配置路径、下载校验官方驱动并安装依赖。
 3. **交代任务。** 准备所需应用或网站登录状态，输入目标；在手机查看过程、补充条件并处理审批。
 
 ```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mobile.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
-需自备模型服务凭据；跨设备使用需可访问的HTTPS Relay，准备条件与配置集中在[开始使用](./docs/getting-started.md)。本仓库不提供个人账号、登录profile或公共无限额控制入口。
+启动后在电脑打开 [连接手机](http://localhost:4317/connect)，生成二维码，手机扫码后在电脑确认。完整的[开始使用](./docs/getting-started.md)集中说明 Node.js 安装、Relay 连接资料、语音和排错。当前源码预发布的用户安装流程覆盖 Windows，macOS 安装流程由平台成员补齐。
 
 ## 在真实生活中持续打磨
 
