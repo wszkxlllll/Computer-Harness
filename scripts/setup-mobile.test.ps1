@@ -93,6 +93,7 @@ try {
   $fakeNpx = Join-Path $testRoot 'npx.cmd'
   Write-NewUtf8File $fakeNpx "@echo off`r`necho fixture npx %*`r`nexit /b 0`r`n"
   $script:useNpx = $false
+  $script:hidePathNode = $false
   $script:promptValues = [Collections.Generic.Queue[string]]::new()
   $script:capturedPrompts = [Collections.Generic.List[string]]::new()
   foreach ($value in @('https://relay.example.com', 'fixture-host', ('secret_' + ('a' * 43)), 'fake_model_key_not_real')) { $script:promptValues.Enqueue($value) }
@@ -106,6 +107,7 @@ try {
   }
   function Get-Command {
     param([string] $Name, $CommandType, $ErrorAction)
+    if ($Name -eq 'node.exe' -and $script:hidePathNode) { return $null }
     if ($Name -eq 'pnpm.cmd') {
       if ($script:useNpx) { return $null }
       return [pscustomobject]@{ Source = $fakePnpm }
@@ -138,7 +140,14 @@ try {
   foreach ($relative in @('.env', '.harness.local.psd1', '.tools\cua-driver\0.22.2\bin\cua-driver.exe')) {
     $preserved[$relative] = (Get-FileHash -LiteralPath (Join-Path $fixtureRepo $relative)).Hash
   }
+  # A configured executable remains usable without a node.exe entry on PATH.
+  $script:hidePathNode = $true
   Invoke-MobileSetup $fixtureRepo | Out-Null
+  $freshRepo = Join-Path $testRoot 'fresh-without-path-node'
+  New-Item -ItemType Directory -Path $freshRepo | Out-Null
+  Assert-Throws { Invoke-MobileSetup $freshRepo } 'First setup without a configured or PATH Node should fail.'
+  Assert (-not (Test-Path -LiteralPath (Join-Path $freshRepo '.harness.local.psd1'))) 'Failed Node discovery wrote a configuration.'
+  $script:hidePathNode = $false
   foreach ($relative in $preserved.Keys) {
     Assert ((Get-FileHash -LiteralPath (Join-Path $fixtureRepo $relative)).Hash -eq $preserved[$relative]) 'Rerunning setup changed an existing private file or driver.'
   }

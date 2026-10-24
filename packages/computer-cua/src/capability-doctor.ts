@@ -10,6 +10,8 @@ const SDK_EXPECTATIONS = {
 const EXPECTED_TOOLS_LIST_SCHEMA_VERSION = "1";
 const EXPECTED_HEALTH_SCHEMA_VERSION = "1";
 const DEFAULT_DOCTOR_TIMEOUT_MS = 2_000;
+// CUA 0.22.2 CaptureScope.Desktop. Auto (the SDK default) starts window-scoped.
+const DOCTOR_DESKTOP_CAPTURE_SCOPE = 2;
 
 function sdkExpectations(sdkVersion: string): (typeof SDK_EXPECTATIONS)[keyof typeof SDK_EXPECTATIONS] | undefined {
   return SDK_EXPECTATIONS[sdkVersion as keyof typeof SDK_EXPECTATIONS];
@@ -152,7 +154,11 @@ export async function inspectCuaCapabilities(options: CuaCapabilityDoctorOptions
     return buildReport(metadata, inventory.check, unknownCheck("inventory_invalid"), unknownCheck("inventory_invalid"), unknownCheck("inventory_invalid"), cleanup, inventory.tools);
   }
 
-  const startOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.startSession(sdkModule.StartSessionInput.new({ session: sessionLabel }), { signal }));
+  const startOperation = await inspectOperation(timeoutMs, parentSignal, (signal) => driver.startSession(sdkModule.StartSessionInput.new({
+    session: sessionLabel,
+    ...(sdkExpectations(cuaSdkVersionForPlatform())?.desktopScopeRequired === true
+      ? { captureScope: DOCTOR_DESKTOP_CAPTURE_SCOPE } : {}),
+  }), { signal }));
   if (!startOperation.settled) {
     return buildReport(metadata, inventory.check, startOperation.check, unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), unknownCheck("operation_unsettled"), inventory.tools);
   }
@@ -357,7 +363,13 @@ function validateHealthReport(result: ToolResult | undefined, expectedDriverVers
   const value = parseStructured(result?.structuredJson);
   if (!isRecord(value) || value.schema_version !== EXPECTED_HEALTH_SCHEMA_VERSION || !isPlatform(value.platform) || typeof value.driver_version !== "string" || !isHealthOverall(value.overall) || !Array.isArray(value.checks) || value.checks.length === 0 || value.checks.some((check) => !isRecord(check) || typeof check.name !== "string" || check.name.trim().length === 0 || !isHealthCheckStatus(check.status))) return unknownCheck("health_schema");
   if (value.driver_version !== expectedDriverVersion) return unknownCheck("health_driver_version_mismatch");
-  const statuses = value.checks.map((check) => (check as Record<string, unknown>).status);
+  // The pinned Windows provider deliberately emits these macOS-only entries
+  // as skip("not applicable on Windows"). Other skips still mean degraded.
+  const applicableChecks = value.checks.filter((check) => !(value.platform === "win32" &&
+    check.status === "skip" && check.message === "not applicable on Windows" &&
+    ["bundle_identity", "tcc_accessibility", "tcc_screen_recording"].includes(check.name)));
+  if (applicableChecks.length === 0) return unknownCheck("health_checks_unverified");
+  const statuses = applicableChecks.map((check) => (check as Record<string, unknown>).status);
   if (statuses.includes("fail") || value.overall === "failed") return unknownCheck("health_failed");
   if (value.overall === "degraded") return { status: "degraded", reasonCode: "health_degraded" };
   if (statuses.includes("skip")) return { status: "degraded", reasonCode: "health_checks_skipped" };
@@ -370,6 +382,17 @@ function validatePermissionReport(result: ToolResult | undefined, sdkVersion: st
   const value = parseStructured(result?.structuredJson);
   if (sdkExpectations(sdkVersion)?.linuxPermissionSchema === true) {
     if (!isRecord(value) || typeof value.x11 !== "boolean" || typeof value.wayland !== "boolean" || typeof value.atspi !== "boolean") return unknownCheck("permission_schema");
+    return supportedCheck();
+  }
+  if (process.platform === "win32") {
+    // Windows 0.22.2 reports process integrity and input mechanisms, not macOS
+    // TCC grants. A normal, non-elevated desktop process is a valid setup.
+    if (!isRecord(value) || typeof value.elevated !== "boolean" || typeof value.integrity_level !== "string" ||
+        value.integrity_level.trim().length === 0 || !Number.isInteger(value.integrity_level_rid) ||
+        (value.integrity_level_rid as number) < 0 || typeof value.post_message !== "boolean" || typeof value.uia !== "boolean") {
+      return unknownCheck("permission_schema");
+    }
+    if (!value.post_message || !value.uia) return unknownCheck("permission_not_granted");
     return supportedCheck();
   }
   if (!isRecord(value) || typeof value.accessibility !== "boolean" || typeof value.screen_recording !== "boolean" || typeof value.source !== "string") return unknownCheck("permission_schema");

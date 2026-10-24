@@ -73,7 +73,7 @@ export function createHostServer(options: HostServerOptions): HostServerHandle {
     return new URL("/pair?token=" + encodeURIComponent(token), origin).toString();
   });
   const pairing = options.pairing ?? new PairingStore();
-  const server = fastify({ logger: false, bodyLimit: JSON_BODY_LIMIT, disableRequestLogging: true });
+  const server = fastify({ logger: false, bodyLimit: JSON_BODY_LIMIT });
   const bridgeSecret = randomBytes(32).toString("base64url");
   const pairingRate = new Map<string, { windowStartedAt: number; count: number }>();
   const pairingIdsByTokenHash = new Map<string, string>();

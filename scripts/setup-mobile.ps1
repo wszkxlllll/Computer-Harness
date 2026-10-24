@@ -89,20 +89,19 @@ function Install-VerifiedDriver([string] $Archive, [string] $ExpectedHash, [stri
 
 function Invoke-MobileSetup([string] $RepoRoot) {
   if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw '这个准备程序适用于 Windows。' }
-  $nodePath = $null
-  foreach ($candidate in @(Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue)) {
-    $nodeVersion = (& $candidate.Source -p 'process.versions.node').Trim()
-    if ($LASTEXITCODE -eq 0 -and [version] $nodeVersion -ge [version] '22.13.0') { $nodePath = $candidate.Source; break }
-  }
-  if ($null -eq $nodePath) {
-    throw '需要 Node.js 22.13.0 或更高版本。请从 https://nodejs.org/en/download 安装 Node.js 24 LTS，重新打开 PowerShell 后再运行准备命令。'
-  }
-
   $configPath = Join-Path $RepoRoot '.harness.local.psd1'
   if (Test-Path -LiteralPath $configPath) {
     $config = Import-PowerShellDataFile -LiteralPath $configPath
     Write-Output '已保留原来的电脑配置（.harness.local.psd1）。'
   } else {
+    $nodePath = $null
+    foreach ($candidate in @(Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+      $nodeVersion = (& $candidate.Source -p 'process.versions.node').Trim()
+      if ($LASTEXITCODE -eq 0 -and [version] $nodeVersion -ge [version] '22.13.0') { $nodePath = $candidate.Source; break }
+    }
+    if ($null -eq $nodePath) {
+      throw '需要 Node.js 22.13.0 或更高版本。请从 https://nodejs.org/en/download 安装 Node.js 24 LTS，重新打开 PowerShell 后再运行准备命令。'
+    }
     $template = [IO.File]::ReadAllText((Join-Path $RepoRoot '.harness.local.example.psd1'), [Text.Encoding]::UTF8)
     $template = $template.Replace("NodePath = 'C:\path\to\node.exe'", "NodePath = '$($nodePath.Replace("'", "''"))'")
     # Windows PowerShell 5.1 needs the BOM to read non-ASCII machine paths.
