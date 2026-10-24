@@ -181,16 +181,14 @@ function Invoke-MobileSetup([string] $RepoRoot) {
   try {
     # Only this process and its children use the selected Node; restore on exit.
     $env:PATH = (Split-Path -Parent $configuredNode) + [IO.Path]::PathSeparator + $previousPath
-    $pnpm = Get-Command pnpm.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    $pnpmMatches = $false
-    if ($null -ne $pnpm) { $pnpmMatches = ((& $pnpm.Source --version) -join '').Trim() -eq '11.19.0' }
     Write-Output '正在安装项目需要的依赖，请稍候……'
-    if ($pnpmMatches) { & $pnpm.Source install --frozen-lockfile }
-    else {
-      $npx = Get-Command npx.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($null -eq $npx) { throw '找不到 npx.cmd。请修复 Node.js 安装，重新打开 PowerShell 后再运行准备命令。' }
-      & $npx.Source --yes pnpm@11.19.0 install --frozen-lockfile
-    }
+    $npx = Get-Command npx.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $npx) { throw '找不到 npx.cmd。请修复 Node.js 安装，重新打开 PowerShell 后再运行准备命令。' }
+    $npxEntry = Join-Path (Split-Path -Parent $npx.Source) 'node_modules\npm\bin\npx-cli.js'
+    if (-not (Test-Path -LiteralPath $npxEntry -PathType Leaf)) { throw '找不到 npm 的运行文件。请安装完整的 Node.js 后重试。' }
+    # npx.cmd can force its sibling (older) node.exe despite our PATH. Run the
+    # CLI with the validated executable so installation and startup agree.
+    & $configuredNode $npxEntry --yes pnpm@11.19.0 install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw '依赖安装失败。请检查上面的网络或下载错误，处理后重新运行准备命令。' }
     & (Join-Path $RepoRoot 'scripts\mobile.ps1') -Command check
   } finally { $env:PATH = $previousPath; Pop-Location }

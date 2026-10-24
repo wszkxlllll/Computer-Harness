@@ -64,7 +64,7 @@ Provider、Computer、Context、Planning 与 Run Memory 通过组件装配协作
 
 **电脑执行，手机掌握。** 手机使用Web界面，无需安装原生App。
 
-1. **下载。** 从 [v0.1.0-rc.1 版本页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.1)下载 **Source code (zip)** 并全部解压。Windows 电脑准备好 Node.js 和 Edge，进入含有 `package.json` 的文件夹，在地址栏输入 `powershell`。
+1. **下载。** 从 [v0.1.0-rc.2 版本页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)下载 **Source code (zip)** 并全部解压。Windows 电脑准备好 Node.js 和 Edge，进入含有 `package.json` 的文件夹，在地址栏输入 `powershell`。
 2. **准备并启动。** 按顺序运行下面两行，填写连接资料和模型密钥；准备程序自动配置路径、下载校验官方驱动并安装依赖。
 3. **交代任务。** 准备所需应用或网站登录状态，输入目标；在手机查看过程、补充条件并处理审批。
 

@@ -2,7 +2,7 @@
 
 手机用浏览器打开控制页面，电脑负责执行任务。电脑需要保持开机、联网，并停留在已登录的桌面；手机不用安装 App。
 
-本教程对应 [Lightspeaker v0.1.0-rc.1 源码预发布](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.1)。电脑端和 Relay 使用这一版本，按下面步骤安装即可。当前安装步骤覆盖 Windows；macOS 安装流程由平台成员后续补齐。
+本教程对应 [Lightspeaker v0.1.0-rc.2 源码预发布](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)。电脑端和 Relay 使用这一版本，按下面步骤安装即可。当前安装步骤覆盖 Windows；macOS 安装流程由平台成员后续补齐。
 
 两端通过一个 **Relay（中继服务）** 连接：电脑上的 Host 主动连到 Relay，手机也访问同一个 Relay。Host 运行在你要控制的电脑上；Relay 由团队管理员运行在有 HTTPS 地址的服务器上，可以供多台电脑使用。你的电脑不需要开放公网端口。
 
@@ -14,7 +14,7 @@
 
 电脑需已安装 [Node.js 24 LTS](https://nodejs.org/en/download) 和 Microsoft Edge。已有 Node.js 22.13.0 或更高版本可以继续使用。使用下面的 ZIP 下载方式无需安装 Git。
 
-1. 打开[版本下载页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.1)，在 **Assets** 中下载 **Source code (zip)**。
+1. 打开[版本下载页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)，在 **Assets** 中下载 **Source code (zip)**。
 2. 将 ZIP **全部解压**到自己容易找到的位置，例如 `C:\Lightspeaker`。不要直接在压缩包里运行。
 3. 进入同时包含 `package.json` 和 `scripts` 文件夹的那一层，在资源管理器地址栏输入 `powershell` 并回车。
 4. 复制运行以下准备命令：
@@ -78,7 +78,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Co
 **开发者通过 Git 下载。** 安装 Git 后可用以下命令取得同一版本，再按前文运行准备程序：
 
 ```powershell
-git clone --branch v0.1.0-rc.1 --depth 1 https://github.com/wszkxlllll/Computer-Harness.git
+git clone --branch v0.1.0-rc.2 --depth 1 https://github.com/wszkxlllll/Computer-Harness.git
 Set-Location .\Computer-Harness
 ```
 
@@ -100,6 +100,8 @@ DASHSCOPE_WORKSPACE_ID=填入你的语音服务workspace_ID
 **更换模型。** 默认使用 GLM。需要 Qwen 时，把 `.harness.local.psd1` 中的 `Model` 改为 `qwen3.8-flash`，并在 `.env` 填写 `DASHSCOPE_API_KEY`，然后重启。
 
 ### 已有配置怎么填写
+
+源码内提供 [.env.example](../.env.example) 和 [.harness.local.example.psd1](../.harness.local.example.psd1)。准备程序会自动生成实际文件；只有手动配置时才需要复制模板并填写。模板不包含任何人的密钥或本机路径。
 
 准备程序首次运行时自动生成 `.harness.local.psd1` 中的 Node 路径；已有配置时优先使用其中的有效 `NodePath`，无需再次把 Node 加入 PATH。驱动位于 `.tools\cua-driver\0.22.2\bin\cua-driver.exe`。通常不用编辑这个文件。已有配置指向别处时，程序会保留原值；如果那个文件已不存在，按报错修正路径后再运行。
 
@@ -143,7 +145,7 @@ macOS 的启动与权限准备由 Mac 成员补充、实机核对；上面的 `.
 
 这一节由**服务维护者**完成一次。服务上线后，每位使用者只需领取连接资料，按前面的 Windows 步骤操作。Relay 负责连接和转发，不运行模型；Host 和 CUA 仍在使用者的电脑上。Relay 运营方能接触经它转发的任务和截图，应由使用者信任的人维护。
 
-服务器需有 Git、[Node.js 24 LTS](https://nodejs.org/en/download)（最低 22.13.0）和 systemd。新服务器使用域名和 Caddy；已有 Nginx、有效 HTTPS 证书的服务器可以复用，D 步选择对应方式即可，无需另买域名。下方使用独立的 `lightspeaker-rc1` 目录与服务，以及本机端口 8789。
+服务器需有 Git、[Node.js 24 LTS](https://nodejs.org/en/download)（最低 22.13.0）和 systemd。新服务器使用域名和 Caddy；已有 Nginx、有效 HTTPS 证书的服务器可以复用，D 步选择对应方式即可，无需另买域名。下方使用独立的 `lightspeaker-rc2` 目录与服务，以及本机端口 8789。
 
 Node 应安装在服务账号能执行的系统共享位置，如 `/usr/local/bin` 或 `/opt`；下方服务隔离配置不能访问个人 home 目录里的 Node。
 
@@ -152,11 +154,11 @@ Node 应安装在服务账号能执行的系统共享位置，如 `/usr/local/bi
 在服务器终端执行。这里已固定为前文电脑端使用的同一版本，维护者无需另外选择提交。后续升级时统一更新电脑端和 Relay：
 
 ```sh
-test ! -e /opt/lightspeaker-rc1 || exit 1
-sudo install -d -o "$(id -un)" -g "$(id -gn)" /opt/lightspeaker-rc1
-git clone https://github.com/wszkxlllll/Computer-Harness.git /opt/lightspeaker-rc1
-cd /opt/lightspeaker-rc1
-git checkout --detach v0.1.0-rc.1
+test ! -e /opt/lightspeaker-rc2 || exit 1
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /opt/lightspeaker-rc2
+git clone https://github.com/wszkxlllll/Computer-Harness.git /opt/lightspeaker-rc2
+cd /opt/lightspeaker-rc2
+git checkout --detach v0.1.0-rc.2
 node --version
 npm install --global pnpm@11.19.0
 pnpm install --frozen-lockfile
@@ -171,24 +173,24 @@ pnpm --filter @computer-harness/web build
 先创建专用服务账号和配置目录：
 
 ```sh
-sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin lightspeaker-relay-rc1
-sudo install -d -o lightspeaker-relay-rc1 -g lightspeaker-relay-rc1 -m 0700 /etc/lightspeaker-rc1
+sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin lightspeaker-relay-rc2
+sudo install -d -o lightspeaker-relay-rc2 -g lightspeaker-relay-rc2 -m 0700 /etc/lightspeaker-rc2
 ```
 
 将下面的地址替换为手机实际访问的 HTTPS 地址。若在已有 Nginx 上使用独立的 8444 端口，就填写 `https://你的域名或IP:8444`，证书必须覆盖这个域名或 IP。命令会生成独立的 Host ID 和连接凭据；已有配置时拒绝覆盖：
 
 ```sh
 relay_node="$(command -v node)"
-sudo -u lightspeaker-relay-rc1 env RELAY_PUBLIC_ORIGIN=https://relay.example.com "$relay_node" --input-type=module -e '
+sudo -u lightspeaker-relay-rc2 env RELAY_PUBLIC_ORIGIN=https://relay.example.com "$relay_node" --input-type=module -e '
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 const config = {
   publicOrigin: process.env.RELAY_PUBLIC_ORIGIN,
   listen: { host: "127.0.0.1", port: 8789 },
-  webRoot: "/opt/lightspeaker-rc1/apps/web/dist",
+  webRoot: "/opt/lightspeaker-rc2/apps/web/dist",
   hostCredentials: [{ hostId: randomBytes(12).toString("hex"), credential: randomBytes(32).toString("base64url") }]
 };
-writeFileSync("/etc/lightspeaker-rc1/relay-config.json", JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
+writeFileSync("/etc/lightspeaker-rc2/relay-config.json", JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
 '
 ```
 
@@ -196,7 +198,7 @@ writeFileSync("/etc/lightspeaker-rc1/relay-config.json", JSON.stringify(config, 
 
 ### C. 让 Relay 常驻运行
 
-先运行 `command -v node` 找到 Node 的绝对路径。将以下内容保存为 `/etc/systemd/system/lightspeaker-relay-rc1.service`，把 `ExecStart` 中的 `/usr/bin/node` 换成刚查到的路径；该路径及源码目录需允许专用服务账号读取和执行。
+先运行 `command -v node` 找到 Node 的绝对路径。将以下内容保存为 `/etc/systemd/system/lightspeaker-relay-rc2.service`，把 `ExecStart` 中的 `/usr/bin/node` 换成刚查到的路径；该路径及源码目录需允许专用服务账号读取和执行。
 
 ```ini
 [Unit]
@@ -206,11 +208,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=lightspeaker-relay-rc1
-Group=lightspeaker-relay-rc1
-WorkingDirectory=/opt/lightspeaker-rc1
-Environment=RELAY_CONFIG_FILE=/etc/lightspeaker-rc1/relay-config.json
-ExecStart=/usr/bin/node /opt/lightspeaker-rc1/apps/relay/dist/index.js
+User=lightspeaker-relay-rc2
+Group=lightspeaker-relay-rc2
+WorkingDirectory=/opt/lightspeaker-rc2
+Environment=RELAY_CONFIG_FILE=/etc/lightspeaker-rc2/relay-config.json
+ExecStart=/usr/bin/node /opt/lightspeaker-rc2/apps/relay/dist/index.js
 Restart=on-failure
 RestartSec=3
 UMask=0077
@@ -227,8 +229,8 @@ WantedBy=multi-user.target
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now lightspeaker-relay-rc1
-sudo systemctl status --no-pager lightspeaker-relay-rc1
+sudo systemctl enable --now lightspeaker-relay-rc2
+sudo systemctl status --no-pager lightspeaker-relay-rc2
 ```
 
 ### D. 开通手机使用的 HTTPS 地址
@@ -251,7 +253,7 @@ sudo systemctl reload caddy
 curl --fail --show-error https://relay.example.com/healthz
 ```
 
-**已有 Nginx 和证书。** 无需安装 Caddy。将下面配置保存为独立的 `/etc/nginx/conf.d/lightspeaker-rc1.conf`，替换域名或 IP、证书和私钥路径，并放行外部端口 8444：
+**已有 Nginx 和证书。** 无需安装 Caddy。将下面配置保存为独立的 `/etc/nginx/conf.d/lightspeaker-rc2.conf`，替换域名或 IP、证书和私钥路径，并放行外部端口 8444：
 
 ```nginx
 server {
@@ -276,6 +278,6 @@ server {
 
 8789 保持仅本机监听。手机打开配置的 HTTPS 地址应能看到页面且没有证书警告；再按前文扫码、经电脑确认并发起简单任务，完成连接验证。
 
-维护时使用 `sudo systemctl restart lightspeaker-relay-rc1` 重启，使用 `sudo journalctl -u lightspeaker-relay-rc1 -n 50 --no-pager` 查看近期错误。Relay 重启会清空配对会话，手机需要重新扫码。
+维护时使用 `sudo systemctl restart lightspeaker-relay-rc2` 重启，使用 `sudo journalctl -u lightspeaker-relay-rc2 -n 50 --no-pager` 查看近期错误。Relay 重启会清空配对会话，手机需要重新扫码。
 
 </details>

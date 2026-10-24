@@ -83,16 +83,16 @@ try {
   Assert-Throws { Install-VerifiedDriver $archive $fixtureHash $extracted } 'Extraction overwrote an existing executable.'
 
   # End-to-end preparation with inert dependency and download substitutes.
-  # The real installed Node is used only for process.versions.node.
+  # The real installed Node runs only version checks and an inert npm fixture.
   $fixtureRepo = Join-Path $testRoot ('repo-' + $unicodeText)
   New-Item -ItemType Directory -Path (Join-Path $fixtureRepo 'scripts') -Force | Out-Null
   Copy-Item -LiteralPath (Join-Path $repoRoot '.harness.local.example.psd1') -Destination $fixtureRepo
   Write-NewUtf8File (Join-Path $fixtureRepo 'scripts\mobile.ps1') 'param($Command) if ($Command -ne "check") { throw "Unexpected launch" }; Write-Output "Fixture configuration check."'
-  $fakePnpm = Join-Path $testRoot 'pnpm.cmd'
-  Write-NewUtf8File $fakePnpm "@echo off`r`nif `"%1`"==`"--version`" (echo 11.19.0) else (echo fixture install %*)`r`nexit /b 0`r`n"
   $fakeNpx = Join-Path $testRoot 'npx.cmd'
-  Write-NewUtf8File $fakeNpx "@echo off`r`necho fixture npx %*`r`nexit /b 0`r`n"
-  $script:useNpx = $false
+  Write-NewUtf8File $fakeNpx "@echo off`r`nexit /b 99`r`n"
+  $fakeNpxEntry = Join-Path $testRoot 'node_modules\npm\bin\npx-cli.js'
+  New-Item -ItemType Directory -Path (Split-Path -Parent $fakeNpxEntry) -Force | Out-Null
+  Write-NewUtf8File $fakeNpxEntry 'console.log("fixture npx " + process.argv.slice(2).join(" ")); console.log("fixture node " + process.execPath);'
   $script:hidePathNode = $false
   $script:promptValues = [Collections.Generic.Queue[string]]::new()
   $script:capturedPrompts = [Collections.Generic.List[string]]::new()
@@ -108,10 +108,6 @@ try {
   function Get-Command {
     param([string] $Name, $CommandType, $ErrorAction)
     if ($Name -eq 'node.exe' -and $script:hidePathNode) { return $null }
-    if ($Name -eq 'pnpm.cmd') {
-      if ($script:useNpx) { return $null }
-      return [pscustomobject]@{ Source = $fakePnpm }
-    }
     if ($Name -eq 'npx.cmd') { return [pscustomobject]@{ Source = $fakeNpx } }
     return Microsoft.PowerShell.Core\Get-Command -Name $Name -CommandType $CommandType -ErrorAction $ErrorAction
   }
@@ -133,6 +129,7 @@ try {
   Assert ($output -match '[\u4E00-\u9FFF]' -and $output -notmatch '\?{2,}|\uFFFD') 'Chinese setup output was corrupted.'
   $config = Import-PowerShellDataFile -LiteralPath (Join-Path $fixtureRepo '.harness.local.psd1')
   Assert (Test-Path -LiteralPath $config.NodePath -PathType Leaf) 'Node executable was not detected.'
+  Assert ($output -match [regex]::Escape("fixture node $($config.NodePath)")) 'Installation did not use the configured Node executable.'
   $writtenEnv = [IO.File]::ReadAllText((Join-Path $fixtureRepo '.env'), [Text.UTF8Encoding]::new($false, $true))
   Assert ($writtenEnv.Contains('HARNESS_RELAY_PUBLIC_ORIGIN=https://relay.example.com')) 'Relay public origin was not generated.'
   Assert ($writtenEnv.Contains('ZHIPUAI_API_KEY=fake_model_key_not_real')) 'Model key was not generated correctly.'
@@ -151,12 +148,9 @@ try {
   foreach ($relative in $preserved.Keys) {
     Assert ((Get-FileHash -LiteralPath (Join-Path $fixtureRepo $relative)).Hash -eq $preserved[$relative]) 'Rerunning setup changed an existing private file or driver.'
   }
-  $script:useNpx = $true
   $fallbackOutput = (Invoke-MobileSetup $fixtureRepo | Out-String)
   Assert ($fallbackOutput.Contains('fixture npx --yes pnpm@11.19.0 install --frozen-lockfile')) 'npx fallback did not pin pnpm or preserve the lockfile.'
-  $failedNpx = Join-Path $testRoot 'failed-npx.cmd'
-  Write-NewUtf8File $failedNpx "@echo off`r`nexit /b 17`r`n"
-  $fakeNpx = $failedNpx
+  [IO.File]::WriteAllText($fakeNpxEntry, 'process.exit(17);', [Text.UTF8Encoding]::new($false))
   Assert-Throws { Invoke-MobileSetup $fixtureRepo } 'Dependency installation failure was ignored.'
   Assert ($env:PATH -eq $pathBeforeSetup) 'A failed install did not restore the process PATH.'
   Write-Output 'PASS: UTF-8 BOM/Chinese prompts, Chinese repository path, atomic failed-write cleanup/retry, no overwrite, origin/secret validation, release mapping, checksum rejection, safe extraction, offline setup, secret redaction, rerun preservation, pinned npx fallback, failed install/PATH restoration.'
