@@ -1,6 +1,6 @@
 # 历史资料
 
-这里保存旧方案、详细题卡、评分依据、逐次运行、审计、平台验证和部署记录。它们用于追溯，不是用户安装或使用产品的额外步骤。当前入口为[开始使用](../getting-started.md)、[技术文档](../technical-guide.md)、[真实任务案例](../real-task-cases.md)和[提交材料](../submission/README.md)。
+这里保存旧方案、详细题卡、评分依据、逐次运行、审计、平台验证和部署记录。它们用于追溯，不是用户安装或使用产品的额外步骤。当前入口为[开始使用](../getting-started.md)、[技术文档](../technical-guide.md)、[真实任务案例](../submission/real-task-cases.md)和[提交材料](../submission/README.md)。
 
 - [2026-10-20产品文档收敛](./2026-10-20-product-docs/README.md)：原docs剩余阶段文档、任务依据、协作资料及附件。
 - [2026-10-20首轮归档](./2026-10-20-release-convergence/README.md)：此前阶段计划、审查和运行证据。

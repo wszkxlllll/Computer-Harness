@@ -64,12 +64,12 @@ Provider、Computer、Context、Planning 与 Run Memory 通过组件装配协作
 
 **电脑执行，手机掌握。** 手机使用Web界面，无需安装原生App。
 
-1. **准备电脑。** 按[安装与配置指南](./docs/getting-started.md)准备Node.js、pnpm、匹配的CUA驱动及模型凭据，完成本机配置。当前产品面向Windows和macOS。
-2. **连接手机。** Windows用户按同一份[开始使用](./docs/getting-started.md)完成本机配置和HTTPS Relay连接后，运行下方命令，再扫码配对。macOS安装流程由Mac成员后续补齐，不使用Windows启动脚本。
+1. **准备电脑。** 按[开始使用](./docs/getting-started.md)安装基础环境，运行准备程序；它会自动配置 Node 路径、下载并校验官方 CUA 驱动、安装依赖。填写管理员提供的连接资料和自己的模型密钥即可。
+2. **连接手机。** Windows 电脑完成准备后，运行下方命令，打开电脑上的连接页面，手机扫码后在电脑确认。macOS 安装流程由 Mac 成员后续补齐，不使用 Windows 启动脚本。
 3. **交代任务。** 准备所需应用或网站登录状态，输入目标；在手机查看过程、补充条件并处理审批。
 
 ```powershell
-.\scripts\mobile.ps1 start -Build
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
 需自备模型服务凭据；跨设备使用需可访问的HTTPS Relay，准备条件与配置集中在[开始使用](./docs/getting-started.md)。本仓库不提供个人账号、登录profile或公共无限额控制入口。
@@ -80,7 +80,7 @@ Provider、Computer、Context、Planning 与 Run Memory 通过组件装配协作
 
 演示用于呈现完整使用流程；研发记录用于追踪问题与迭代，不用零散样本替代产品整体表现。
 
-[了解真实生活任务案例](./docs/real-task-cases.md)。
+[了解真实生活任务案例](./docs/submission/real-task-cases.md)。
 
 <!-- 正式Demo及后续有统一口径的场景成果图；没有成稿不填占位数字、虚构评价或客户Logo。 -->
 

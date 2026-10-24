@@ -1,128 +1,246 @@
-# Windows 手机使用入门
+# 用手机控制电脑
 
-本文只写 Windows 从干净 checkout 到手机首次任务的操作顺序。macOS 步骤由 Mac 成员补充并实机核对；不能用这份 Windows 结果代表 Mac 已验收。
+手机用浏览器打开控制页面，电脑负责执行任务。电脑需要保持开机、联网，并停留在已登录的桌面；手机不用安装 App。
 
-## 先了解驱动交付状态
+两端通过一个 **Relay（中继服务）** 连接：电脑上的 Host 主动连到 Relay，手机也访问同一个 Relay。Host 运行在你要控制的电脑上；Relay 由团队管理员运行在有 HTTPS 地址的服务器上，可以供多台电脑使用。你的电脑不需要开放公网端口。
 
-当前 workspace 锁定 CUA SDK 0.22.2；Host 还需要单独的 `cua-driver.exe`，`pnpm install` 不会安装它。官方 stock driver 0.22.2 可提供该版本的基础桌面能力，但不包含本项目自有的 Windows 输入修复。
+先向提供服务的人领取三项连接资料：**Relay 的 HTTPS 地址、这台电脑的 Host ID、连接凭据**。这些资料由管理员准备，不需要使用者研究服务器配置。本项目目前没有向所有人开放的公共 Relay；团队自己的服务器也不是公共入口。如果你是第一次搭建服务的人，先完成本文末尾的[自行部署 Relay](#自行部署-relay)，然后回到下面的步骤。
 
-输入修复曾有自有 fork 的候选构建和本机隔离验证；候选二进制不在 Git checkout 中，也没有可供新成员长期获取、校验和重装的正式分发包。因此不能把“克隆后即包含修复”写成事实，也不要把本机忽略目录里的旧文件当成发行版。需要依赖该输入修复的任务，须等候选有合规的固定版本、来源和校验信息后再使用。stock 与 patched candidate 是两个不同 driver，不能只凭相同的 0.22.2 版本号视为同一构建。
+## 1. 在 Windows 电脑上准备并启动
 
-## 1. 准备源码与依赖
+### 第一次使用：准备一次即可
 
-先在电脑安装[Git for Windows](https://git-scm.com/downloads/win)和[Node.js](https://nodejs.org/en/download)，安装后重新打开终端，确认`git --version`、`node --version`及`npm.cmd --version`可用。Node至少为22.13.0，团队已使用24.19.0验证开发环境；已有满足要求的安装无需覆盖。受管浏览器还需要本机已安装并能正常打开Microsoft Edge。
+电脑需已安装 [Git for Windows](https://git-scm.com/downloads/win)、[Node.js 24 LTS](https://nodejs.org/en/download) 和 Microsoft Edge。已有 Node.js 22.13.0 或更高版本可以继续使用。安装后重新打开 PowerShell。
 
-在 Windows 原生 PowerShell 5.1 或 PowerShell 7 中，先切到准备存放代码的父目录，再执行下方克隆命令；后续命令均在克隆得到的仓库根目录运行。本文使用 `pnpm.cmd`，不依赖 PowerShell 7 才有的 `$IsWindows`。建议 checkout 和 CUA driver 放在只含 ASCII 字符的路径，避免外部程序的中文路径编码问题。
+打开一个用于存放项目的文件夹，在地址栏输入 `powershell` 并回车。推荐使用便于查找的短路径，例如 `C:\Harness`；已有中文路径不必为此搬动项目。复制运行：
 
 ```powershell
 git clone https://github.com/wszkxlllll/Computer-Harness.git
 Set-Location .\Computer-Harness
-# 如需特定功能，检出团队指定的分支或 commit
-node --version
-npm.cmd install --global pnpm@11.19.0
-pnpm.cmd --version
-pnpm.cmd install --frozen-lockfile
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mobile.ps1
 ```
 
-Node.js 至少为 22.13.0，pnpm 固定为 11.19.0；确认版本输出符合要求。若 pnpm 已安装，直接检查版本后安装依赖即可。遇到 PowerShell 的 pnpm 脚本策略问题时继续调用 `pnpm.cmd`，不必改执行策略。若当前目录已有非空的 `Computer-Harness` 文件夹，Git 会拒绝克隆，不会覆盖它；换到其他父目录再执行。若 Windows 用户名或当前路径含中文，先切到已有的 ASCII-only 目录，再用默认克隆命令；也可指定一个新的 ASCII-only 目标目录。
+已有源码时，在项目文件夹打开 PowerShell，只运行最后一行。准备程序会自动找到 Node、创建电脑配置、下载并校验与项目匹配的官方 CUA 驱动、安装锁定的依赖。它不会启动电脑控制任务。
 
-## 2. 准备 CUA daemon
+首次准备时，按顺序填写四项：
 
-从[官方 CUA Driver 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)下载与电脑架构匹配的 Windows binary zip（x86_64 或 ARM64）。release 页面列有 SHA-256；先运行下面的命令，并将结果与该页面对应资产的 checksum 比较，再解压得到 `cua-driver.exe`：
+| 提示 | 填什么 |
+| --- | --- |
+| Relay 地址（HTTPS） | 管理员提供的地址，例如 `https://relay.example.com` |
+| 电脑编号（Host ID） | 管理员为这台电脑分配的编号 |
+| 连接凭据 | 与这个编号配套的连接凭据 |
+| 模型密钥（GLM） | 你的 GLM API 密钥；用于调用任务模型，会按提供方规则计费 |
 
-```powershell
-Get-FileHash -LiteralPath '<下载的 binary zip 路径>' -Algorithm SHA256
-Expand-Archive -LiteralPath '<已校验的 binary zip 路径>' -DestinationPath '<本机解压目录>'
-```
+两项密钥输入时不会显示。它们只保存在这台电脑的私有 `.env` 文件中；不要把这个文件发给别人。连接资料不等于模型密钥，Relay 管理员也不需要你的模型密钥。
 
-锁文件中的 SDK 版本与 daemon 必须配套，使用 0.22.2。
+准备程序不覆盖已有配置、密钥或驱动。若它提示已保留旧配置，请[展开“需要时再设置”](#需要时再设置)，查看“已有配置怎么填写”。下载或安装因网络失败时，解决网络问题后重跑同一条准备命令即可。
 
-此步骤安装的是 **官方 stock**。候选输入修复不是此 zip 的内容；官方版本号相同也不表示带有候选修复。
+### 启动电脑端
 
-## 3. 填本机配置和私有环境变量
-
-复制示例配置；若本机文件已存在，不要覆盖：
-
-```powershell
-if (-not (Test-Path -LiteralPath .harness.local.psd1)) {
-  Copy-Item -LiteralPath .harness.local.example.psd1 -Destination .harness.local.psd1
-}
-```
-
-编辑 `.harness.local.psd1`，把以下项目替换成自己机器上的值，其余可先保留示例默认值：
-
-```powershell
-NodePath = '<本机 node.exe 的绝对路径>'
-EnvFile = '.env'
-CuaBinary = '<已校验并解压出的 cua-driver.exe 路径>'
-Model = 'glm-5.3-flash'
-```
-
-`Model` 目前由 `scripts/mobile.ps1` 限定为 `glm-5.3-flash` 或 `qwen3.8-flash`。选 GLM 时在下一步配置 GLM 凭据；选 Qwen 时将此值改为 `qwen3.8-flash` 并配置 DashScope 凭据。保持示例中的 `CuaSocket`，或确保自行修改后 Host 和 daemon 使用完全相同的值。配置文件仅存本机路径和选项，不放 API key。
-
-在仓库根目录创建私有 `.env`。它已被 Git 忽略。按需填写以下占位项，不要把尖括号占位文字原样保存：
-
-```dotenv
-# GLM 模型凭据；仅在 Model=glm-5.3-flash 时需要
-ZHIPUAI_API_KEY=<GLM 提供方签发的密钥>
-# Qwen 模型或语音输入所需；选 GLM 且不用语音输入时可不填
-DASHSCOPE_API_KEY=<DashScope 提供方签发的密钥>
-
-# 手机远程配对必填：按 Relay 管理员提供的本机身份和公开地址填写
-HARNESS_RELAY_URL=https://<Relay 域名>
-HARNESS_HOST_ID=<Relay 分配给这台电脑的唯一 ID>
-HARNESS_RELAY_CREDENTIAL=<Relay 中为该 ID 登记的随机凭据>
-HARNESS_RELAY_PUBLIC_ORIGIN=https://<Relay 域名>
-
-# 可选：语音输入。填 workspace ID，或改用下方显式 WSS endpoint
-DASHSCOPE_WORKSPACE_ID=<语音服务 workspace ID>
-# DASHSCOPE_REALTIME_ASR_ENDPOINT=wss://<语音服务提供方的实时识别地址>
-```
-
-Host 要求四个 `HARNESS_RELAY_*` 项全填或全不填；只填一部分会在启动时报错。ID 和至少 32 字节的随机凭据必须与 Relay 服务端登记相同，每台电脑使用独立身份。此电脑端启动器不会安装或启动 Relay；手机使用要求 Relay 已部署、手机网络可达且使用手机信任的 HTTPS。仅用本机 localhost Relay 可预览电脑页面，不能让手机连接。若你负责部署 Relay，服务端配置、TLS 和监听方式见 [Relay 运维说明](../apps/relay/README.md)；不要把服务端配置文件复制到此电脑的 `.env`。
-
-语音输入需要 `DASHSCOPE_API_KEY`，并设置 `DASHSCOPE_WORKSPACE_ID` 或 `DASHSCOPE_REALTIME_ASR_ENDPOINT`。Host 启动时读取配置，修改 `.env` 后要重启。语音通知播报走手机浏览器的语音合成，不需要 ASR 密钥。
-
-## 4. 检查并启动电脑 Host
-
-```powershell
-.\scripts\mobile.ps1 -Command check
-.\scripts\mobile.ps1 -Command start -Build
-```
-
-`check` 检查 Node、环境文件和模型设置，并报告 Host/Web 构建文件是否存在；它不验证 driver 二进制或 Relay 在线状态。首次启动加 `-Build` 会构建 Host 与 Web。启动器会复用配置 socket 上已就绪的 daemon；若没有，就在后台启动配置的 daemon。启动窗口保持打开，直到停止服务。
-
-如果 PowerShell 的执行策略阻止启动脚本，可在仓库根目录运行下面这条命令。`Bypass` 只对新启动的这个 PowerShell 进程生效，不会改用户或系统的全局执行策略：
+在同一个项目文件夹执行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
-在运行这台 Host 的电脑浏览器打开 `http://localhost:4317/connect`，点“生成配对二维码”。用手机相机扫描；二维码必须指向手机可访问的 HTTPS Relay，而不能是 localhost。扫码只会发起请求，不会授权：确认电脑页面的“待处理请求”中显示的是自己的手机，再点“允许这台手机”。手机显示已连接后点“打开任务列表”。
+首次启动会构建页面和电脑端程序，等终端显示启动信息后，在**这台电脑**的浏览器打开 [连接手机](http://localhost:4317/connect)。保留 PowerShell 窗口；它关闭后手机就不能继续控制电脑。
 
-如果二维码警告它指向本机地址，或 Host 日志提示 Relay 未连接，先核对上面四项 Relay 设置及服务端状态，再重启 Host、生成新码。Relay 重启后需要重新配对。
+以后使用，在项目文件夹运行下面这一行即可。更新过源码时用上面的 `-Build` 命令重新构建。
 
-## 5. 手机发任务、设置语音和登录状态
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start
+```
 
-在手机“新任务”页输入目标，选择起点并点“开始任务”。页面默认推荐“打开网站”；可以留空网址从空白受管浏览器开始，也可以填完整的 `https://` 地址。首次先做只读、无外发的简单任务。手动窗口和“整个桌面（高级）”会扩大电脑画面或窗口信息的暴露范围，开始前关闭不相关的敏感窗口。
+## 2. 手机扫码，电脑确认
 
-语音输入配置完成并重启 Host 后，打开“设置 → 语音功能”，确认出现“语音输入测试”，按需测试麦克风和识别。音频会发送给所配置的 ASR 提供方。要播报任务通知，在同一设置中开启“朗读任务关键通知”；播报能力由手机浏览器和设备语音支持决定。即使没有语音输入，任务文字仍可使用。
+1. 在电脑的“连接手机”页面点“生成配对二维码”。
+2. 用手机相机扫码，在浏览器打开链接。
+3. 回到电脑，确认待处理请求来自自己的手机，点“允许这台手机”。
+4. 手机显示连接成功后，点“打开任务列表”。
 
-要让网页任务复用这台电脑的专用登录状态：手机打开“设置 → 浏览器与登录状态”，选择“本机已准备的登录状态”，点“准备登录状态”；在电脑出现的 Harness 受管 Edge 窗口里自行登录，再回手机点“我已在电脑完成登录”。登录信息保存在这台电脑的 Harness 受管浏览器中，不会从个人浏览器或手机复制。网站之后仍可能要求重新登录。
+二维码有效期为 90 秒，过期后重新生成。手机打开的是 Relay 的 HTTPS 地址；`localhost:4317` 只供电脑本机使用，不要在手机里输入它。
 
-## 6. 停止与排错
+## 3. 发起第一个任务
 
-回到启动 Host 的 PowerShell 窗口按 `Ctrl+C`。启动器会停止 Host，以及本次启动器创建的 daemon；若它复用了原本已运行的 daemon，不会替你停止该进程。日志写入 `.harness.local.psd1` 所设输出目录下的 `mobile` 子目录；分享前检查并脱敏。
+在手机“新任务”页选择“打开网站（推荐）”，填写网站地址和目标，再点“开始任务”。例如，网址填 `https://example.com`，目标填“阅读这个页面，用中文告诉我它的标题和用途”。这个例子不需要登录或发送信息。
 
-| 现象 | 检查 |
+电脑会打开 Harness 专用的 Edge 窗口。手机可以查看进度和结果，遇到确认请求时按页面提示处理。首次使用先从简单的网页任务开始；长篇中文输入、复杂文稿编辑和整个桌面任务仍有已知限制。
+
+用完后，回到电脑的 PowerShell 窗口按 `Ctrl+C`。它会停止电脑端，以及本次启动的 CUA 驱动；原本已运行的驱动会保留。
+
+<a id="需要时再设置"></a>
+<details>
+<summary>需要时再设置：登录状态、语音、旧配置与排错</summary>
+
+**使用网站登录状态。** 手机打开“设置 → 浏览器与登录状态”，选择“本机已准备的登录状态”，点“准备登录状态”；在电脑出现的 Harness Edge 窗口中自行登录，再回手机点“我已在电脑完成登录”。后续任务可复用这份专用登录状态；它不会复制个人浏览器或手机里的登录信息。
+
+**语音输入。** 在电脑的 `.env` 追加以下两项，填入自己的 DashScope 资料，然后重启电脑端：
+
+```dotenv
+DASHSCOPE_API_KEY=填入你的DashScope密钥
+DASHSCOPE_WORKSPACE_ID=填入你的语音服务workspace_ID
+```
+
+如果服务方提供的是实时识别 WSS 地址，可用 `DASHSCOPE_REALTIME_ASR_ENDPOINT` 替代 workspace ID。手机进入“设置 → 语音功能”测试麦克风。语音会发送给所配置的识别服务；不配置也可以正常输入文字。
+
+**朗读通知。** 在手机同一设置页开启“朗读任务关键通知”，使用手机浏览器的语音合成，无需语音识别密钥。
+
+**更换模型。** 默认使用 GLM。需要 Qwen 时，把 `.harness.local.psd1` 中的 `Model` 改为 `qwen3.8-flash`，并在 `.env` 填写 `DASHSCOPE_API_KEY`，然后重启。
+
+### 已有配置怎么填写
+
+准备程序自动生成 `.harness.local.psd1` 中的 Node 路径；驱动位于 `.tools\cua-driver\0.22.2\bin\cua-driver.exe`。通常不用编辑这个文件。已有配置指向别处时，程序会保留原值；如果那个文件已不存在，按报错修正路径后再运行。
+
+已有 `.env` 不会被覆盖。需要补 Relay 连接资料时，在文件中填写下面四项；两个地址通常相同，ID 和凭据必须与管理员登记的完全一致：
+
+```dotenv
+HARNESS_RELAY_URL=https://relay.example.com
+HARNESS_HOST_ID=管理员分配的ID
+HARNESS_RELAY_CREDENTIAL=管理员提供的连接凭据
+HARNESS_RELAY_PUBLIC_ORIGIN=https://relay.example.com
+```
+
+同时保留所选模型的密钥：默认 GLM 使用 `ZHIPUAI_API_KEY`。把示例文字替换成实际值，以 UTF-8 保存，不要将占位文字原样使用。改完后重启电脑端。
+
+### 遇到问题
+
+| 现象 | 怎么处理 |
 | --- | --- |
-| pnpm 安装或脚本 wrapper 异常 | 用 `pnpm.cmd --version` 和 `pnpm.cmd install --frozen-lockfile`；确认没有从 WSL/Git Bash 生成依赖后在 PowerShell 混用。 |
-| 启动脚本被执行策略阻止 | 在仓库根目录运行上面的 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build`；只影响该进程，不修改全局策略。 |
-| 启动报告缺少 Host/Web 构建 | 重新运行第 4 节的 `start -Build` 命令，查看终端中的构建错误。 |
-| CUA daemon 未就绪 | 核对 `CuaBinary` 指向真实文件、版本是 0.22.2，且没有其他服务占用配置的 `CuaSocket`；检查输出目录中的 `cua-daemon` 日志。 |
-| 手机打不开二维码或 Host 提示 Relay 未连接 | 四项 Relay 值必须完整并与服务端一致；Relay URL 应从手机可达，二维码使用受信任的 HTTPS 地址。电脑本机的 `localhost` 只能由电脑访问。 |
-| 语音输入不可用 | 核对 DashScope key 和 workspace ID/实时识别 WSS endpoint，重启 Host 后在设置里刷新并测试。播报可用不代表 ASR 已配置。 |
-| stock 输入与预期不一致 | 确认当前使用的是官方 stock 还是独立 patched candidate。stock 不含本项目输入修复；结果未知的输入动作不要盲目重发。 |
-| Host 端口已占用 | 以 `-HostPort <未占用端口>` 启动，并在电脑打开对应端口的 `/connect` 页面。 |
+| 找不到 `git`、`node` 或 `npx` | 安装或修复上面对应的软件，关闭并重新打开 PowerShell。 |
+| 准备时下载或依赖安装失败 | 检查网络能否访问 GitHub 和 npm，再运行准备命令；它会保留已填写的资料。 |
+| 配置检查通过，但启动仍失败 | 检查仅确认本机基本配置，不代表 Relay 在线或驱动已就绪。查看启动窗口中最后一条错误。 |
+| CUA 驱动未就绪 | 查看项目 `runs\local\mobile` 下的 `cua-daemon` 日志；旧配置还需确认 `CuaBinary` 文件真实存在且与 SDK 同为 0.22.2。 |
+| 电脑不能生成二维码，或手机打不开链接 | 确认 Relay 服务在线、两端都能访问它；核对 `.env` 的四项连接资料。手机地址应以 `https://` 开头且没有证书警告。 |
+| 配对失效 | Relay 重启后需要重新扫码、由电脑再次允许。 |
+| 4317 端口已被占用 | 先确认是否已经启动过 Harness；如果是，使用原来的窗口和连接页面。 |
+| 输入后的文字与目标不符 | 停止并检查实际内容，避免重复发送或覆盖；当前版本不能保证复杂中文编辑任务可靠。 |
 
-Relay 配对、自动化和手机真机验收是不同证据。成功扫码或看到任务页面，不等于输入修复、真实任务结果、手机语音和 macOS 均已验收。
+### 驱动和平台范围
+
+准备程序使用[官方 CUA Driver 0.22.2](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)，固定校验该发布页给出的 SHA-256，与仓库锁定的 SDK 0.22.2 配套。驱动用于操作电脑，依赖安装不会自动提供这个独立程序。
+
+这个旧版不含后续的 Windows 输入修复。[官方 0.38.0](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.38.0) 已经合入相关修复，但当前项目尚未完成配套 SDK 升级验证，不能只把驱动替换为最新版。普通用户无需自行选择驱动或寻找团队私有构建。本文先引导简单网页任务，不把首次配对成功当成所有电脑操作都可靠的证明。
+
+macOS 的启动与权限准备由 Mac 成员补充、实机核对；上面的 `.ps1` 准备和启动命令只适用于 Windows。
+
+</details>
+
+<a id="自行部署-relay"></a>
+<details>
+<summary>自行部署 Relay（仅服务维护者需要）</summary>
+
+这一节由**服务维护者**完成一次。服务上线后，每位使用者只需领取连接资料，按前面的 Windows 步骤操作。Relay 负责连接和转发，不运行模型；Host 和 CUA 仍在使用者的电脑上。Relay 运营方能接触经它转发的任务和截图，应由使用者信任的人维护。
+
+以下是独立 Linux 服务器上的最小部署流程：Git、[Node.js 24 LTS](https://nodejs.org/en/download)（最低 22.13.0）、Caddy 和 systemd 已就绪；有自己的域名，DNS 的 A/AAAA 记录指向服务器，外部可访问 80/443。Caddy 按[官方安装说明](https://caddyserver.com/docs/install)安装。不要在已由 Nginx 或其他站点占用 80/443 的服务器直接启动第二套代理；已有站点应由维护者把下方转发规则接入现有代理。
+
+Node 应安装在服务账号能执行的系统共享位置，如 `/usr/local/bin` 或 `/opt`；下方服务隔离配置不能访问个人 home 目录里的 Node。
+
+### A. 下载并构建
+
+在服务器终端执行，`APPROVED_COMMIT` 换成实际准备交付的版本或完整 commit，与使用者电脑上的源码版本保持一致：
+
+```sh
+test ! -e /opt/computer-harness || exit 1
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /opt/computer-harness
+git clone https://github.com/wszkxlllll/Computer-Harness.git /opt/computer-harness
+cd /opt/computer-harness
+git checkout --detach APPROVED_COMMIT
+node --version
+npm install --global pnpm@11.19.0
+pnpm install --frozen-lockfile
+pnpm exec tsc --build packages/relay-connector/tsconfig.json apps/relay/tsconfig.json --pretty false
+pnpm --filter @computer-harness/web build
+```
+
+第一行在目录已存在时停止，避免改动已有服务；已有部署由维护者按原来的更新方式处理。若 npm 全局安装需要系统权限，由维护者按本机 Node 安装方式处理。
+
+### B. 为第一台电脑生成连接资料
+
+先创建专用服务账号和配置目录：
+
+```sh
+sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin computer-harness-relay
+sudo install -d -o computer-harness-relay -g computer-harness-relay -m 0700 /etc/computer-harness
+```
+
+将下面的域名替换为自己的地址。命令会在服务器私有配置中生成一个随机 Host ID 和 32 字节随机凭据，不把凭据打印到终端；已有配置时会拒绝覆盖：
+
+```sh
+relay_node="$(command -v node)"
+sudo -u computer-harness-relay env RELAY_PUBLIC_ORIGIN=https://relay.example.com "$relay_node" --input-type=module -e '
+import { randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
+const config = {
+  publicOrigin: process.env.RELAY_PUBLIC_ORIGIN,
+  listen: { host: "127.0.0.1", port: 8787 },
+  webRoot: "/opt/computer-harness/apps/web/dist",
+  hostCredentials: [{ hostId: randomBytes(12).toString("hex"), credential: randomBytes(32).toString("base64url") }]
+};
+writeFileSync("/etc/computer-harness/relay-config.json", JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
+'
+```
+
+维护者通过私密配置查看工具读取该文件，把 `publicOrigin`、对应条目的 `hostId` 和 `credential` 安全交给该电脑的使用者，分别填入准备程序的三个连接提示。每增加一台电脑，在 `hostCredentials` 中增加一组独立随机 ID/凭据；不能把同一组分给多台电脑。不要把这个配置放进 Git，或把凭据粘贴到公开聊天中。
+
+### C. 让 Relay 常驻运行
+
+先运行 `command -v node` 找到 Node 的绝对路径。将以下内容保存为 `/etc/systemd/system/computer-harness-relay.service`，把 `ExecStart` 中的 `/usr/bin/node` 换成刚查到的路径；该路径及源码目录需允许专用服务账号读取和执行。
+
+```ini
+[Unit]
+Description=Computer Harness Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=computer-harness-relay
+Group=computer-harness-relay
+WorkingDirectory=/opt/computer-harness
+Environment=RELAY_CONFIG_FILE=/etc/computer-harness/relay-config.json
+ExecStart=/usr/bin/node /opt/computer-harness/apps/relay/dist/index.js
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动服务：
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now computer-harness-relay
+sudo systemctl status --no-pager computer-harness-relay
+```
+
+### D. 开通手机使用的 HTTPS 地址
+
+独立新服务器使用 Caddy 时，将站点加入 `/etc/caddy/Caddyfile`，域名与 B 步一致；不要覆盖已有站点：
+
+```caddyfile
+relay.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        flush_interval -1
+    }
+}
+```
+
+Caddy 会为满足 DNS/端口条件的公开域名申请并续期 HTTPS 证书，并代理 WebSocket 与实时响应；不需要手动给电脑开放端口。这里不启用访问日志，避免保存配对链接的查询参数。规则依据：[自动 HTTPS](https://caddyserver.com/docs/automatic-https)、[反向代理与流式传输](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)。
+
+```sh
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+curl --fail --show-error https://relay.example.com/healthz
+```
+
+服务器只需向外提供 HTTPS 入口和证书申请所需的 HTTP 端口，8787 保持仅本机监听。手机打开 `https://relay.example.com` 应能看到页面且没有证书警告。`/healthz` 成功只说明 Relay 可访问；还要让一台 Windows 电脑按前文启动，手机在不同网络扫码，经电脑确认后发起简单任务，才算连接流程走通。
+
+维护时使用 `sudo systemctl restart computer-harness-relay` 重启，使用 `sudo journalctl -u computer-harness-relay -n 50 --no-pager` 查看近期错误。Relay 重启会清空配对会话，手机需要重新扫码。
+
+</details>

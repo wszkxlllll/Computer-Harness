@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="1170" viewBox="0 0 920 1170"><title>可靠执行与用户控制闭环</title><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#000"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>
+<rect x="250" y="22" width="340" height="54" rx="27" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="49" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">接收用户任务</text>
+<rect x="250" y="126" width="340" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="159" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">观察界面并组织上下文</text>
+<rect x="250" y="242" width="340" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="275" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">生成下一步操作</text>
+<polygon points="420,366 590,424 420,482 250,424" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="424" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">检查执行条件</text>
+<rect x="250" y="537" width="340" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="570" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="26" font-weight="400">执行桌面操作</text>
+<rect x="250" y="682" width="340" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="715" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="26" font-weight="400">记录动作回执</text>
+<rect x="250" y="798" width="340" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="831" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">重新观察并核对结果</text>
+<polygon points="420,914 590,972 420,1030 250,972" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="972" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">任务目标完成？</text>
+<rect x="250" y="1080" width="340" height="54" rx="27" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="420" y="1107" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">交付任务结果</text>
+<path d="M420,76 L420,126" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,192 L420,242" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,308 L420,366" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,482 L420,537" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,603 L420,682" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,748 L420,798" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,864 L420,914" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M420,1030 L420,1080" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="467.5" y="519" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="21" font-weight="400">允许</text>
+<text x="467.5" y="1054" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="21" font-weight="400">是</text>
+<rect x="20" y="380" width="170" height="88" rx="44" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="105" y="408.16" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">暂停执行</text>
+<text x="105" y="439.84000000000003" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">等待调整</text>
+<path d="M250,424 L190,424" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="222" y="400" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">不允许</text>
+<rect x="680" y="380" width="220" height="88" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="790" y="408.16" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">用户审批</text>
+<text x="790" y="439.84000000000003" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">并复核执行条件</text>
+<path d="M590,424 L680,424" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="635" y="400" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">需确认</text>
+<polygon points="790,512 900,570 790,628 680,570" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="790" y="554.82" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="23" font-weight="400">批准且</text>
+<text x="790" y="585.1800000000001" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="23" font-weight="400">条件有效？</text>
+<path d="M790,468 L790,512" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M680,570 L590,570" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="651.5" y="546" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">是</text>
+<rect x="680" y="682" width="220" height="66" rx="33" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="790" y="715" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="23" font-weight="400">暂停并等待调整</text>
+<path d="M790,628 L790,682" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="823" y="655" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">否</text>
+<rect x="20" y="928" width="170" height="88" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="105" y="956.82" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="23" font-weight="400">更新任务状态</text>
+<text x="105" y="987.1800000000001" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="23" font-weight="400">继续执行</text>
+<path d="M250,972 L190,972" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="219.5" y="948" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">否</text>
+<ellipse cx="105" cy="1083" rx="20" ry="20" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="105" y="1083" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">A</text>
+<path d="M105,1016 L105,1063" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<ellipse cx="170" cy="159" rx="20" ry="20" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="170" y="159" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">A</text>
+<path d="M190,159 L250,159" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="460" y="1147" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">注：同名连接符 A 表示流程续接；审批后仍需复核执行条件。</text>
+</svg>

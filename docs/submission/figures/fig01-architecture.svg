@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1110" viewBox="0 0 900 1110"><title>Lightspeaker系统总体架构</title><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7 Z" fill="#000"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>
+<rect x="135" y="22" width="390" height="76" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="43.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">手机交互端（Web）</text>
+<text x="330" y="76.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">任务输入、状态查看与用户控制</text>
+<rect x="135" y="158" width="390" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="191" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="26" font-weight="400">通信中继（Relay）</text>
+<path d="M275,98 L275,158" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="200" y="126" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">任务与控制</text>
+<path d="M385,158 L385,98" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="460" y="126" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">状态与画面</text>
+<rect x="35" y="287" width="590" height="790" rx="0" fill="#fff" stroke="#000" stroke-width="1.6" stroke-dasharray="8 5"/>
+<text x="330" y="322" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="29" font-weight="700">电脑执行端（Host）</text>
+<text x="330" y="357" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="22" font-weight="400">本机模型配置与桌面会话装配</text>
+<path d="M275,224 L275,287" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="200" y="254" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">任务与控制</text>
+<path d="M385,287 L385,224" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="460" y="254" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">运行状态</text>
+<rect x="60" y="395" width="540" height="389" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="426" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="700">自主任务运行时（Computer Harness）</text>
+<rect x="80" y="459" width="155" height="58" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="157.5" y="474.8" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">操作对象管理</text>
+<text x="157.5" y="501.2" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">Surface</text>
+<rect x="252" y="459" width="155" height="58" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="329.5" y="474.8" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">进展监测</text>
+<text x="329.5" y="501.2" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">Monitor</text>
+<rect x="425" y="459" width="155" height="58" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="502.5" y="474.8" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">风险控制</text>
+<text x="502.5" y="501.2" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">Guard</text>
+<rect x="105" y="549" width="450" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="582" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="26" font-weight="400">任务上下文组织</text>
+<rect x="105" y="698" width="450" height="66" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="731" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">执行检查、操作协调与结果核验</text>
+<path d="M330,698 L330,615" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="437.5" y="657" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">回执、观察与状态</text>
+<rect x="690" y="549" width="185" height="215" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="782.5" y="590.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">多模态模型</text>
+<text x="782.5" y="623.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">（API）</text>
+<text x="782.5" y="656.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400"></text>
+<text x="782.5" y="689.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">界面理解</text>
+<text x="782.5" y="722.5" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="25" font-weight="400">与动作决策</text>
+<path d="M555,582 L690,582" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<path d="M690,731 L555,731" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<rect x="105" y="846" width="450" height="78" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="869.16" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">桌面能力适配（CUA）</text>
+<text x="330" y="900.8399999999999" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="24" font-weight="400">界面观察、输入控制与窗口操作</text>
+<path d="M260,764 L260,846" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="195" y="815" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">动作调用</text>
+<path d="M400,846 L400,764" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="474.5" y="815" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">回执与观察</text>
+<rect x="105" y="989" width="450" height="62" rx="0" fill="#fff" stroke="#000" stroke-width="1.6"/>
+<text x="330" y="1020" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="26" font-weight="400">浏览器与桌面应用</text>
+<path d="M260,924 L260,989" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="192" y="955" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">输入与切换</text>
+<path d="M400,989 L400,924" stroke="#000" stroke-width="1.6" fill="none" marker-end="url(#arrow)"/>
+<text x="471" y="955" text-anchor="middle" dominant-baseline="central" font-family="SimSun,宋体,serif" font-size="20" font-weight="400">界面状态</text>
+</svg>
