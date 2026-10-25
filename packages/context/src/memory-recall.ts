@@ -69,6 +69,23 @@ export function selectMemoryForContext(
   }
   const relevance = (ids: readonly string[] | undefined): number => Math.max(0, ...(ids ?? []).map((id) => taskPriority.get(id) ?? 0));
   const entityById = new Map(memory.entities.map((entity) => [entity.id, entity]));
+  const taskRelevance = (fact: MemoryFact): number => Math.max(
+    relevance(fact.relatedTaskIds),
+    fact.subject.type === "entity" ? relevance(entityById.get(fact.subject.entityId)?.relatedTaskIds) : 0,
+  );
+  const factScore = (fact: MemoryFact): readonly number[] => [
+    taskRelevance(fact),
+    memoryFactRetentionClass(fact) === "stable" ? 2 : 1,
+    fact.status === "needs_check" ? 0 : 1,
+    fact.updatedSequence,
+  ];
+  const compare = (left: readonly number[], right: readonly number[]): number => {
+    for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+      const difference = (right[index] ?? 0) - (left[index] ?? 0);
+      if (difference !== 0) return difference;
+    }
+    return 0;
+  };
   const excluded: MemoryExcludedRecord[] = [];
   let revalidationCandidates: MemoryRevalidationCandidate[] = [];
   let admittedFacts: MemoryFact[] = [];
@@ -108,7 +125,16 @@ export function selectMemoryForContext(
       const candidate = revalidationById.get(ranked.id);
       if (candidate !== undefined) rankedRevalidation.push({ fact: candidate.fact, reason: ranked.reason ?? candidate.reason });
     }
-    admittedFacts = rankedAdmitted;
+    const rankedIds = new Set(rankedAdmitted.map((fact) => fact.id));
+    const taskLinkedFallback = context.recall.stateStable
+      ? [...admittedFacts]
+          .filter((fact) => !rankedIds.has(fact.id) && taskRelevance(fact) > 0)
+          .sort((left, right) => compare(factScore(left), factScore(right)))
+      : [];
+    // Keep query matches first. Existing plan links only fill the remaining
+    // admitted-fact slots, without bypassing scope, status, or retention gates.
+    // An unstable retrieval snapshot never gets a task-link fallback.
+    admittedFacts = [...rankedAdmitted, ...taskLinkedFallback];
     revalidationCandidates = rankedRevalidation;
     const excludedIds = new Set(excluded.map((item) => `${item.kind}:${item.id}`));
     for (const item of context.recall.excluded) {
@@ -129,24 +155,11 @@ export function selectMemoryForContext(
 
   const boundedExcluded = excluded.slice(0, maxExcluded);
   const revalidationScore = (candidate: MemoryRevalidationCandidate): readonly number[] => [
-    Math.max(relevance(candidate.fact.relatedTaskIds), candidate.fact.subject.type === "entity" ? relevance(entityById.get(candidate.fact.subject.entityId)?.relatedTaskIds) : 0),
+    taskRelevance(candidate.fact),
     candidate.reason === "needs_check" ? 2 : 1,
     candidate.fact.updatedSequence,
   ];
-  const factScore = (fact: MemoryFact): readonly number[] => [
-    Math.max(relevance(fact.relatedTaskIds), fact.subject.type === "entity" ? relevance(entityById.get(fact.subject.entityId)?.relatedTaskIds) : 0),
-    memoryFactRetentionClass(fact) === "stable" ? 2 : 1,
-    fact.status === "needs_check" ? 0 : 1,
-    fact.updatedSequence,
-  ];
   const entityScore = (entity: MemoryEntity): readonly number[] => [relevance(entity.relatedTaskIds), entity.updatedSequence];
-  const compare = (left: readonly number[], right: readonly number[]): number => {
-    for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-      const difference = (right[index] ?? 0) - (left[index] ?? 0);
-      if (difference !== 0) return difference;
-    }
-    return 0;
-  };
   const boundedRevalidation = context.recall === undefined
     ? revalidationCandidates.sort((left, right) => compare(revalidationScore(left), revalidationScore(right))).slice(0, maxRevalidationFacts)
     : revalidationCandidates.slice(0, maxRevalidationFacts);

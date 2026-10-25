@@ -142,6 +142,8 @@ export interface ContextBudgetReport {
   monitorGuidanceIncluded?: boolean;
   estimatedGroundingTokens?: number;
   groundingIncluded?: boolean;
+  estimatedVisibleTextTokens?: number;
+  visibleTextIncluded?: boolean;
   trace?: ContextTrace;
 }
 
@@ -192,6 +194,8 @@ export interface ContextCompileInput {
   recentEvents: readonly RuntimeEvent[];
   /** Exact policy-owned allowance for the request being compiled. */
   requestBudget?: { readonly remaining: number; readonly limit: number };
+  /** Remaining Run wall clock, independent of the model-request allowance. */
+  wallClockBudget?: { readonly remainingMs: number; readonly finishReserveMs: number };
   context?: ContextOptions;
   enabledCategories?: readonly ToolCategory[];
   enabledToolNames?: readonly string[];

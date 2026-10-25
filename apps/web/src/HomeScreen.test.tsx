@@ -16,6 +16,7 @@ vi.mock("./api", async (importOriginal) => {
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   localStorage.clear();
   window.history.replaceState(null, "", "/");
@@ -87,6 +88,104 @@ describe("home run-target selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
 
     await waitFor(() => expect(window.location.pathname).toBe("/run/run-created"));
+  });
+
+  it("recovers from a synchronous command ID failure without remaining in sending state", async () => {
+    const uuid = vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => { throw new Error("无法创建任务编号"); });
+    vi.mocked(createRun).mockRejectedValue(new ApiError("temporary failure", 503));
+    renderHome();
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Start after preparation recovers" } });
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await screen.findByText("无法创建任务编号");
+    expect(createRun).not.toHaveBeenCalled();
+    const startButton = screen.getByRole("button", { name: "开始任务" });
+    expect((startButton as HTMLButtonElement).disabled).toBe(false);
+    uuid.mockRestore();
+    fireEvent.click(startButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("rejects a second same-tick submit before React commits the sending state", async () => {
+    let rejectStart!: (error: Error) => void;
+    vi.mocked(createRun).mockReturnValue(new Promise((_resolve, reject) => { rejectStart = reject; }));
+    renderHome();
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Start only once" } });
+    await screen.findByText("这里还没有任务");
+    const form = screen.getByRole("form", { name: "新任务表单" });
+    act(() => {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    });
+    expect(createRun).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectStart(new ApiError("temporary failure", 503)); });
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("retains the command ID for manual retry after a network failure and an unknown start outcome", async () => {
+    vi.mocked(createRun)
+      .mockRejectedValueOnce(new ApiError("网络已断开，请先查看任务状态。", 0, "HOST_UNREACHABLE"))
+      .mockRejectedValueOnce(new ApiError("无法确认任务是否已经开始，请先查看任务列表或刷新页面。", 0, "RUN_START_OUTCOME_UNKNOWN"))
+      .mockResolvedValueOnce({ runId: "reconciled-run", status: "running" });
+    renderHome();
+    fireEvent.change(await screen.findByLabelText("想让电脑做什么？"), { target: { value: "Keep the same start request" } });
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await screen.findByText("网络已断开，请先查看任务状态。");
+    expect(createRun).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await screen.findByText("无法确认任务是否已经开始，请先查看任务列表或刷新页面。");
+    expect(createRun).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/run/reconciled-run"));
+    const ids = vi.mocked(createRun).mock.calls.map(([, id]) => id);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("releases the submission lock when RUN_BUSY recovery cannot finish reading the task list", async () => {
+    vi.mocked(listRuns).mockResolvedValueOnce([]).mockReturnValueOnce(new Promise(() => undefined));
+    vi.mocked(createRun)
+      .mockRejectedValueOnce(new ApiError("现有任务仍在处理，请查看任务列表。", 409, "RUN_BUSY"))
+      .mockResolvedValueOnce({ runId: "manual-after-busy", status: "running" });
+    renderHome();
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Retry after checking the busy task" } });
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await screen.findByText("现有任务仍在处理，请查看任务列表。");
+    await waitFor(() => expect((goal as HTMLTextAreaElement).disabled).toBe(false));
+    expect(listRuns).toHaveBeenCalledTimes(2);
+    expect(createRun).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/run/manual-after-busy"));
+    expect(createRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the submission lock while an ambiguous-target recovery window list is hanging", async () => {
+    vi.mocked(listWindowTargets).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(createRun)
+      .mockRejectedValueOnce(new ApiError("请手动选择目标窗口。", 409, "WINDOW_SELECTION_REQUIRED"))
+      .mockResolvedValueOnce({ runId: "manual-browser-start", status: "running" });
+    renderHome();
+    const goal = await screen.findByLabelText("想让电脑做什么？");
+    fireEvent.change(goal, { target: { value: "Select another available target" } });
+    chooseStartMode(/自动选择/);
+    await screen.findByText("这里还没有任务");
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+
+    await screen.findByText("请手动选择目标窗口。");
+    await waitFor(() => expect((goal as HTMLTextAreaElement).disabled).toBe(false));
+    expect(listWindowTargets).toHaveBeenCalledTimes(1);
+    expect(createRun).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "开始任务" }) as HTMLButtonElement).disabled).toBe(true);
+    chooseStartMode(/打开网站/);
+    fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/run/manual-browser-start"));
+    expect(createRun).toHaveBeenCalledTimes(2);
   });
 
   it("focuses a failed submission message and associates it with the submit control", async () => {

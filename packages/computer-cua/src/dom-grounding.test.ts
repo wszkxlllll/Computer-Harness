@@ -42,6 +42,21 @@ describe("managed DOM grounding transport gate", () => {
     expect(materialized.privateElements.size).toBe(7);
   });
 
+  it("clips a partially visible radio to the viewport and omits fully offscreen or hidden controls", () => {
+    const materialized = materializeDomGrounding(request, {
+      complete: true,
+      candidates: [
+        { tagName: "input", inputType: "radio", name: "Visible edge choice", frame: { x: -10, y: 100, width: 20, height: 20 }, visible: true, interactive: true, state: { enabled: true } },
+        { tagName: "input", inputType: "radio", name: "Offscreen choice", frame: { x: 1_100, y: 100, width: 20, height: 20 }, visible: true, interactive: true, state: { enabled: true } },
+        { tagName: "input", inputType: "radio", name: "Hidden choice", frame: { x: 200, y: 100, width: 20, height: 20 }, visible: false, interactive: true, state: { enabled: true } },
+      ],
+    });
+    expect(materialized.catalog.elements).toMatchObject([
+      { role: "radio", name: "Visible edge choice", bbox: { x: 0, y: 100, width: 10, height: 20, coordinateSpace: "physical" }, state: { enabled: true } },
+    ]);
+    expect(materialized.catalog.elements.some((element) => element.name === "Offscreen choice" || element.name === "Hidden choice")).toBe(false);
+  });
+
   it("keeps refs observation-bound and preserves screenshot fallback when transport is absent", async () => {
     const transport = createMockDomGroundingTransport({ candidates: [] });
     const first = await transport.collect(request, new AbortController().signal);

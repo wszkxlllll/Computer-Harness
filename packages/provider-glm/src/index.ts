@@ -25,10 +25,12 @@ import type {
 } from "@computer-harness/runtime";
 import {
   encodeToolCallArguments,
+  HARNESS_EFFECT_KEY,
   isActionableFinishSummary,
   OBSERVATION_ASSESSMENT_GUIDANCE,
   splitActionEffectArguments,
   splitObservationAssessment,
+  toolRequiresActionEffect,
   withObservationAssessmentSchema,
 } from "@computer-harness/runtime";
 
@@ -113,6 +115,9 @@ export class GlmProviderError extends Error {
     public readonly code = "GLM_PROVIDER_ERROR",
     public readonly retryable = isRetryableGlmErrorCode(code),
     public readonly retryMode: GlmRetryMode = "feedback",
+    public readonly recoveryHint?:
+      | { readonly kind: "ambiguous-headers-timeout-v1"; readonly phase: "awaiting_headers"; readonly abortSource: "local_request_timeout"; readonly noResponse: true; readonly remoteOutcome: "unknown" }
+      | { readonly kind: "ambiguous-headers-transport-v1"; readonly phase: "awaiting_headers"; readonly abortSource: "transport_failure"; readonly noResponse: true; readonly transportCode: "ETIMEDOUT"; readonly remoteOutcome: "unknown" },
   ) {
     super(message);
     this.name = "GlmProviderError";
@@ -463,17 +468,28 @@ export class FetchGlmHttpClient implements GlmHttpClient {
         throw new GlmProviderError(
           `GLM ${phase === "reading_body" ? "response body" : "request"} timed out after ${this.requestTimeoutMs}ms (phase=${phase} elapsedMs=${elapsedMs()} deadlineMs=${this.requestTimeoutMs}${response === undefined ? "" : ` headersElapsedMs=${headersElapsedMs} httpStatus=${response.status}`})`,
           "GLM_REQUEST_TIMEOUT",
-          // Local settlement cannot prove the remote request stopped. Never replay it automatically.
+          // Local settlement cannot prove the remote request stopped. Keep generic retry disabled;
+          // an explicit Runtime opt-in may start one fresh decision after a new observation.
           false,
           "feedback",
+          phase === "awaiting_headers" ? { kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown" } : undefined,
         );
       }
       if (error instanceof GlmProviderError) throw error;
       if (phase === "before_fetch") throw error;
+      const timedOutWhileAwaitingHeaders = phase === "awaiting_headers"
+        && response === undefined
+        && firstAbortSource === undefined
+        && error instanceof Error
+        && isRecord(error.cause)
+        && error.cause.code === "ETIMEDOUT";
       emit({ stage, outcome: "network_error", phase, elapsedMs: elapsedMs(), deadlineMs: this.requestTimeoutMs, ...status });
       throw new GlmProviderError(
         `GLM ${phase === "reading_body" ? "response body could not be read" : "network request failed"} (${networkDiagnostic(error)})`,
         "GLM_NETWORK_ERROR", true, "same_input",
+        timedOutWhileAwaitingHeaders
+          ? { kind: "ambiguous-headers-transport-v1", phase: "awaiting_headers", abortSource: "transport_failure", noResponse: true, transportCode: "ETIMEDOUT", remoteOutcome: "unknown" }
+          : undefined,
       );
     } finally {
       clearTimeout(timeout);
@@ -602,11 +618,15 @@ function toGlmTool(tool: ModelToolSpec, profile: GlmProfile, viewport: Viewport 
       : viewport === undefined
         ? ` Coordinates ${tool.coordinate.fields.join(",")} are pixels in the current image viewport.`
         : ` Coordinates ${tool.coordinate.fields.join(",")} are pixels in the current image viewport.`;
+  const effectHint = tool.category === "computer" && toolRequiresActionEffect(tool)
+    && isRecord(tool.inputSchema) && Array.isArray(tool.inputSchema.required) && tool.inputSchema.required.includes(HARNESS_EFFECT_KEY)
+    ? ` Include required ${HARNESS_EFFECT_KEY} in this call's JSON arguments, alongside the other parameters. It must be an object with effects (non-empty array of schema-listed effects), target (non-empty string) and summary (non-empty string). Describe this call's actual immediate consequences honestly; use unknown when uncertain. Never omit these fields or assume approval.`
+    : "";
   return {
     type: "function",
     function: {
       name: tool.name,
-      description: `${tool.description}${coordinateHint}`,
+      description: `${tool.description}${coordinateHint}${effectHint}`,
       parameters: addCoordinateBounds(withObservationAssessmentSchema(tool.inputSchema ?? { type: "object", properties: {} }), tool.coordinate?.fields, profile.coordinateMode, viewport),
     },
   };

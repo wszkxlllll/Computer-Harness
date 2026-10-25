@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GroundingCatalog, ObservationId, ComputerSessionId, SurfaceId, SurfaceRef } from "@computer-harness/protocol";
+import { runtimeEventSchema } from "@computer-harness/trajectory";
 import { DeterministicGroundingSelector } from "./grounding-selector.js";
 import { groundingComputerTools } from "./computer-tools.js";
 
@@ -132,6 +133,246 @@ describe("DeterministicGroundingSelector", () => {
     expect(refs.has("uia-toolbar")).toBe(true);
     expect(refs.has("uia-only-content")).toBe(true);
     expect(selected.selection?.candidateElementCount).toBe(elements.length);
+  });
+
+  it("uses one existing global fallback slot for an enabled bounded radio without displacing intent", () => {
+    // Synthetic pressure fixture, not a reconstruction of the historical
+    // 112-candidate catalog. The query and radio label are copied from safe
+    // public task/UIA evidence; the other labels model lexical page content.
+    const taskGoal = "只做公开网页查询比较，不登录、不下单、不支付。请在Apple中国大陆官网当前公开销售页面，分别查询Mac mini、MacBook Air、iMac三个产品系列当前最低价的标准配置。预算上限9000元人民币。逐项记录产品名称/型号、官网最低价格及币种、芯片、内存、存储、是否带显示屏、页面来源URL和查询时间。";
+    const activePlanText = "查询MacBook Air/Mac mini/iMac官网最低价标准配置: 在 Apple 中国大陆官网公开页面逐项查看 MacBook Air、Mac mini、iMac 当前销售的最低价标准配置：记录产品名称/型号、官网最低价格及币种、芯片、内存、存储、是否带显示屏、来源URL、查询时间。";
+    const matches = Array.from({ length: 20 }, (_, index) => ({
+      elementRef: `synthetic-uia-plan-match-${index}`,
+      role: "AXStaticText",
+      name: `MacBook Air 当前销售最低价标准配置 页面字段 ${index}`,
+      source: "uia" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 20 + index * 24, y: 120, width: 18, height: 18, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    const noise = Array.from({ length: 83 }, (_, index) => ({
+      elementRef: `synthetic-uia-neutral-${index}`,
+      role: "AXStaticText",
+      name: `Neutral page label ${index}`,
+      source: "uia" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 20 + index * 24, y: 180, width: 18, height: 18, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    const radio = {
+      elementRef: "synthetic-near-time-ax-radio",
+      role: "AXRadioButton",
+      name: "15 英寸 脚注 1 RMB 11,999 起 或 RMB 500/月 (24 期) 起",
+      source: "uia" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 20, y: 260, width: 150, height: 30, coordinateSpace: "physical" as const },
+      state: { enabled: true, selected: false },
+    };
+    const local = {
+      elementRef: "synthetic-local-recovery-target",
+      role: "AXButton",
+      name: "Neutral recovery target",
+      source: "uia" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 400, y: 400, width: 40, height: 24, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    };
+    const focused = {
+      elementRef: "synthetic-focused-control",
+      role: "AXTextField",
+      name: "Focused generic control",
+      source: "uia" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 460, y: 400, width: 80, height: 24, coordinateSpace: "physical" as const },
+      state: { enabled: true, focused: true, editable: true },
+    };
+    const dom = [
+      ["link", "MacBook Air"],
+      ["link", "咨询 Mac Specialist 专家 (在新窗口中打开)"],
+      ["button", "下一张图库图片"],
+      ["tab", "图库图片 2"],
+      ["tab", "图库图片 3"],
+      ["button", "上一张图库图片"],
+    ].map(([role, name], index) => ({
+      elementRef: `synthetic-dom-selected-${index}`,
+      role: role!,
+      name: name!,
+      source: "dom" as const,
+      browserRegion: "content" as const,
+      bbox: { x: 20 + index * 24, y: 320, width: 18, height: 18, coordinateSpace: "physical" as const },
+      state: { enabled: index < 3 },
+    }));
+    const elements = [...matches, ...noise, local, focused, radio, ...dom];
+    expect(elements).toHaveLength(112);
+    const query = {
+      goal: taskGoal,
+      activePlanText,
+      latestUserCorrections: [],
+      recoveryHint: {
+        reason: "no_observed_change" as const,
+        attempt: 1,
+        region: { x: 390, y: 390, width: 60, height: 50 },
+      },
+    };
+    const selected = new DeterministicGroundingSelector().select(hybridCatalog(elements), query);
+
+    expect(selected.elements).toHaveLength(16);
+    expect(selected.elements.some((element) => element.elementRef === radio.elementRef)).toBe(true);
+    // Six DOM candidates and the UIA cap leave two natural tail slots; the
+    // radio can use one only after cap-respecting filling leaves that room.
+    expect(selected.elements.filter((element) => element.source === "uia")).toHaveLength(10);
+    expect(selected.elements.filter((element) => element.source === "dom")).toHaveLength(6);
+    expect(selected.selection?.reasons.find((reason) => reason.elementRef === radio.elementRef)?.codes).toContain("enabled_bounded_radio");
+    expect(selected.selection?.reasons.find((reason) => reason.elementRef === radio.elementRef)?.codes).not.toContain("structured_control");
+    expect(runtimeEventSchema.safeParse({
+      eventId: "selector-radio-schema-event",
+      runId: "selector-radio-schema-run",
+      sequence: 1,
+      occurredAt: "2026-10-16T00:00:00.000Z",
+      schemaVersion: 2,
+      type: "observation.created",
+      observation: {
+        id: "selector-radio-schema-observation",
+        runId: "selector-radio-schema-run",
+        computerSessionId: "session-hybrid",
+        surfaceRef: desktopSurfaceRef,
+        capturedAt: "2026-10-16T00:00:00.000Z",
+        viewport: { width: 1280, height: 800, coordinateSpace: "physical" },
+        screenshot: { assetId: "selector-radio-schema-asset", relativePath: "selector-radio-schema.png", mediaType: "image/png", byteLength: 0 },
+        grounding: selected,
+      },
+    }).success).toBe(true);
+    expect(selected.elements.some((element) => element.elementRef === local.elementRef)).toBe(true);
+    expect(selected.elements.some((element) => element.elementRef === focused.elementRef)).toBe(true);
+    expect(selected.elements.some((element) => element.elementRef === "synthetic-uia-plan-match-0")).toBe(true);
+    expect(selected.elements.some((element) => element.elementRef === "synthetic-dom-selected-0")).toBe(true);
+
+    const disabled = new DeterministicGroundingSelector().select(hybridCatalog([
+      ...elements.filter((element) => element.elementRef !== radio.elementRef),
+      { ...radio, elementRef: "synthetic-disabled-radio", state: { enabled: false, selected: false } },
+    ]), query);
+    expect(disabled.selection?.reasons.find((reason) => reason.elementRef === "synthetic-disabled-radio")?.codes ?? []).not.toContain("enabled_bounded_radio");
+    expect(disabled.elements.some((element) => element.elementRef === "synthetic-disabled-radio")).toBe(false);
+
+    const notBounded = new DeterministicGroundingSelector().select(hybridCatalog([
+      ...elements.filter((element) => element.elementRef !== radio.elementRef),
+      { ...radio, elementRef: "synthetic-unbounded-radio", bbox: undefined },
+    ]), query);
+    expect(notBounded.selection?.reasons.find((reason) => reason.elementRef === "synthetic-unbounded-radio")?.codes ?? []).not.toContain("enabled_bounded_radio");
+    expect(notBounded.elements.some((element) => element.elementRef === "synthetic-unbounded-radio")).toBe(false);
+
+    const otherControls = new DeterministicGroundingSelector().select(hybridCatalog([
+      ...elements.filter((element) => element.elementRef !== radio.elementRef),
+      { ...radio, elementRef: "synthetic-button", role: "button" },
+      { ...radio, elementRef: "synthetic-checkbox", role: "checkbox" },
+    ]), query);
+    expect(otherControls.selection?.reasons.some((reason) => reason.codes.includes("enabled_bounded_radio"))).toBe(false);
+    expect(otherControls.selection?.selectedElementRefs).not.toContain("synthetic-button");
+    expect(otherControls.selection?.selectedElementRefs).not.toContain("synthetic-checkbox");
+
+    const unusableRadios = [
+      { ...radio, elementRef: "synthetic-unknown-enabled", state: { selected: false } },
+      { ...radio, elementRef: "synthetic-zero-bbox", bbox: { ...radio.bbox, width: 0 } },
+      { ...radio, elementRef: "synthetic-negative-bbox", bbox: { ...radio.bbox, width: -1 } },
+      { ...radio, elementRef: "synthetic-negative-x", bbox: { ...radio.bbox, x: -1 } },
+      { ...radio, elementRef: "synthetic-negative-y", bbox: { ...radio.bbox, y: -1 } },
+      { ...radio, elementRef: "synthetic-nonphysical-bbox", bbox: { ...radio.bbox, coordinateSpace: "css" as const } },
+      { ...radio, elementRef: "synthetic-ambiguous-radio-role", role: "AXMenuItemRadio" },
+    ];
+    for (const unusableRadio of unusableRadios) {
+      const one = new DeterministicGroundingSelector().select(hybridCatalog([unusableRadio]), {
+        goal: "unrelated query",
+        latestUserCorrections: [],
+      });
+      expect(one.elements).toHaveLength(1);
+      expect(one.selection?.reasons[0]?.codes).not.toContain("enabled_bounded_radio");
+    }
+    const sourceUnknownRadio = { ...radio, elementRef: "synthetic-source-unknown", source: undefined };
+    const sourceUnknown = new DeterministicGroundingSelector().select(hybridCatalog([sourceUnknownRadio]), {
+      goal: "unrelated query",
+      latestUserCorrections: [],
+    });
+    expect(sourceUnknown.elements[0]?.source).toBeUndefined();
+    expect(sourceUnknown.selection?.reasons[0]?.codes).not.toContain("enabled_bounded_radio");
+
+    const sameNameUiA = { ...radio, elementRef: "synthetic-same-name-uia", name: "Same-name option", source: "uia" as const, browserRegion: "content" as const };
+    const sameNameDisabledDom = { ...radio, elementRef: "synthetic-same-name-disabled-dom", role: "radio", name: "Same-name option", source: "dom" as const, browserRegion: "content" as const, state: { enabled: false } };
+    const sameNameSelection = new DeterministicGroundingSelector().select(hybridCatalog([sameNameUiA, sameNameDisabledDom]), {
+      goal: "unrelated query",
+      latestUserCorrections: [],
+    });
+    expect(sameNameSelection.selection?.candidateElementCount).toBe(2);
+    expect(sameNameSelection.selection?.deduplicatedElementCount).toBe(2);
+    expect(sameNameSelection.selection?.sourceCounts).toEqual({ uia: 1, dom: 1 });
+
+    const balancedUia = Array.from({ length: 16 }, (_, index) => ({
+      elementRef: "synthetic-balanced-uia-" + index,
+      role: "AXStaticText",
+      name: "Neutral UIA label " + index,
+      source: "uia" as const,
+      bbox: { x: 10 + index * 12, y: 500, width: 8, height: 8, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    const balancedRadio = { ...radio, elementRef: "synthetic-balanced-radio", name: "Neutral radio at UIA tail" };
+    const balancedDom = Array.from({ length: 16 }, (_, index) => ({
+      elementRef: "synthetic-balanced-dom-" + index,
+      role: "button",
+      name: "Neutral label " + index,
+      source: "dom" as const,
+      browserRegion: (index < 8 ? "content" : "unknown") as "content" | "unknown",
+      bbox: { x: 10 + index * 12, y: 540, width: 8, height: 8, coordinateSpace: "physical" as const },
+      state: { enabled: true },
+    }));
+    const balancedDomWithIntent = balancedDom.map((element, index) => ({
+      ...element,
+      name: index < 8 ? "ZebraNeedle " + index : element.name,
+    }));
+    const balanced = new DeterministicGroundingSelector().select(hybridCatalog([
+      ...balancedUia,
+      balancedRadio,
+      ...balancedDomWithIntent,
+    ]), { goal: "ZebraNeedle", latestUserCorrections: [] });
+    expect(balanced.elements).toHaveLength(16);
+    expect(balanced.elements.filter((element) => element.source === "uia")).toHaveLength(8);
+    expect(balanced.elements.filter((element) => element.source === "dom")).toHaveLength(8);
+    expect(balanced.selection?.selectedElementRefs).not.toContain(balancedRadio.elementRef);
+
+    const intentRadio = { ...radio, elementRef: "synthetic-intent-radio", name: "MacBook Air current configuration" };
+    const secondIntentRadio = { ...radio, elementRef: "synthetic-second-intent-radio", name: "MacBook Air lowest price option" };
+    const intentSelection = new DeterministicGroundingSelector().select(hybridCatalog([
+      intentRadio,
+      secondIntentRadio,
+      ...balancedDom,
+    ]), { goal: "MacBook Air lowest price", latestUserCorrections: [] });
+    expect(intentSelection.selection?.selectedElementRefs).toContain(intentRadio.elementRef);
+    expect(intentSelection.selection?.reasons.find((reason) => reason.elementRef === intentRadio.elementRef)?.codes).toContain("goal_match");
+    expect(intentSelection.selection?.selectedElementRefs).toContain(secondIntentRadio.elementRef);
+
+    const localRadio = { ...radio, elementRef: "synthetic-local-radio", bbox: { ...radio.bbox, x: 450, y: 450 } };
+    const localRadioSelection = new DeterministicGroundingSelector().select(hybridCatalog([localRadio]), {
+      goal: "unrelated query",
+      latestUserCorrections: [],
+      recoveryHint: { reason: "no_observed_change", attempt: 1, region: { x: 440, y: 440, width: 80, height: 80 } },
+    });
+    expect(localRadioSelection.selection?.selectedElementRefs).toContain(localRadio.elementRef);
+    expect(localRadioSelection.selection?.reasons.find((reason) => reason.elementRef === localRadio.elementRef)?.codes).toContain("local_recovery_region");
+
+    const focusedRadio = { ...radio, elementRef: "synthetic-focused-radio", state: { enabled: true, focused: true } };
+    const focusedRadioSelection = new DeterministicGroundingSelector().select(hybridCatalog([focusedRadio]), {
+      goal: "unrelated query",
+      latestUserCorrections: [],
+    });
+    expect(focusedRadioSelection.selection?.selectedElementRefs).toContain(focusedRadio.elementRef);
+    expect(focusedRadioSelection.selection?.reasons.find((reason) => reason.elementRef === focusedRadio.elementRef)?.codes).toContain("focused");
+
+    const limitOne = new DeterministicGroundingSelector({ hotLimit: 1, localQuota: 0, focusedEditableQuota: 0, globalQuota: 0, structuredControlQuota: 0 })
+      .select(hybridCatalog([
+        { ...radio, elementRef: "synthetic-ranked-radio-first", name: "Alpha radio" },
+        { ...radio, elementRef: "synthetic-ranked-radio-second", name: "Beta radio" },
+      ]), { goal: "unrelated query", latestUserCorrections: [] });
+    expect(limitOne.elements).toHaveLength(1);
+    expect(limitOne.elements[0]?.elementRef).toBe("synthetic-ranked-radio-first");
+    expect(limitOne.selection?.reasons[0]?.codes.length).toBeLessThanOrEqual(8);
   });
 
   it("keeps UIA and DOM state distinct when DOM enabled state is false or unknown", () => {

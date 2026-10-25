@@ -11,6 +11,30 @@ const parentSurfaceRef = {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("pending request panel", () => {
+  it("labels the exact current owned-browser restore as an explicit recovery choice", async () => {
+    const onChooseWindow = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PendingRequestPanel
+        request={{ requestId: "foreground-mismatch-restore", kind: "window_handoff", reasonCode: "foreground_mismatch", candidates: [{
+          token: "restore-owned-browser-token", appName: "Harness-managed browser", title: "Run-owned browser window",
+          restoreCurrentManagedBrowser: true,
+        }] }}
+        runId="run-owned-browser-restore"
+        onApprove={vi.fn()}
+        onRespond={vi.fn()}
+        onChooseWindow={onChooseWindow}
+        onIgnoreNewWindow={vi.fn()}
+      />,
+    );
+
+    const restore = screen.getByRole("button", { name: "恢复本任务的托管浏览器并继续" });
+    expect(restore).toBeDefined();
+    fireEvent.click(restore);
+    await waitFor(() => expect(onChooseWindow).toHaveBeenCalledWith(expect.objectContaining({
+      token: "restore-owned-browser-token", restoreCurrentManagedBrowser: true,
+    })));
+  });
+
   it("deduplicates handoff candidates by token and labels parent context separately from an untitled child", () => {
     const onChooseWindow = vi.fn().mockResolvedValue(undefined);
     const child = {

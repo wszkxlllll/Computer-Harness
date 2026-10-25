@@ -83,6 +83,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   }
   if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
   if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
+  const providerRecovery = input.providerRecovery ?? "off";
+  const providerRecoveryRunWindowMs = input.providerRecoveryRunWindowMs ?? 900_000;
+  if (providerRecovery !== "off" && providerRecovery !== "ambiguous-headers-once-v1") throw new Error("providerRecovery must be off or ambiguous-headers-once-v1");
+  if (!Number.isSafeInteger(providerRecoveryRunWindowMs) || providerRecoveryRunWindowMs <= 0 || providerRecoveryRunWindowMs > 900_000) {
+    throw new Error("providerRecoveryRunWindowMs must be a positive safe integer no greater than 900000");
+  }
   const runId = input.runId ?? generatedRunId();
   const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
@@ -303,6 +309,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       ...(dependencies.createProvider === undefined && config.model === "glm-5.3-flash" ? {
         providerAttemptReserveMs: config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS,
       } : {}),
+      providerRecovery,
+      providerRecoveryRunWindowMs,
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,

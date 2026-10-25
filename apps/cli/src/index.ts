@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, parseProviderRecoverySettings, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome, SourceLinkedFinishContract } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import { parseSourceLinkedFinishContractJson } from "@computer-harness/app-runtime";
@@ -508,6 +508,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
   const rawGlmRequestTimeoutMs = options.model === "glm-5.3-flash" ? process.env.GLM_REQUEST_TIMEOUT_MS : undefined;
   const glmRequestTimeoutMs = rawGlmRequestTimeoutMs === undefined ? undefined : Number(rawGlmRequestTimeoutMs.trim());
   validateGlmRequestTimeoutMs(glmRequestTimeoutMs);
+  const providerRecovery = parseProviderRecoverySettings(process.env);
   const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
   const hybridNativeWebDocument = options.recoverBoundWindowMissing
     && options.grounding === "hybrid-catalog-v1"
@@ -588,6 +589,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
       ? process.env.GLM_THINKING
       : "enabled",
     ...(glmRequestTimeoutMs === undefined ? {} : { glmRequestTimeoutMs }),
+    ...providerRecovery,
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };

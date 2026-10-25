@@ -18,7 +18,7 @@ import { ManagedBrowserProfileService } from "./managed-browser-profile-service.
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 import { resolveHostWindowSelector } from "./window-selection-config.js";
-import { createHostSessionConfig, type HostArguments } from "./session-config.js";
+import { createHostSessionConfig, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, type HostArguments } from "./session-config.js";
 import { resolveHostSourceLinkedFinishContract } from "./source-linked-finish-config.js";
 
 const hostDirectory = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +39,7 @@ async function main(): Promise<void> {
   const config = { ...baseConfig, ...(sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish }) };
   const windowSelector = resolveHostWindowSelector(process.env);
   if (args.model === "glm-5.3-flash") process.stdout.write(`GLM configuration: max_tokens=${args.glmMaxOutputTokens} thinking=${config.glmThinking} reasoning_effort=${glmReasoningEffort(config.glmThinking)} maxInputTokens=${config.contextMaxInputTokens} maxWireInputTokens=${config.contextMaxWireInputTokens} requestTimeoutMs=${config.glmRequestTimeoutMs} requestTimeoutSource=${process.env.GLM_REQUEST_TIMEOUT_MS === undefined ? "default" : "environment"} endpointSource=${config.glmEndpoint === undefined ? "default" : "environment"}\n`);
+  process.stdout.write(`Risk configuration: guard=${config.riskGuard} model=${config.riskModel} maxModelRequests=${config.riskMaxModelRequests} timeoutMs=${config.riskTimeoutMs}\n`);
   const environmentOwner = defaultEnvironmentOwner;
   const environmentIdentity = environmentIdentityForConfig(config.computer);
   const managedBrowserProfileService = new ManagedBrowserProfileService({
@@ -83,6 +84,9 @@ async function main(): Promise<void> {
     ...(windowSelector === undefined ? {} : { windowSelector }),
     assetReaderForRun: (_runId, handle) =>
       createFileRemoteAssetReader(join(handle.config.outputDir, "assets")),
+    onRunStarted: (receipt) => {
+      process.stdout.write(`${JSON.stringify({ type: "run.start.receipt", ...receipt })}\n`);
+    },
   });
 
   const relayUrl = process.env.HARNESS_RELAY_URL;
@@ -168,8 +172,9 @@ function parseArguments(argv: readonly string[]): HostArguments {
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
-      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192]\n");
-      process.stdout.write("Optional local env-file settings: HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1; HARNESS_OPERATION_GUIDANCE=off|catalog-v1.\n");
+      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192] [--risk-max-model-requests 1..12 (default 1)] [--risk-timeout-ms 1000..240000 (default 15000)]\n");
+      process.stdout.write("--risk-max-model-requests bounds layered semantic review requests only; it does not change the main model-request budget.\n");
+      process.stdout.write("Optional local env-file settings: HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1; HARNESS_OPERATION_GUIDANCE=off|catalog-v1; HARNESS_PROVIDER_RECOVERY=off|ambiguous-headers-once-v1 (default off); HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS=1..900000 (default 900000).\n");
       process.stdout.write("foreground-caret-v1 is only for an explicitly verified candidate CUA socket; it is not a general stock CUA 0.22 compatibility claim.\n");
       process.stdout.write("Optional Run result contract: HARNESS_SOURCE_LINKED_FINISH_CONTRACT may contain a bounded source-linked-finish-v1 JSON field contract.\n");
       process.exit(0);
@@ -194,6 +199,8 @@ function parseArguments(argv: readonly string[]): HostArguments {
   const rawPort = one("--port", "4317");
   const rawMaxSteps = one("--max-steps", String(DEFAULT_MAX_STEPS));
   const rawMaxModelRequests = one("--max-model-requests", String(DEFAULT_MAX_MODEL_REQUESTS));
+  const rawRiskMaxModelRequests = one("--risk-max-model-requests");
+  const riskTimeoutMs = parseHostRiskTimeoutMs(one("--risk-timeout-ms"));
   if (envFile === undefined || socket === undefined || output === undefined) {
     throw new Error("--env-file, --socket, and --output are required.");
   }
@@ -204,8 +211,9 @@ function parseArguments(argv: readonly string[]): HostArguments {
   if (origins.length === 0) throw new Error("At least one --origin is required.");
   const maxSteps = parseBoundedPositiveInteger(rawMaxSteps, "--max-steps", MAX_CONFIGURED_STEPS);
   const maxModelRequests = parseBoundedPositiveInteger(rawMaxModelRequests, "--max-model-requests", MAX_CONFIGURED_MODEL_REQUESTS);
+  const riskMaxModelRequests = parseHostRiskMaxModelRequests(rawRiskMaxModelRequests);
   const glmMaxOutputTokens = parseGlmOutputBudget(one("--glm-max-output-tokens"));
-  return { envFile, socket, model, output, port, origins, maxSteps, maxModelRequests, glmMaxOutputTokens };
+  return { envFile, socket, model, output, port, origins, maxSteps, maxModelRequests, riskMaxModelRequests, riskTimeoutMs, glmMaxOutputTokens };
 }
 
 function parseBoundedPositiveInteger(raw: string | undefined, option: string, maximum: number): number {

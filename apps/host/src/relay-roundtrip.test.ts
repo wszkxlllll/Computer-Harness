@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { Computer, ComputerSession, ProviderAdapter } from "@computer-harness/runtime";
+import type { Computer, ComputerSession, ModelInput, ProviderAdapter } from "@computer-harness/runtime";
 import { MAX_WINDOW_PREVIEW_BYTES, type ComputerSessionId, type RunAssistantPreferencesSnapshot, type SurfaceId, type Viewport } from "@computer-harness/protocol";
 import {
   ApplicationRemoteRunApi,
@@ -211,15 +211,17 @@ function fixtureComputer(
       };
     },
     async execute() { return { status: "completed" as const }; },
+    async listWindows() { return { options: [], truncated: false, omittedCount: 0 }; },
     async close() { await onClose?.(); },
   } as unknown as Computer;
 }
 
-function fixtureProvider(options: { askFirst?: boolean; summary?: string } = {}): ProviderAdapter {
+function fixtureProvider(options: { askFirst?: boolean; summary?: string; onModelInput?: (input: ModelInput) => void } = {}): ProviderAdapter {
   let requestCount = 0;
   return {
     id: "relay-roundtrip-provider",
-    async generate() {
+    async generate(input: ModelInput) {
+      options.onModelInput?.(input);
       requestCount += 1;
       if (options.askFirst === true && requestCount === 1) {
         return { type: "user_input_required", question: "查看截图更新后继续。" };
@@ -935,6 +937,8 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
     };
     let providerCount = 0;
     let computerCount = 0;
+    let switchContractInputs: ModelInput[] | undefined;
+    const createdComputerConfigs: ApplicationSessionConfig["computer"][] = [];
     let diagnosticAssetReadFailureInjected = false;
     let diagnosticLargeAssetReadSuccesses = 0;
     let diagnosticInlinePreviewFailureInjected = false;
@@ -970,7 +974,14 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
     try {
       await relay.listen();
       session = new ApplicationSession({
-        config: { ...sessionConfig(outputDir), ...(headlessProbeEnabled ? { cleanupDeadlineMs: 30_000 } : {}) },
+        config: {
+          ...sessionConfig(outputDir),
+          computer: { kind: "cua", socketPath: "fixture-cua.sock", screenshotDir: join(outputDir, "driver-screenshots") },
+          // A Web target which omits or disables switching must override this
+          // enabled Host default all the way to the real Provider tool catalog.
+          windowSwitch: "opened-windows-v1",
+          ...(headlessProbeEnabled ? { cleanupDeadlineMs: 30_000 } : {}),
+        },
         owner: new InProcessEnvironmentOwner(),
         windowDiscovery: {
           listWindows: async () => [
@@ -1007,6 +1018,10 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         dependencies: {
           createProvider: () => {
             providerCount += 1;
+            if (switchContractInputs !== undefined) {
+              const inputs = switchContractInputs;
+              return fixtureProvider({ askFirst: true, onModelInput: (input) => inputs.push(input) });
+            }
             if (headlessProbeEnabled) console.info(`[headless-mobile-relay] creating fixture Provider ${providerCount}`);
             const askFirst = headlessProbeEnabled && providerCount === 2;
             if (headlessProbeEnabled) console.info(`[headless-mobile-relay] provider will ask first: ${askFirst}`);
@@ -1015,8 +1030,9 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
               summary: providerCount === 3 ? "The next fixture task completed." : undefined,
             });
           },
-          createComputer: async () => {
+          createComputer: async ({ config }) => {
             computerCount += 1;
+            createdComputerConfigs.push(config);
             const isScreenshotUpdateRun = headlessProbeEnabled && computerCount === 2;
             const realScreenshots = isScreenshotUpdateRun && sourceRunScreenshots !== undefined
               ? {
@@ -1398,6 +1414,49 @@ describe("built Web API through Host HTTP and the real Relay WSS bridge", () => 
         }
         await writeFile(reportPath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
         console.info(`[headless-mobile-relay] evidence saved to ${reportPath}`);
+      }
+
+      // Reuse the authenticated Web API -> Relay WSS -> Host HTTP path and
+      // real Session/Factory above. These are configuration-contract tests:
+      // every Provider and Computer is a local fixture, with no desktop or
+      // external model access, and no direct call to session.startRun().
+      for (const [name, target, expectedWindowSwitch] of [
+        ["omitted", { mode: "desktop" as const }, "off"],
+        ["false", { mode: "desktop" as const, switchWindows: false }, "off"],
+        ["true", { mode: "desktop" as const, switchWindows: true }, "opened-windows-v1"],
+      ] as const) {
+        const modelInputs: ModelInput[] = [];
+        switchContractInputs = modelInputs;
+        const commandId = `desktop-switch-contract-${name}`;
+        const started = await webApi.createRun("Inspect the desktop configuration", commandId, target);
+        const waiting = await waitForValue(async () => {
+          const snapshot = await webApi.getRun(started.runId);
+          return snapshot.status === "waiting_user" ? snapshot : undefined;
+        }, `the ${name} desktop switch fixture to wait for input`);
+        const bridged = bridgeRequests.find((request) => request.method === "POST" && request.path === "/api/runs" && request.body?.commandId === commandId);
+        expect(bridged?.body?.target).toEqual(target);
+        expect(hostStartTargets.at(-1)).toEqual(name === "true" ? target : { mode: "desktop" });
+        expect(session.activeRun?.config).toMatchObject({ windowSwitch: expectedWindowSwitch });
+        expect(createdComputerConfigs.at(-1)).toMatchObject({ kind: "cua", windowSwitch: expectedWindowSwitch });
+        expect(createdComputerConfigs.at(-1)).not.toHaveProperty("windowTarget");
+        expect(waiting.pendingRequest?.kind).toBe("user_input");
+        if (waiting.pendingRequest?.kind !== "user_input") throw new Error("fixture must expose its input request");
+        await webApi.sendCommand(started.runId, `desktop-switch-continue-${name}`, {
+          type: "respond", expectedSequence: waiting.sequence,
+          requestId: waiting.pendingRequest.requestId, text: "Continue the local fixture.",
+        });
+        await session.waitForActiveRun();
+        expect(modelInputs).toHaveLength(2);
+        for (const input of modelInputs) {
+          const toolNames = input.tools.map((tool) => tool.name);
+          for (const tool of ["list_windows", "switch_window"]) {
+            if (expectedWindowSwitch === "off") expect(toolNames).not.toContain(tool);
+            else expect(toolNames).toContain(tool);
+          }
+        }
+        const finished = await webApi.getRun(started.runId);
+        expect(finished).toMatchObject({ status: "finished", outcome: "succeeded", ownerState: "released" });
+        switchContractInputs = undefined;
       }
 
       await webApi.deletePhoneSession();

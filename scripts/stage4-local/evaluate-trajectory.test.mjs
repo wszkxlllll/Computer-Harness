@@ -47,7 +47,15 @@ function events() {
 async function fixture(t) {
   // Keep generated artifacts under the workspace, including on platforms without /tmp.
   const directory = await mkdtemp(join(workspace, "evaluator-regression-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    // These fixtures deliberately create multiple names for the same inode.
+    // Remove root files serially before recursive cleanup so aliases are not
+    // unlinked concurrently. Never follow the test's directory symlinks.
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isFile()) await rm(join(directory, entry.name), { force: true });
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
   await mkdir(join(directory, "assets"));
   await writeFile(join(directory, "assets", "initial.png"), png);
   await writeFile(join(directory, "assets", "final.png"), png);

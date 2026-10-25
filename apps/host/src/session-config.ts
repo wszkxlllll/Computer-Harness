@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import type { ApplicationSessionConfig, RunModel } from "@computer-harness/app-runtime";
+import { parseProviderRecoverySettings } from "@computer-harness/app-runtime";
 import { parseGlmInputBudgets, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 export interface HostArguments {
@@ -11,7 +12,32 @@ export interface HostArguments {
   origins: string[];
   maxSteps: number;
   maxModelRequests: number;
+  riskMaxModelRequests?: number;
+  riskTimeoutMs?: number;
   glmMaxOutputTokens: number;
+}
+
+export const DEFAULT_HOST_RISK_MAX_MODEL_REQUESTS = 1;
+export const MAX_HOST_RISK_MAX_MODEL_REQUESTS = 12;
+export const DEFAULT_HOST_RISK_TIMEOUT_MS = 15_000;
+export const MAX_HOST_RISK_TIMEOUT_MS = 240_000;
+
+/** Explicit Host-local deadline; a timeout still requires approval. */
+export function parseHostRiskTimeoutMs(raw: string | undefined): number {
+  const value = Number(raw ?? DEFAULT_HOST_RISK_TIMEOUT_MS);
+  if (!Number.isSafeInteger(value) || value < 1_000 || value > MAX_HOST_RISK_TIMEOUT_MS) {
+    throw new Error(`--risk-timeout-ms must be an integer from 1000 to ${MAX_HOST_RISK_TIMEOUT_MS}.`);
+  }
+  return value;
+}
+
+/** Parse the explicit CLI-only semantic review request bound. */
+export function parseHostRiskMaxModelRequests(raw: string | undefined): number {
+  const value = Number(raw ?? DEFAULT_HOST_RISK_MAX_MODEL_REQUESTS);
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_HOST_RISK_MAX_MODEL_REQUESTS) {
+    throw new Error(`--risk-max-model-requests must be an integer from 1 to ${MAX_HOST_RISK_MAX_MODEL_REQUESTS}.`);
+  }
+  return value;
 }
 
 export interface HostManagedBrowserProfileConfig {
@@ -22,6 +48,8 @@ export interface HostManagedBrowserProfileConfig {
 export interface HostRunProfileSettings {
   readonly multilineTypeProfile?: HostCuaComputerConfig["multilineTypeProfile"];
   readonly operationGuidance?: "catalog-v1";
+  readonly providerRecovery: "off" | "ambiguous-headers-once-v1";
+  readonly providerRecoveryRunWindowMs: number;
 }
 
 type HostCuaComputerConfig = Extract<ApplicationSessionConfig["computer"], { kind: "cua" }>;
@@ -47,9 +75,11 @@ export function resolveHostRunProfileSettings(env: NodeJS.ProcessEnv): HostRunPr
   } else {
     throw new Error("HARNESS_OPERATION_GUIDANCE must be off or catalog-v1.");
   }
+  const providerRecovery = parseProviderRecoverySettings(env);
   return {
     ...(multilineTypeProfile === undefined ? {} : { multilineTypeProfile }),
     ...(operationGuidance === undefined ? {} : { operationGuidance }),
+    ...providerRecovery,
   };
 }
 
@@ -91,8 +121,8 @@ export function createHostSessionConfig(
     riskProfile: "live-interactive",
     riskGuard: "layered",
     riskModel: "same",
-    riskMaxModelRequests: 1,
-    riskTimeoutMs: 15_000,
+    riskMaxModelRequests: args.riskMaxModelRequests ?? DEFAULT_HOST_RISK_MAX_MODEL_REQUESTS,
+    riskTimeoutMs: parseHostRiskTimeoutMs(args.riskTimeoutMs === undefined ? undefined : String(args.riskTimeoutMs)),
     cleanupDeadlineMs: 5_000,
     // Keep no-progress evidence in the model context without automatically
     // blocking a phone-driven action while the interaction path is under test.
@@ -101,6 +131,8 @@ export function createHostSessionConfig(
     glmThinking: readGlmThinking(env.GLM_THINKING),
     glmMaxOutputTokens: args.glmMaxOutputTokens,
     glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
+    providerRecovery: profileSettings.providerRecovery,
+    providerRecoveryRunWindowMs: profileSettings.providerRecoveryRunWindowMs,
     ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: env.DASHSCOPE_WORKSPACE_ID }),

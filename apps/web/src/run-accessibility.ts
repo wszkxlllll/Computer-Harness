@@ -1,5 +1,10 @@
 import type { ApprovalActionPreviewItem, PendingRequestBase, RunOutcome, RunStatus } from "./types";
+import { isPotentiallySensitive } from "@computer-harness/voice";
 import { statusTextFor } from "./components/StatusLabel";
+
+const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
+const MAX_APPROVAL_PLAN_TARGET_CHARS = 64;
+const MAX_APPROVAL_PLAN_SUMMARY_CHARS = 96;
 
 export type RunAnnouncementConnection = "loading" | "live" | "reconnecting" | "offline";
 
@@ -108,11 +113,12 @@ export function pendingRequestAnnouncement(request: PendingRequestBase, replaced
     const actionText = actions.length > 0
       ? `待批准操作：${actions.slice(0, 16).map(actionSummary).join("；")}${actions.length > 16 ? `；另有 ${actions.length - 16} 项` : ""}。`
       : "电脑没有提供具体操作摘要。";
+    const planText = approvalEffectAnnouncement(request.preview?.modelDeclaredEffect);
     const needsVisualReview = request.requiresVisualReview !== false || actions.length > 0;
     const reviewBoundary = needsVisualReview
       ? "文字说明和操作摘要不能核实电脑当前画面；无法核对目标或后果时，请拒绝或请可信任的人协助。"
       : "请阅读请求说明后再决定。";
-    return `${replaced ? "当前待处理请求已更换。" : "有一项待处理确认。"}${context.length ? `原因：${context.join(" ")}。` : "请求没有提供原因。"}${actionText}${reviewBoundary}`;
+    return `${replaced ? "当前待处理请求已更换。" : "有一项待处理确认。"}${context.length ? `原因：${context.join(" ")}。` : "请求没有提供原因。"}${planText}${actionText}${reviewBoundary}`;
   }
 
   if (request.kind === "user_input") {
@@ -164,8 +170,43 @@ export function pendingRequestKey(request: PendingRequestBase | undefined): stri
   if (!request) return undefined;
   const fields = [request.requestId, request.kind, request.title, request.reason, request.question, request.description];
   const actionSummaries = (request.preview?.actions ?? []).slice(0, 16).map(actionSummary);
+  const effect = request.preview?.modelDeclaredEffect;
+  const effectFields = effect?.verified === false ? [effect.target, effect.summary] : [];
   const candidateLabels = (request.candidates ?? []).map((candidate) => [candidate.appName, candidate.title, candidate.description].filter(Boolean).join(" "));
-  return [...fields, ...actionSummaries, ...candidateLabels, request.omittedCandidateCount].map((value) => value ?? "").join("\u0000");
+  return [...fields, ...effectFields, ...actionSummaries, ...candidateLabels, request.omittedCandidateCount].map((value) => value ?? "").join("\u0000");
+}
+
+function approvalEffectAnnouncement(effect: NonNullable<PendingRequestBase["preview"]>["modelDeclaredEffect"]): string {
+  if (effect?.verified !== false || typeof effect.target !== "string" || typeof effect.summary !== "string") {
+    return "还不能确定具体对象和影响，请先不要批准。";
+  }
+  const target = normalizeApprovalPlanText(effect.target);
+  const summary = normalizeApprovalPlanText(effect.summary);
+  if (!target || !summary) return "还不能确定具体对象和影响，请先不要批准。";
+
+  const normalizedPlan = `${target}\n${summary}`.replace(CONTROL_CHARACTERS, " ").replace(/\s+/gu, " ").trim();
+  if (isPotentiallySensitive(normalizedPlan)) {
+    return "具体说明不适合自动朗读，请在审批详情核对，或请可信任的人协助；核对前请不要批准。";
+  }
+  const boundedTarget = boundApprovalPlanText(target, MAX_APPROVAL_PLAN_TARGET_CHARS);
+  const boundedSummary = boundApprovalPlanText(summary, MAX_APPROVAL_PLAN_SUMMARY_CHARS);
+  return `电脑打算按这份说明操作：「${boundedSummary}」；目标：「${boundedTarget}」。这项操作还没执行；说明未经核实，仍需核对。`;
+}
+
+function normalizeApprovalPlanText(value: string): string {
+  return value.replace(CONTROL_CHARACTERS, " ").replace(/\s+/gu, " ").trim();
+}
+
+function boundApprovalPlanText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  let end = maxChars - 1;
+  if (end > 0 && end < value.length) {
+    const previous = value.charCodeAt(end - 1);
+    const next = value.charCodeAt(end);
+    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  }
+  const prefix = value.slice(0, end).trimEnd();
+  return `${prefix || value.slice(0, end)}…`;
 }
 
 function actionSummary(action: ApprovalActionPreviewItem): string {

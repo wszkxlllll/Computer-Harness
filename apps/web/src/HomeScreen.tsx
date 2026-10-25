@@ -41,6 +41,7 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   const [browserUrl, setBrowserUrl] = useState("");
   const [browserSetupRequired, setBrowserSetupRequired] = useState(false);
   const commandIdByTarget = useRef(new Map<string, string>());
+  const startInFlight = useRef(false);
   const previewAbortController = useRef<AbortController | undefined>(undefined);
   const activeRun = runs.find((run) => activeStatuses.has(run.status)) ??
     runs.find((run) => run.status === "finished" && run.ownerState === "pending_cleanup");
@@ -180,7 +181,7 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
   }
 
   async function start(goal: string, target: RunTarget) {
-    if (loading || listError || activeRun || sending) return;
+    if (loading || listError || activeRun || sending || startInFlight.current) return;
     if (target.mode === "window") {
       const targetToken = target.targetToken;
       if (!Number.isFinite(windowExpiresAtMs) || windowExpiresAtMs <= Date.now() || !windowTargets.some((candidate) => candidate.token === targetToken)) {
@@ -206,30 +207,32 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
     }
     if (target.mode === "browser" && target.url !== undefined && !isValidBrowserUrl(target.url)) return;
 
-    setSending(true);
-    setError(undefined);
-    setBrowserSetupRequired(false);
-    if (preferences.voice.runNoticesEnabled) {
-      const rate = preferences.voice.speechRate === "slow" ? 0.85 : preferences.voice.speechRate === "fast" ? 1.15 : 1;
-      announceBrowserText("正在发送任务。", rate);
-    }
-    const assistantPreferences = toRunAssistantPreferencesSnapshot(preferences.assistant);
-    const actionKey = JSON.stringify([goal, target, assistantPreferences, preferences.voice.runNoticesEnabled]);
-    const commandId = commandIdByTarget.current.get(actionKey) ?? crypto.randomUUID();
-    commandIdByTarget.current.set(actionKey, commandId);
+    startInFlight.current = true;
+    let actionKey: string | undefined;
     try {
+      setSending(true);
+      setError(undefined);
+      setBrowserSetupRequired(false);
+      if (preferences.voice.runNoticesEnabled) {
+        const rate = preferences.voice.speechRate === "slow" ? 0.85 : preferences.voice.speechRate === "fast" ? 1.15 : 1;
+        announceBrowserText("正在发送任务。", rate);
+      }
+      const assistantPreferences = toRunAssistantPreferencesSnapshot(preferences.assistant);
+      actionKey = JSON.stringify([goal, target, assistantPreferences, preferences.voice.runNoticesEnabled]);
+      const commandId = commandIdByTarget.current.get(actionKey) ?? crypto.randomUUID();
+      commandIdByTarget.current.set(actionKey, commandId);
       const response = await createRun(goal, commandId, target, assistantPreferences, preferences.voice.runNoticesEnabled);
-      commandIdByTarget.current.delete(actionKey);
       navigateWithinApp(`/run/${encodeURIComponent(response.runId)}`);
+      commandIdByTarget.current.delete(actionKey);
     } catch (caught) {
-      if (shouldClearAfterFailure(caught) || (caught instanceof ApiError && caught.code === "WINDOW_DISCOVERY_FAILED")) {
+      if (actionKey !== undefined && (shouldClearAfterFailure(caught) || (caught instanceof ApiError && caught.code === "WINDOW_DISCOVERY_FAILED"))) {
         commandIdByTarget.current.delete(actionKey);
       }
       if (caught instanceof ApiError && caught.code === "WINDOW_SELECTION_REQUIRED" && target.mode === "auto") {
         setTargetMode("window");
         setSelectedTargetToken(undefined);
         setError(caught.message);
-        await refreshWindowTargets();
+        void refreshWindowTargets();
       } else if (caught instanceof ApiError && caught.code === "WINDOW_TARGET_STALE" && target.mode === "window") {
         previewAbortController.current?.abort();
         previewAbortController.current = undefined;
@@ -250,8 +253,10 @@ export function HomeScreen({ commonSiteChoices = [] }: { commonSiteChoices?: rea
         setError(caught.message);
       } else {
         setError(caught instanceof Error ? caught.message : "任务没有发送成功。网络恢复后可以再次尝试。");
-        if (caught instanceof ApiError && caught.code === "RUN_BUSY") await refresh();
+        if (caught instanceof ApiError && caught.code === "RUN_BUSY") void refresh();
       }
+    } finally {
+      startInFlight.current = false;
       setSending(false);
     }
   }

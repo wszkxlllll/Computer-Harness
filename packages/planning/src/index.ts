@@ -217,13 +217,13 @@ export function createPlanningTools(store: PlanStore, options: PlanningToolOptio
   return [
     {
       name: "task_create",
-      description: "Handoff-sized current phase for multi-stage/cross-interface/compare/summarize GUI tasks: same ModelTurn before first GUI action, create before the first GUI action, then at completion (when the Goal remains unfinished) task_update the completed phase and task_create exactly the next handoff phase in the same ModelTurn, with at most two Planning/Memory writes total. Describe only this phase and unfinished work; do not copy the original Goal, final deliverables, reasoning, or future stages. skip simple screens/every-click plans.",
+      description: "Handoff-sized current phase for multi-stage/cross-interface/compare/summarize GUI tasks. Accepts only required subject and optional description; no status, taskId, dependencies or extra fields. In the same ModelTurn before the first GUI action, create the current phase. When it completes while the Goal remains unfinished, task_update the completed phase then task_create exactly the next phase in the same ModelTurn, with at most two Planning/Memory writes total. Describe only this phase, necessary unfinished work, viewed/uncovered regions and concrete evidence gaps; do not copy the Goal, final deliverables, reasoning or future stages. Skip simple screens/every-click plans. Never combine planning writes with terminate.",
       category: "planning",
       inputSchema: {
         type: "object",
         properties: {
           subject: { type: "string", minLength: 1, description: "Short title for the current handoff-sized phase; do not restate the original Goal or final delivery." },
-          description: { type: "string", description: "Only this phase's goal and necessary unfinished work (for example, fill the current form); omit final requirements and future stages." },
+          description: { type: "string", description: "Current phase and necessary unfinished work, including concise observation-bound coverage/evidence gaps when needed; omit final requirements and future stages." },
         },
         required: ["subject"],
         additionalProperties: false,

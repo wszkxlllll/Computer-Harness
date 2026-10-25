@@ -174,12 +174,17 @@ describe("default Computer tools", () => {
     expect(list?.category).toBe("side");
     expect(list?.description).toContain("a dialog may be a separate window");
     expect(list?.description).toContain("wait for a fresh observation before interacting");
+    expect(list?.description).toContain("isCurrent means the Run's bound capture target");
+    expect(list?.description).toContain("does not prove physical foreground");
+    expect(list?.description).toContain("even if isCurrent is true");
     expect(change).toMatchObject({ category: "computer", isolatedTurn: true });
     expect(change?.category === "computer" ? change.description : "").toContain("Desktop capture/input stays full");
     expect(change?.category === "computer" ? change.description : "").toContain("native-window scope rebinds");
-    expect(change?.category === "computer" ? change.description : "").toContain("Already foreground: no-op");
+    expect(change?.category === "computer" ? change.description : "").toContain("isCurrent means the Run's bound target, not verified physical foreground");
+    expect(change?.category === "computer" ? change.description : "").toContain("may restore focus after a Run-created peer takes foreground");
+    expect(change?.category === "computer" ? change.description : "").toContain("may refuse without dispatch");
     expect(change?.category === "computer" ? change.description : "").toContain("Sole call this turn");
-    expect(change?.category === "computer" ? change.description : "").toContain("reobserve before next action");
+    expect(change?.category === "computer" ? change.description : "").toContain("reobserve before any further action");
     expect(createDefaultComputerTools().get("list_windows")).toBeUndefined();
     expect(createDefaultComputerTools().get("switch_window")).toBeUndefined();
 

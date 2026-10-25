@@ -18,6 +18,7 @@ function harness(overrides={}){
   if(name.startsWith('node:'))return localRequire(name);
   if(name==='./cua-sdk-platform.js')return {loadCuaSdkModule:async()=>{loads++;calls.push(['load']);return state.loader(loads);}};
   if(name==='./window-contract.js')return {listWindowInventory:async(d,s,signal)=>{signal.throwIfAborted();await d.callTool('list_windows');return {windows:[],source:'cua_inventory',complete:false,completeAttestation:'missing'};},validateWindowTarget(){},captureWindowWithRetry(){throw Error('capture forbidden');},activateWindowTarget(){throw Error('activation forbidden');}};
+  if(name==='./windows-visible-window-capture.js')return {captureVisibleWindowRegion(){throw Error('visible capture forbidden');}};
   throw Error('unapproved import');
  };
  vm.runInNewContext(js,{module,exports:module.exports,require,AbortSignal,DOMException,TypeError,process:{platform:'darwin'}},{filename:'frozen-window-discovery.js'});

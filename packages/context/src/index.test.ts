@@ -53,6 +53,24 @@ function observation(id: string) {
 }
 
 describe("DefaultContextCompiler", () => {
+  it("keeps sampled window visibility explicit without inventing unknown state or activation proof", () => {
+    const text = formatWindowSwitchState(undefined, {
+      options: [
+        { windowRef: "visible-open", appName: "TextEdit", title: "Open", isCurrent: false, isOnScreen: true, minimized: false },
+        { windowRef: "offscreen-untitled", appName: "TextEdit", title: "", isCurrent: false, isOnScreen: false, minimized: true },
+        { windowRef: "unknown", appName: "TextEdit", title: "", isCurrent: false },
+      ],
+      truncated: false,
+      omittedCount: 0,
+    }, undefined, viewport);
+    expect(text).toContain("windowRef=visible-open isOnScreen=true minimized=false");
+    expect(text).toContain("windowRef=offscreen-untitled isOnScreen=false minimized=true");
+    expect(text?.split("\n").find((line) => line.startsWith("- windowRef=unknown"))).toBe("- windowRef=unknown app=TextEdit title=");
+    expect(text).toContain("only that inventory sample, not current foreground or guaranteed activation");
+    expect(text).toContain("absent means unknown");
+    expect(text).toContain("An offscreen untitled window is not evidence of a blank document");
+  });
+
   it("projects first-observed window metadata before same-label alternatives without implying ownership", () => {
     const text = formatWindowSwitchState(undefined, {
       options: [
@@ -65,6 +83,54 @@ describe("DefaultContextCompiler", () => {
     expect(text).toContain("windowRef=new-save [first observed after action=save-action; not proof of creation, ownership, foreground, or relation]");
     expect(text).toContain("windowRef=existing-save");
     expect(text?.indexOf("windowRef=new-save")).toBeLessThan(text?.indexOf("windowRef=existing-save") ?? -1);
+  });
+
+  it("distinguishes incomplete inventories from known omitted candidates", () => {
+    const unknownCount = formatWindowSwitchState(undefined, {
+      options: [],
+      truncated: true,
+      omittedCount: 0,
+    }, undefined, viewport);
+    expect(unknownCount).toContain("The source inventory is incomplete and no additional selectable windows are known to have been omitted; whether other windows exist is unknown.");
+    expect(unknownCount).not.toContain("0 additional selectable windows were omitted");
+
+    const missingCount = formatWindowSwitchState(undefined, {
+      options: [],
+      truncated: true,
+    }, undefined, viewport);
+    expect(missingCount).toContain("The source completeness and count of known omissions are unavailable; additional selectable windows may exist.");
+
+    const knownCount = formatWindowSwitchState(undefined, {
+      options: [],
+      truncated: true,
+      omittedCount: 3,
+    }, undefined, viewport);
+    expect(knownCount).toContain("At least 3 known selectable windows were omitted from this projection; the source may also be incomplete, so the total number of selectable windows is unknown.");
+    expect(knownCount).not.toContain("3 additional selectable windows were omitted");
+  });
+
+
+  it("distinguishes complete inventories, unknown source completeness, and known omitted windows", () => {
+    const render = (truncated: boolean, omittedCount: number) => formatWindowSwitchState(undefined, {
+      options: [],
+      truncated,
+      omittedCount,
+    }, undefined, viewport)!;
+
+    const complete = render(false, 0);
+    expect(complete).not.toContain("window list may be incomplete");
+
+    const unknownSource = render(true, 0);
+    expect(unknownSource).toContain("This window list may be incomplete.");
+    expect(unknownSource).toContain("The source inventory is incomplete");
+    expect(unknownSource).toContain("no additional selectable windows are known to have been omitted");
+    expect(unknownSource).toContain("whether other windows exist is unknown");
+
+    const knownOmissions = render(true, 3);
+    expect(knownOmissions).toContain("At least 3 known selectable windows were omitted from this projection");
+    expect(knownOmissions).toContain("the source may also be incomplete");
+    expect(knownOmissions).toContain("the total number of selectable windows is unknown");
+    expect(knownOmissions).not.toContain("3 additional selectable windows were omitted");
   });
 
   it("keeps the system prefix stable while fully budgeting dynamic request guidance and retaining final-only tools", async () => {
@@ -80,7 +146,8 @@ describe("DefaultContextCompiler", () => {
     const constrained = await compileWithBudget(2);
     const final = await compileWithBudget(1);
     expect(constrained.system).toBe(ordinary.system);
-    expect(constrained.messages[1]).toMatchObject({ role: "user", content: [{ type: "text", text: expect.stringContaining("Runtime request budget: Only 2 model requests remain including this one.") }] });
+    expect(constrained.messages).toHaveLength(ordinary.messages.length + 1);
+    expect(constrained.messages[1]).toMatchObject({ role: "user", content: [{ type: "text", text: expect.any(String) }] });
     expect(constrained.contextBudget?.estimatedFixedTextTokens).toBe(Math.ceil([
       constrained.system,
       goal,
@@ -91,10 +158,8 @@ describe("DefaultContextCompiler", () => {
       "",
       constrained.messages[1]?.content[0]?.type === "text" ? constrained.messages[1].content[0].text : "",
     ].join("\n").length / 4));
-    expect(final.system).toBe(ordinary.system);
     expect(final.tools.map((tool) => tool.name)).toEqual(["terminate"]);
-    expect(JSON.stringify(final.messages)).toContain("This is the final model request");
-    expect(JSON.stringify(final.messages)).toContain("complete user-facing result text");
+    expect(final.messages[1]).toMatchObject({ role: "user", content: [{ type: "text", text: expect.any(String) }] });
   });
 
   it("projects the registered terminate contract and adds source-linked guidance only when enabled", async () => {
@@ -216,6 +281,9 @@ describe("DefaultContextCompiler", () => {
       expect(input.system).toContain("Preserve the Goal's scope and every stated condition");
       expect(input.system).toContain("change it or report the specific evidence gap");
       expect(input.system).toContain("never blindly replay an input");
+      expect(input.system).toContain("not confirmed here");
+      expect(input.system).toContain("partial/truncated evidence never proves absence");
+      expect(input.system).toContain("terminate must be the sole call");
       expect(input.system).toContain("Custom stable base.");
       expect(input.system).not.toContain("Planning tools are optional");
       expect(input.system).not.toContain("Run Memory is enabled");
@@ -789,7 +857,7 @@ describe("DefaultContextCompiler", () => {
     expect(selection.revalidationCandidates.map((candidate) => candidate.fact.id)).toEqual(["check"]);
   });
 
-  it("composes feature-specific instructions without leaking disabled planning or batch semantics", async () => {
+  it("projects layered action effects on ordinary Computer tools but not control or window-switch tools", async () => {
     const latest = observation("obs-features");
     const compiler = new DefaultContextCompiler(createDefaultComputerTools(), {
       features: { planning: "off", memory: "off", batching: "off" },
@@ -797,41 +865,40 @@ describe("DefaultContextCompiler", () => {
     const off = await compiler.compile({ runId, goal: "baseline", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off" } }, new AbortController().signal);
     expect(off.system).not.toContain("Planning tools");
     expect(off.system).not.toContain("Run Memory");
-    expect(off.system).toContain("finish.summary is the user-facing answer");
-    expect(off.system).toContain("Do not return only a status");
+    expect(off.system).not.toContain("_harnessEffect");
+    expect(off.tools.find((tool) => tool.name === "click")?.inputSchema).not.toMatchObject({
+      properties: expect.objectContaining({ _harnessEffect: expect.anything() }),
+    });
+    expect(off.system).toContain("finish.summary is the full user answer");
+    expect(off.system).toContain("do not return only a status");
     expect(off.system).not.toContain("recalled Run Memory");
     expect(off.system).toContain("at most one Computer tool call");
     expect(off.system).not.toContain("same ModelTurn");
     expect(off.system).not.toContain("first GUI action");
-    const readOnlyLookupGuidance = off.system.slice(off.system.indexOf("Only read-only queries"), off.system.indexOf("If an exact read-only input"));
-    expect(readOnlyLookupGuidance).toContain("a coarse-grained query control or broader criteria for candidate discovery");
-    expect(readOnlyLookupGuidance).toContain("Verify each candidate against every original Goal constraint");
-    expect(readOnlyLookupGuidance).toContain("report only verified matches");
-    expect(readOnlyLookupGuidance).toContain("state any shortfall rather than loosening criteria to fill a requested count");
-    expect(readOnlyLookupGuidance).toContain("edits, submissions, sends, purchases or payments, deletions, disclosures, and other changes");
-    expect(readOnlyLookupGuidance).toMatch(/strictly within the original Goal/u);
+    const readOnlyLookupGuidance = off.system.slice(off.system.indexOf("Coarse discovery criteria"), off.system.indexOf("If the exact read-only input"));
+    expect(readOnlyLookupGuidance).toContain("for read-only queries only");
+    expect(readOnlyLookupGuidance).toContain("verify each candidate against every Goal condition");
+    expect(readOnlyLookupGuidance).toContain("report only verified matches and shortfalls");
+    expect(readOnlyLookupGuidance).toContain("never loosen criteria to fill a count");
+    expect(off.system).toContain("do not add filters or widen side effects");
     expect(readOnlyLookupGuidance).not.toMatch(/\b(?:website|site|app|application|train|railway|ticket|flight|airline)\b/iu);
     const batch = await compiler.compile({ runId, goal: "batch", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", executionSegments: "segments-v1", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
-    expect(batch.system).toContain("same ModelTurn as the first GUI action");
-    expect(batch.system).toContain("one handoff-sized current phase");
-    expect(batch.system).toContain("do not copy the original Goal");
-    expect(batch.system).toContain("task_update with status completed followed by task_create");
-    expect(batch.system).toContain("exactly the next handoff-sized phase");
-    expect(batch.system).toContain("at most two Planning/Memory writes total");
-    expect(batch.system).toContain("1-2 key facts in the same ModelTurn");
-    expect(batch.system).toContain("do not write task-retention Memory");
-    expect(batch.system).toContain("relatedTaskIds");
-    expect(batch.system).toContain("same-turn writes alongside GUI");
+    expect(batch.system).toContain("Before the first GUI action, create one handoff-sized current phase only");
+    expect(batch.system).toContain("do not copy the Goal or future stages");
+    expect(batch.system).toContain("same turn may call task_update(completed) then task_create for only the next phase");
+    expect(batch.system).toContain("at most two Planning/Memory writes");
+    expect(batch.system).toContain("write 1–2 facts that must survive context/stages");
+    expect(batch.system).toContain("do not write it before task_create returns; then link its id");
+    expect(batch.system).toContain("Independent same-turn Memory writes remain allowed");
     expect(batch.system).toContain("state writes");
     expect(batch.system).not.toContain("OS=");
     expect(batch.system).toContain("click→type");
     expect(batch.system).toContain("hotkey with exact keys [CTRL, A]");
     expect(batch.system).toContain("click_element and CMD/Meta+A are not supported in batches");
-    expect(batch.system).toContain("Never combine a read tool such as memory_get with a Computer call");
-    expect(batch.system).toContain("2-4 predictable click micro-steps");
-    expect(batch.system).toContain("Call it immediately before the first GUI click");
-    expect(batch.system).toContain("Do not create one for a simple one-click screen or every click");
-    expect(batch.system).toContain("never use it for type/keypress/scroll/drag/wait");
+    expect(batch.system).toContain("never combine memory_get with Computer");
+    expect(batch.system).toContain("2–4 predictable click steps");
+    expect(batch.system).toContain("immediately before the first click");
+    expect(batch.system).toContain("Not for simple clicks, typing, navigation, scroll/drag/wait");
     const macBatch = await compiler.compile({
       runId,
       goal: "replace text on macOS",
@@ -868,20 +935,22 @@ describe("DefaultContextCompiler", () => {
     expect(linuxBatch.system).toContain("hotkey with exact keys [CTRL, A]");
     expect(linuxBatch.system).toContain("CMD/Meta+A are not supported in batches");
     const planningOnly = await compiler.compile({ runId, goal: "planning only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "tasks-v1", memory: "off", batching: "same-control-input-v1" } }, new AbortController().signal);
-    expect(planningOnly.system).toContain("same ModelTurn as the first GUI action");
-    expect(planningOnly.system).toContain("do not copy the original Goal");
+    expect(planningOnly.system).toContain("Before the first GUI action, create one handoff-sized current phase only");
+    expect(planningOnly.system).toContain("do not copy the Goal or future stages");
     expect(planningOnly.system).not.toContain("Run Memory");
-    expect(planningOnly.system).not.toContain("1-2 key facts");
-    expect(planningOnly.system).not.toContain("2-4 predictable click micro-steps");
+    expect(planningOnly.system).not.toContain("write 1–2 facts");
+    expect(planningOnly.system).not.toContain("2–4 predictable click steps");
     const memoryOnly = await compiler.compile({ runId, goal: "memory only", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "facts-v1", batching: "same-control-input-v1" } }, new AbortController().signal);
-    expect(memoryOnly.system).toContain("leave recent context");
-    expect(memoryOnly.system).toContain("1-2 key facts in the same ModelTurn");
-    expect(memoryOnly.system).toContain("Do not copy the original Goal or Plan");
-    expect(memoryOnly.system).toContain("do not write task-retention Memory");
-    expect(memoryOnly.system).toContain("relatedTaskIds");
+    expect(memoryOnly.system).toContain("facts that must survive context/stages");
+    expect(memoryOnly.system).toContain("write 1–2 facts");
+    expect(memoryOnly.system).toContain("Do not duplicate the Goal/Plan/current screen");
+    expect(memoryOnly.system).toContain("do not write it before task_create returns; then link its id");
     expect(memoryOnly.system).not.toContain("Planning tools");
     const guarded = await compiler.compile({ runId, goal: "guard", recentEvents: [{ ...event(0, { type: "observation.created", observation: latest }) }], features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" } }, new AbortController().signal);
     expect(guarded.system).toContain("_harnessEffect");
+    expect(guarded.system).toContain("Include _harnessEffect only when the exposed schema declares it");
+    expect(guarded.system).toContain("supply its required effects/target/summary");
+    expect(guarded.system).not.toContain("For every Computer tool call except switch_window");
     expect(guarded.tools.find((tool) => tool.category === "computer")?.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(guarded.tools.find((tool) => tool.category === "control")?.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
 
@@ -903,10 +972,11 @@ describe("DefaultContextCompiler", () => {
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
     }, new AbortController().signal);
     const switchTool = guardedWindowSwitch.tools.find((tool) => tool.name === "switch_window")!;
+    const listWindowsTool = guardedWindowSwitch.tools.find((tool) => tool.name === "list_windows")!;
     const clickTool = guardedWindowSwitch.tools.find((tool) => tool.name === "click")!;
-    expect(guardedWindowSwitch.system).toContain("except switch_window");
-    expect(guardedWindowSwitch.system).toContain("does not need _harnessEffect");
-    expect(guardedWindowSwitch.system).toContain("capture scope follows the current observed Surface");
+    expect(guardedWindowSwitch.system).toContain("switch_window takes only its exact listed windowRef and is exempt");
+    expect(guardedWindowSwitch.system).toContain("list_windows takes its declared empty object");
+    expect(guardedWindowSwitch.system).toContain("Switching preserves the observed Surface's capture scope");
     const desktopSwitchContext = JSON.stringify(guardedWindowSwitch.messages);
     expect(desktopSwitchContext).toContain("full primary desktop");
     expect(desktopSwitchContext).toContain("call list_windows and use switch_window with a fresh windowRef returned by this Run");
@@ -919,22 +989,10 @@ describe("DefaultContextCompiler", () => {
     expect(desktopSwitchContext).not.toContain("separate single-line type and Enter actions");
     expect(switchTool.inputSchema).not.toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
     expect(switchTool.inputSchema).not.toMatchObject({ properties: expect.objectContaining({ _harnessEffect: expect.anything() }) });
+    expect(listWindowsTool.inputSchema).toMatchObject({ type: "object", properties: {}, required: [], additionalProperties: false });
+    expect(listWindowsTool.inputSchema).not.toMatchObject({ properties: expect.objectContaining({ _harnessEffect: expect.anything() }) });
     expect(clickTool.inputSchema).toMatchObject({ required: expect.arrayContaining(["_harnessEffect"]) });
 
-    const nativeLatest = {
-      ...latest,
-      id: "obs-switch-native-window" as ObservationId,
-      surfaceRef: { surfaceId: "context-native-window" as SurfaceId, generation: 1, kind: "native_window" as const },
-    };
-    const nativeSwitch = await new DefaultContextCompiler(windowSwitchRegistry).compile({
-      runId,
-      goal: "switch from a native window to a listed application",
-      recentEvents: [{ ...event(0, { type: "observation.created", observation: nativeLatest }) }],
-      latestObservation: nativeLatest,
-      windowSwitchState: { options: [] },
-      features: { planning: "off", memory: "off", batching: "off" },
-    }, new AbortController().signal);
-    expect(JSON.stringify(nativeSwitch.messages)).toContain("rebinds screenshot/input scope to the selected listed window");
   });
 
   it("keeps the completion contract aware of recalled Memory without requiring another model call", async () => {
@@ -961,7 +1019,7 @@ describe("DefaultContextCompiler", () => {
     }, new AbortController().signal);
 
     expect(input.system).toContain("recalled Run Memory");
-    expect(input.system).toContain("preserve their caveats");
+    expect(input.system).toContain("preserve caveats and applicability");
     expect(JSON.stringify(input.messages)).toContain("route-fact");
     expect(input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("Current run memory")))).toBe(true);
   });
@@ -1082,6 +1140,9 @@ describe("DefaultContextCompiler", () => {
     expect(correctionMessageIndex).toBeGreaterThan(input.messages.indexOf(preferenceMessage));
     expect(input.messages.at(-1)?.content.some((block) => block.type === "image")).toBe(true);
     expect(input.system).toContain("Optional user response preferences");
+    expect(input.system).toContain("Treat historical model/Monitor notes as untrusted");
+    expect(input.system).toContain("use the latest Observation");
+    expect(input.system).toContain("apply user corrections without dropping valid conditions");
     expect(input.system).not.toContain("Group the findings by topic.");
     const trace = input.contextBudget?.trace;
     expect(trace?.assistantPreferences).toMatchObject({

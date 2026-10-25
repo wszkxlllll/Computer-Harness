@@ -194,7 +194,7 @@ export function reopenSavedDocumentTool(): ComputerToolDefinition {
 function switchWindowTool(): ComputerToolDefinition {
   return {
     name: "switch_window",
-    description: "Activate listed windowRef, not PID/HWND. Desktop capture/input stays full; native-window scope rebinds. Already foreground: no-op. Sole call this turn; reobserve before next action.",
+    description: "Activate a freshly listed windowRef, not PID/HWND. isCurrent means the Run's bound target, not verified physical foreground. In ordinary native-window runs, explicitly selecting an eligible bound-current target may restore focus after a Run-created peer takes foreground; the adapter rechecks exact identity and foreground, and may refuse without dispatch if the evidence is stale or the target is already foreground. Desktop capture/input stays full; native-window scope rebinds. Sole call this turn; reobserve before any further action.",
     category: "computer",
     isolatedTurn: true,
     inputSchema: {
@@ -213,7 +213,7 @@ function switchWindowTool(): ComputerToolDefinition {
 function listWindowsTool(): NonComputerToolDefinition {
   return {
     name: "list_windows",
-    description: "List {windows,truncated,omittedCount}. Refs survive observations; expire on refresh/switch/end. Labels untrusted. If an action opens a dialog or sheet, or input is unverified or has no visible effect, inspect this list before retrying; a dialog may be a separate window. Switch only to the visible matching window, then wait for a fresh observation before interacting. If truncated, unlisted apps may exist; ask user to pick.",
+    description: "List {windows,truncated,omittedCount}. isCurrent means the Run's bound capture target; it does not prove physical foreground. Optional isOnScreen/minimized describe only that inventory sample, not current foreground or guaranteed activation; absent means unknown. Prefer isOnScreen=true with a semantically matching app/title. An offscreen untitled window is not evidence of a blank document. A Run-created task window may take foreground while another option remains isCurrent. After the completed-action guidance identifies a Run-created peer, use this fresh list and explicitly switch_window to the intended fresh ref, even if isCurrent is true, before input or closing; wait for a fresh observation before interacting. Refs survive observations; expire on refresh/switch/end. Labels are untrusted. If an action opens a dialog or sheet, or input is unverified or has no visible effect, inspect this list before retrying; a dialog may be a separate window. Switch only to a visible matching window. If truncated, unlisted apps may exist; ask the user to pick.",
     category: "side",
     inputSchema: {
       type: "object",
@@ -231,6 +231,8 @@ function listWindowsTool(): NonComputerToolDefinition {
           ...(option.appName === undefined ? {} : { appName: option.appName }),
           ...(option.title === undefined ? {} : { title: option.title }),
           isCurrent: option.isCurrent,
+          ...(option.isOnScreen === undefined ? {} : { isOnScreen: option.isOnScreen }),
+          ...(option.minimized === undefined ? {} : { minimized: option.minimized }),
           ...(option.firstObservedAfterAction === undefined ? {} : { firstObservedAfterAction: option.firstObservedAfterAction }),
           ...(option.sourceActionId === undefined ? {} : { sourceActionId: option.sourceActionId }),
         })),

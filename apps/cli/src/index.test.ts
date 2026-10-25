@@ -336,3 +336,24 @@ describe("CLI GLM request-timeout configuration", () => {
     expect(toResolvedRunConfig(qwenOptions, "Inspect the open task")).not.toHaveProperty("glmRequestTimeoutMs");
   });
 });
+
+describe("CLI provider recovery configuration", () => {
+  const options = parseArgs(["--goal", "Inspect the open task", "--model", "glm-5.3-flash", "--computer", "cua", "--cua-socket", "fixture.sock"]);
+
+  it("defaults to off and exposes the bounded Run window in resolved configuration", () => {
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY", undefined);
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS", undefined);
+    expect(toResolvedRunConfig(options, "Inspect the open task")).toMatchObject({ providerRecovery: "off", providerRecoveryRunWindowMs: 900_000 });
+  });
+
+  it("accepts only the explicit opt-in enum and bounded integer window", () => {
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY", "ambiguous-headers-once-v1");
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS", "240000");
+    expect(toResolvedRunConfig(options, "Inspect the open task")).toMatchObject({ providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 240_000 });
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY", "always");
+    expect(() => toResolvedRunConfig(options, "Inspect the open task")).toThrow(/HARNESS_PROVIDER_RECOVERY must be/u);
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY", "off");
+    vi.stubEnv("HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS", "900001");
+    expect(() => toResolvedRunConfig(options, "Inspect the open task")).toThrow(/RUN_WINDOW_MS must be/u);
+  });
+});

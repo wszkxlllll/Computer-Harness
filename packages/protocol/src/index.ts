@@ -615,6 +615,53 @@ export interface GroundingElement {
 
 export type GroundingCompleteness = "complete" | "partial" | "unknown";
 
+/** Read-only rendered table evidence; never an interactive element or click target. */
+export interface GroundingVisibleTextCell {
+  /** Zero-based layout column, accounting for native rowspan/colspan. */
+  readonly columnIndex: number;
+  readonly rowSpan: number;
+  readonly columnSpan: number;
+  readonly header: boolean;
+  readonly scope?: "row" | "col" | "rowgroup" | "colgroup";
+  /** Complete rendered cell text, without Unicode normalization or substring truncation. */
+  readonly text: string;
+  readonly bbox: GroundingBoundingBox;
+}
+
+export interface GroundingVisibleTextRegion {
+  /** Observation-local evidence label; not an elementRef and cannot be activated. */
+  readonly regionRef: string;
+  readonly bbox: GroundingBoundingBox;
+  /** Complete only when every table cell is represented; never page-wide coverage. */
+  readonly completeness: "complete" | "partial";
+  readonly truncated: boolean;
+  readonly rows: readonly {
+    readonly rowIndex: number;
+    readonly cells: readonly GroundingVisibleTextCell[];
+  }[];
+}
+
+/**
+ * Narrow main-document native-table evidence from the same collection as its
+ * catalog. Inherits observationId, pageUrl and surfaceRef exclusively from that
+ * catalog; cannot establish absence outside the represented visible regions.
+ */
+export interface GroundingVisibleText {
+  readonly source: "dom-table-v1";
+  readonly scope: "current-viewport";
+  readonly completeness: "complete" | "partial";
+  readonly truncated: boolean;
+  readonly limits: {
+    readonly maxRegions: number;
+    readonly maxRows: number;
+    readonly maxColumns: number;
+    readonly maxCells: number;
+    readonly maxCellCharacters: number;
+    readonly maxCharacters: number;
+  };
+  readonly regions: readonly GroundingVisibleTextRegion[];
+}
+
 /** Deterministic, runtime-owned projection metadata for a bounded catalog. */
 export interface GroundingSelectionTrace {
   readonly strategy: "deterministic-lexical-v1" | "bounded-fusion-v1";
@@ -668,13 +715,33 @@ export interface GroundingCatalog {
   readonly computerSessionId: ComputerSessionId;
   /** Exact Surface incarnation whose pixels/UIA/DOM produced this catalog. */
   readonly surfaceRef: SurfaceRef;
+  /** Exact current managed-page URL from this observation, not the configured startup URL. */
+  readonly pageUrl?: string;
   readonly completeness: GroundingCompleteness;
   readonly degraded: boolean;
   /** Adapter safety cap (currently at most 256); Runtime persists a hot subset. */
   readonly maxElements: number;
   readonly elements: readonly GroundingElement[];
+  /** Independently bounded static evidence; never participates in the interactive hot set. */
+  readonly visibleText?: GroundingVisibleText;
   /** Present when Runtime narrowed an adapter catalog for persistence/Context. */
   readonly selection?: GroundingSelectionTrace;
+}
+
+/** Keep complete public web addresses, or omit them; never redact/truncate into another URL. */
+export function isGroundingWebUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 2048 || !/^https?:\/\//iu.test(value) || /[\s\u0000-\u001F\u007F\\]/u.test(value)) return false;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") return false;
+    if (/(?:^|[?&#])(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|authorization|password|passwd|secret|credential|session[_-]?id|session|sid|jwt|signature|ticket|auth[_-]?code)=/iu.test(url.hash)) return false;
+    for (const key of url.searchParams.keys()) {
+      if (/^(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|authorization|password|passwd|secret|credential|session[_-]?id|session|sid|jwt|signature|ticket|auth[_-]?code)$/iu.test(key)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface ObservationFrame {
@@ -924,6 +991,10 @@ export interface ComputerWindowOption {
   readonly appName?: string;
   readonly title?: string;
   readonly isCurrent: boolean;
+  /** Inventory-sample visibility only, not foreground or activation proof. Omitted means unknown. */
+  readonly isOnScreen?: boolean;
+  /** Inventory-sample minimized state. Omitted means unknown. */
+  readonly minimized?: boolean;
   /** Informational only: this exact native identity was visible in a post-action diff. */
   readonly firstObservedAfterAction?: boolean;
   /** Run-scoped action that preceded the first visible diff observation. This proves no ownership or causality. */
@@ -931,8 +1002,9 @@ export interface ComputerWindowOption {
 }
 
 /** A bounded, deterministic projection of the latest opened-window topology.
- * `omittedCount` makes the fixed option budget visible to the model so it
- * cannot mistake a truncated candidate list for a complete inventory. */
+ * `truncated` is true when the source inventory is incomplete or candidates
+ * were omitted from the projection. `omittedCount` counts only known omitted
+ * candidates, so it may be zero when source completeness is unknown. */
 export interface ComputerWindowList {
   readonly options: readonly ComputerWindowOption[];
   readonly truncated: boolean;
@@ -1060,6 +1132,8 @@ export type ComputerWindowCandidateRelationship =
 export interface ComputerWindowCandidate extends ComputerWindowIdentity {
   /** Adapter-issued refresh token. Required only for bound_window_missing. */
   readonly handoffToken?: string;
+  /** Internal adapter marker, projected to the user only as an explicit restore choice. */
+  readonly restoreCurrentManagedBrowser?: true;
   readonly appName?: string;
   readonly title?: string;
   /** Exact owner relation for popup handoff, or Host allowlist scope for a peer. */
@@ -1213,6 +1287,26 @@ export interface ContextTrace {
   memorySelection?: ContextMemorySelectionTrace;
   memoryRetrieval?: ContextMemoryRetrievalTrace;
   grounding?: ContextGroundingTrace;
+  wallClockBudget?: {
+    readonly remainingMs: number;
+    readonly finishReserveMs: number;
+    readonly finishOnly: boolean;
+  };
+  visibleText?: {
+    readonly present: boolean;
+    readonly projected: boolean;
+    readonly truncated: boolean;
+    readonly completeness: "complete" | "partial";
+    readonly source: "dom-table-v1";
+    readonly scope: "current-viewport";
+    readonly observationId: ObservationId;
+    readonly candidateRegionCount: number;
+    readonly projectedRegionCount: number;
+    readonly candidateCellCount: number;
+    readonly projectedCellCount: number;
+    readonly estimatedTokens: number;
+    readonly omittedReason?: "budget" | "observation_mismatch";
+  };
   assistantPreferences?: ContextAssistantPreferencesTrace;
   observationIncluded: boolean;
   monitorGuidanceIncluded?: boolean;
@@ -1241,7 +1335,7 @@ export type RuntimeEventData =
       to: SurfaceRef;
       reason: SurfaceTransitionReason;
     }
-  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; maxWireInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; recoveryAttempt?: "ambiguous-headers-once-v1"; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; maxWireInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";
@@ -1249,6 +1343,7 @@ export type RuntimeEventData =
       message: string;
       code?: string;
       retryable?: boolean;
+      recoveryHint?: "ambiguous-headers-timeout-v1" | "ambiguous-headers-transport-v1";
       requestId?: string;
       decisionId?: string;
       attempt?: number;
@@ -1338,6 +1433,7 @@ export type RuntimeEventData =
   | {
       type: "run.finished";
       outcome: RunOutcome;
+      providerRecoveryState?: { mode: "off" | "ambiguous-headers-once-v1"; runWindowMs: number; latchConsumed: boolean; attemptStarted: boolean; remoteOutcomeUnknown: boolean };
       summary?: string;
       reportedStatus?: "success" | "failure";
       /** Runtime-canonical source evidence; present only when explicitly enabled for this Run. */

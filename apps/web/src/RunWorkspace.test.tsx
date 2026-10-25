@@ -73,6 +73,27 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("stop confirmation lifecycle", () => {
+  const workspace = (runId = "run-1") => <PreferencesProvider><RunWorkspace runId={runId} /></PreferencesProvider>;
+
+  it.each(["terminal", "capability", "navigation"])("drops an open confirmation after %s changes", (change) => {
+    const view = render(workspace());
+    fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
+    expect(screen.getByRole("group", { name: "确认停止任务" })).toBeDefined();
+    if (change === "terminal") feedState = { ...feedState, snapshot: { ...approval, status: "finished" } };
+    if (change === "capability") feedState = { ...feedState, snapshot: { ...approval, capabilities: { pause: true, abort: false } } };
+    if (change === "navigation") feedState = { ...feedState, snapshot: { ...approval, runId: "run-2" } };
+    view.rerender(workspace(change === "navigation" ? "run-2" : "run-1"));
+    expect(screen.queryByRole("group", { name: "确认停止任务" })).toBeNull();
+    expect(commands.control).not.toHaveBeenCalled();
+    if (change !== "navigation") {
+      feedState = { ...feedState, snapshot: approval };
+      view.rerender(workspace());
+      expect(screen.queryByRole("group", { name: "确认停止任务" })).toBeNull();
+    }
+  });
+});
+
 describe("request-bound screenshot lifecycle", () => {
   it("disables manual progress and result reading during voice input but leaves stop reading available", () => {
     render(<RunSpeechActions voiceInputActive hasResult onReadProgress={vi.fn()} onReadResult={vi.fn()} onStop={vi.fn()} />);
@@ -126,6 +147,24 @@ describe("request-bound screenshot lifecycle", () => {
     expect(document.getElementById("main-content")?.tagName).toBe("MAIN");
   });
 
+  it("keeps the non-interactive run target as one screen-reader text unit", () => {
+    feedState = {
+      ...feedState,
+      snapshot: {
+        ...approval,
+        target: { provenance: "selected_target", appName: "浏览器", title: "任务页面" },
+      },
+    };
+
+    render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+
+    const targetLabel = document.querySelector(".run-target-label") as HTMLElement;
+    expect(targetLabel.querySelector(":scope > .sr-only")?.textContent)
+      .toBe("最近确认目标：浏览器 · 任务页面 窗口名称来自最近一次选择时的主机清单，可能已变化；请以当前画面为准。");
+    expect(targetLabel.querySelectorAll(":scope > [aria-hidden='true']")).toHaveLength(3);
+    expect(targetLabel.querySelector("button, a, input")).toBeNull();
+  });
+
   it("keeps one live status region silent on mount and deduplicates repeated progress text", async () => {
     localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
       ...DEFAULT_PREFERENCES,
@@ -147,6 +186,7 @@ describe("request-bound screenshot lifecycle", () => {
     const view = render(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
     const liveRegion = document.querySelector("[data-run-announcement]") as HTMLElement;
     expect(liveRegion.textContent).toBe("");
+    expect(liveRegion.getAttribute("aria-atomic")).toBe("true");
 
     feedState = { ...feedState, snapshot: { ...feedState.snapshot!, status: "paused", sequence: 3 } };
     view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
@@ -160,6 +200,17 @@ describe("request-bound screenshot lifecycle", () => {
     feedState = { ...feedState, notices: [...feedState.notices, { ...nextProgress, noticeId: "progress-duplicate", feedSequence: 4 }] };
     view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
     expect(liveRegion.textContent).toBe("最近进展：已整理两项结果。");
+
+    const sentenceProgress = {
+      ...nextProgress,
+      noticeId: "progress-sentence",
+      feedSequence: 5,
+      text: "电脑已核对当前画面，并发现需要你确认的结果。",
+    };
+    feedState = { ...feedState, notices: [...feedState.notices, sentenceProgress] };
+    view.rerender(<PreferencesProvider><RunWorkspace runId="run-1" /></PreferencesProvider>);
+    await waitFor(() => expect(liveRegion.textContent)
+      .toBe("最近进展：电脑已核对当前画面，并发现需要你确认的结果。"));
     expect(document.querySelectorAll("[data-run-announcement]")).toHaveLength(1);
   });
 
@@ -319,7 +370,7 @@ describe("request-bound screenshot lifecycle", () => {
     expect(reason.textContent).toContain("电脑暂时无法连接。");
     fireEvent.click(screen.getByRole("button", { name: "重试读取任务状态" }));
     await waitFor(() => expect(commands.refreshStatus).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("button", { name: "重试读取任务状态" })).toBeDefined();
+    await waitFor(() => expect(screen.getByRole("button", { name: "重试读取任务状态" })).toBeDefined());
   });
 
   it("speaks current progress and result on request with auto notices off, and keeps global stop available", async () => {
@@ -430,7 +481,7 @@ describe("request-bound screenshot lifecycle", () => {
     expect(commands.correct).toHaveBeenCalledWith("Use the date shown in the current report");
   });
 
-  it("exposes separate keyboard-focusable pause, resume, and stop controls", () => {
+  it("exposes separate keyboard-focusable pause, resume, and stop controls", async () => {
     feedState = {
       ...feedState,
       snapshot: {
@@ -453,7 +504,11 @@ describe("request-bound screenshot lifecycle", () => {
     fireEvent.click(pause);
     fireEvent.click(resume);
     fireEvent.click(stop);
+    expect(commands.control.mock.calls).toEqual([["pause"], ["resume"]]);
+    fireEvent.click(screen.getByRole("button", { name: "确认停止" }));
     expect(commands.control.mock.calls).toEqual([["pause"], ["resume"], ["abort"]]);
+    expect(confirm).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("group", { name: "确认停止任务" })).toBeNull());
     confirm.mockRestore();
   });
 

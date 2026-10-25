@@ -6,6 +6,7 @@ import {
   createRun,
   finishVoiceInput,
   getRun,
+  getPhoneSession,
   getManagedBrowserProfileSettings,
   getVoiceInputCapabilities,
   listRuns,
@@ -21,7 +22,142 @@ import {
 
 afterEach(() => {
   setPhoneCsrfToken(undefined);
+  vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("phone session connection timeout", () => {
+  it("turns a hanging read-only session request into the fixed network ApiError", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    let outcome: { ok: true } | { ok: false; error: unknown } | undefined;
+    void getPhoneSession().then(
+      () => { outcome = { ok: true }; },
+      (error: unknown) => { outcome = { ok: false, error }; },
+    );
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    expect(outcome).toMatchObject({ ok: false, error: { name: "ApiError", status: 0, code: "HOST_UNREACHABLE" } });
+  });
+
+  it("preserves a successful session response", async () => {
+    const session = { csrfToken: "csrf-test", expiresAt: "2026-10-18T00:00:00.000Z" };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(session), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getPhoneSession()).resolves.toEqual(session);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBeUndefined();
+  });
+
+  it("maps an aborted session response body to the same fixed network ApiError", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => Promise.resolve(new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )));
+    vi.stubGlobal("fetch", fetchMock);
+    let outcome: { ok: true } | { ok: false; error: unknown } | undefined;
+    void getPhoneSession().then(
+      () => { outcome = { ok: true }; },
+      (error: unknown) => { outcome = { ok: false, error }; },
+    );
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ ok: false, error: { name: "ApiError", status: 0, code: "HOST_UNREACHABLE" } });
+  });
+
+  it("does not apply the session deadline or retry a POST", async () => {
+    vi.useFakeTimers();
+    let resolvePost!: (response: Response) => void;
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+      expect(init?.method).toBe("POST");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    let settled = false;
+    const post = createRun("fixture", "timeout-scope-test", { mode: "browser" }).finally(() => { settled = true; });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(settled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    resolvePost(new Response(JSON.stringify({ runId: "run-once", status: "running" }), { status: 200 }));
+    await expect(post).resolves.toEqual({ runId: "run-once", status: "running" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Run start deadline", () => {
+  it("bounds a fetch that never settles, reports an unknown outcome and never retries the POST", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", fetchMock);
+    let outcome: unknown;
+    void createRun("fixture", "start-once", { mode: "desktop" }).catch((error: unknown) => { outcome = error; });
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(outcome).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outcome).toMatchObject({ name: "ApiError", status: 0, code: "RUN_START_OUTCOME_UNKNOWN" });
+    expect((outcome as Error).message).toContain("请先查看任务列表或刷新页面");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a response body that never settles even when its stream ignores abort", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream<Uint8Array>(), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    let outcome: unknown;
+    void createRun("fixture", "body-once", { mode: "desktop" }).catch((error: unknown) => { outcome = error; });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(outcome).toMatchObject({ status: 0, code: "RUN_START_OUTCOME_UNKNOWN" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the unknown-outcome code when abort causes fetch to reject", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    let outcome: unknown;
+    void createRun("fixture", "abort-once", { mode: "desktop" }).catch((error: unknown) => { outcome = error; });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(outcome).toMatchObject({ status: 0, code: "RUN_START_OUTCOME_UNKNOWN" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves a long successful request and clears the separate Run start timer", async () => {
+    vi.useFakeTimers();
+    let resolvePost!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { resolvePost = resolve; })));
+    const post = createRun("fixture", "long-start", { mode: "desktop" });
+    await vi.advanceTimersByTimeAsync(45_000);
+    resolvePost(new Response(JSON.stringify({ runId: "long-run", status: "running" }), { status: 200 }));
+    await expect(post).resolves.toEqual({ runId: "long-run", status: "running" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe("API error presentation", () => {

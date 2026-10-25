@@ -6,7 +6,7 @@ type OperationGuidanceId = "text_document_save" | "structured_extract";
 const catalog = {
   text_document_save: makeEntry(
     "text_document_save",
-    "新建或编辑文档前，先观察并确认当前页面是空白还是已有内容。长输入只看到尾部，不代表前缀丢失；必要时检查起始位置和完整内容。保存时按当前控件语义处理目录与文件名，确认后不要反复重写。菜单明确显示快捷键时优先使用，避免反复点击同一位置；文件名框被裁剪不代表路径丢失，先观察后再决定是否重输。",
+    "编辑前核对空白/已有内容；长输入只看到尾部，不代表前缀丢失。正文保留原文空白与末尾LF，不自行增删。菜单明确显示快捷键时优先使用；文件名框裁剪不等于路径丢失。Cmd-Shift-G定位；列视图祖先≠当前位置。TextEdit：Make Plain Text转纯文本；首次Save；Option核对Save As；Shift-Cmd-S可能Duplicate。分清前往文件夹、文件名和已保存标题：完整输入指定文件名及后缀，勿假定补全；核目录/全名再保存；过渡不明时独立wait(0)一次，仍不明则报告未确认，不重复Enter。内容正确≠精确路径；Cmd+S未必重开面板，标题不单独证明保存。macOS关闭用[\"CMD\",\"W\"]；[\"W\"]只输入字符。",
   ),
   structured_extract: makeEntry(
     "structured_extract",
@@ -15,7 +15,7 @@ const catalog = {
 } satisfies Record<OperationGuidanceId, ContextOperationGuidance>;
 
 const documentAppLabels = new Set([
-  "libreoffice writer", "microsoft word", "notepad", "word", "wordpad", "writer", "text editor", "记事本", "写字板",
+  "libreoffice writer", "microsoft word", "notepad", "textedit", "word", "wordpad", "writer", "text editor", "记事本", "写字板",
 ]);
 const structuredResearchAppLabels = new Set([
   "browser", "chrome", "edge", "firefox", "google chrome", "microsoft edge", "msedge", "浏览器",

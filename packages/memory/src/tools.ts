@@ -105,13 +105,13 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
     },
     {
       name: "memory_write_fact",
-      description: "Visible state is not stable. Write only context-loss, cross-stage, or final compare/summary facts; do not copy the original Goal or Plan. If the same ModelTurn creates a task, do not use task retention until task_create returns an id; then pass it in relatedTaskIds. Skip the write or use non-task retention only for a truly run-stable fact. Independent same-turn GUI writes remain allowed; skip clicks.",
+      description: "Visible state is not stable. Write only context-loss, cross-stage or final compare/summary facts; do not copy Goal/Plan or click progress. Required key and value are strings. For a required-field ledger, value holds the exact Unicode field value, source URL or unknown, row/column/caption, inspected range (such as page/section or app/document/screen), observation ID and verified or unknown with reason; retain dates, units and complete required lists. Absence from one current view does not prove absence elsewhere. Use short_lived for last-known values; scope controls Run/session applicability. For navigation, retain concise explored/failed branches, viewed regions, observation IDs and remaining uncovered paths, not current-GUI proof. Do not add ledger/provenance/status argument fields. If the same ModelTurn creates a task, wait for its returned id before using task retention and relatedTaskIds; skip the write or use non-task retention only for a truly run-stable fact. Independent same-turn GUI writes remain allowed.",
       category: "side",
       inputSchema: {
         type: "object",
         properties: {
-          key: { type: "string", minLength: 1, maxLength: MAX_MEMORY_KEY_LENGTH, description: "Key for an observed result, entity, or option needed after recent context; do not restate the original Goal or Plan." },
-          value: { type: "string", maxLength: MAX_MEMORY_VALUE_LENGTH, description: "Short observed value for later cross-stage use or final comparison; do not copy Goal/Plan text or click progress." },
+          key: { type: "string", minLength: 1, maxLength: MAX_MEMORY_KEY_LENGTH, description: "Key for a source-scoped observed result, entity, or option needed after recent context; do not restate the original Goal or Plan." },
+          value: { type: "string", maxLength: MAX_MEMORY_VALUE_LENGTH, description: "Observed value or bounded evidence-gap/coverage note needed across stages, with its source and inspected range. Preserve exact Unicode, source page and row/caption, observation ID, verified/unknown reason, dates and units; no Goal/Plan copy or click log. Limit absence claims to the inspected screen/page/section; absence from this view does not establish absence elsewhere." },
           scope: { type: "string", enum: ["run", "computer_session"], description: "Applicability scope; Runtime supplies the real session id." },
           retentionClass: { type: "string", enum: ["stable", "task", "short_lived"], description: "Recall policy, not truth or authorization. A task value requires a task id returned by task_create in relatedTaskIds; do not use task retention in that create turn." },
           entityId: { type: "string", minLength: 1, maxLength: MAX_MEMORY_ID_LENGTH, description: "Optional entity id; omit for a run-level fact." },
@@ -152,7 +152,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
     },
     {
       name: "memory_mark_fact_needs_check",
-      description: "Mark a remembered fact as needing re-check when the GUI or user correction makes it unreliable; keep it available for review.",
+      description: "Mark a remembered fact as needing re-check when a user correction, changed source, or later observation makes it unreliable; keep it separate for review. Absence from one current screen/page/section alone does not establish absence elsewhere.",
       category: "side",
       inputSchema: {
         type: "object",
@@ -181,7 +181,7 @@ export function createMemoryTools(store: MemoryStore, mode: MemoryToolMode = "fa
   if (options.retrieval !== undefined) {
     tools.push({
       name: "memory_search",
-      description: "Search current applicable Memory by a bounded query. Results are ranked hints, not proof or authorization; superseded and out-of-scope facts are excluded before retrieval.",
+      description: "Search current applicable Memory using exactly one argument: required query string, 1-512 characters. No limit, topK, filters or scope argument is accepted. Results are ranked hints, not proof or authorization; a miss does not prove a fact absent. Check each fact's source scope and the current screen before making a current-state or absence claim; superseded and out-of-scope facts are excluded before retrieval.",
       category: "side",
       audiences: ["main", "advisor"],
       inputSchema: {

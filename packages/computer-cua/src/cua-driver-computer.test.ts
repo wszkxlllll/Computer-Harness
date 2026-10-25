@@ -10,8 +10,9 @@ import type { ActionId, ActionIntent, ModelTurn, ObservationId, RuntimeEvent, To
 import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { CuaDriverComputer as ProductionCuaDriverComputer, resolveCapturePlatform, type CuaDriverComputerOptions } from "./cua-driver-computer.js";
 import { inspectAuthorizedOutputFileIdentity } from "./macos-saved-document.js";
-import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, windowSwitchTools, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "../../runtime/src/index.js";
+import { DefaultRuntimePolicy, RunController, createDefaultToolRegistry, windowSwitchTools, type ActionPolicy, type ComputerSession, type ContextCompiler, type ModelInput, type ProviderAdapter } from "../../runtime/src/index.js";
 import { FileAssetStore, JsonlRunEventWriter } from "../../trajectory/src/index.js";
+import { DefaultContextCompiler } from "../../context/dist/index.js";
 import { readRuntimeEvents, reduceRuntimeEvents } from "../../trajectory/src/index.js";
 import { reopenSavedDocumentTool } from "../../runtime/src/computer-tools.js";
 import { createMockDomGroundingTransport, type DomGroundingTransport, type ManagedBrowserTarget } from "./dom-grounding.js";
@@ -32,7 +33,782 @@ const ONE_BY_ONE_PNG = Buffer.from(
 
 installFakeCuaSdkModuleForTests();
 
+describe("opened-window sampled visibility projection", () => {
+  it.each([false, true])("preserves visible, offscreen and optional unknown metadata through Runtime and Provider Context (unknown=%s)", async (unknown) => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-window-visibility-projection-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const open = { pid: 4321, windowId: 20703, appName: "TextEdit", title: "Open", isOnScreen: true, minimized: false };
+    fake.setExtraWindow(open);
+    fake.setSecondExtraWindow({ ...open, windowId: 11376, title: "Accessory", isOnScreen: false, minimized: true });
+    fake.setThirdExtraWindowOnListCall(1, { ...open, windowId: 11377, title: "", isOnScreen: false, minimized: false });
+    fake.setForegroundTarget(open);
+    const originalCallTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, inputJson, options) => {
+      const response = await originalCallTool(name, inputJson, options);
+      if (!unknown || name !== "list_windows" || response.structuredJson === undefined) return response;
+      const payload = JSON.parse(response.structuredJson) as { windows: Array<Record<string, unknown>> };
+      const unknownRow = payload.windows.find((row) => row.window_id === fake.target.windowId)!;
+      delete unknownRow.is_on_screen;
+      return { ...response, structuredJson: JSON.stringify(payload) };
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(windowSwitchTools());
+    const inputs: ModelInput[] = [];
+    const provider: ProviderAdapter = {
+      id: "window-visibility-fixture",
+      async generate(input, { signal }): Promise<ModelTurn> {
+        signal.throwIfAborted();
+        inputs.push(input);
+        return inputs.length === 1
+          ? { type: "tool_calls", calls: [{ id: "visibility-list" as never, name: "list_windows", arguments: {} }] }
+          : { type: "finish", summary: "inspected inventory only" };
+      },
+    };
+    const runId = "window-visibility-projection" as never;
+    const controller = new RunController({
+      runId, provider, computer, contextCompiler: new DefaultContextCompiler(registry), toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(4, 4), windowSwitch: "opened-windows-v1",
+      enabledToolNames: ["list_windows", "switch_window"],
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
+    });
+    try {
+      await expect(controller.start("Inspect TextEdit window inventory without activating or typing.")).resolves.toBe("succeeded");
+      const event = controller.getEvents().find((item): item is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        item.type === "tool.call.completed" && item.result.callId === ("visibility-list" as never));
+      const output = event?.result.output as { windows: Array<Record<string, unknown>>; truncated: boolean; omittedCount: number };
+      expect(output.windows).toHaveLength(4);
+      expect(output.windows.find((window) => window.title === "Open")).toMatchObject({ isOnScreen: true, minimized: false });
+      expect(output.windows.find((window) => window.title === "Accessory")).toMatchObject({ isOnScreen: false, minimized: true });
+      const untitled = output.windows.find((window) => window.title === undefined)!;
+      expect(untitled).toMatchObject({ isOnScreen: false, minimized: false });
+      expect(untitled).not.toHaveProperty("title");
+      const optional = output.windows.find((window) => window.title === "Safe fixture")!;
+      expect(optional).not.toHaveProperty("minimized");
+      if (unknown) expect(optional).not.toHaveProperty("isOnScreen");
+      else expect(optional.isOnScreen).toBe(true);
+      for (const window of output.windows) {
+        expect(Object.keys(window).sort()).toEqual([
+          "appName", "isCurrent", ...(window.isOnScreen === undefined ? [] : ["isOnScreen"]),
+          ...(window.minimized === undefined ? [] : ["minimized"]), ...(window.title === undefined ? [] : ["title"]), "windowRef",
+        ].sort());
+      }
+      const resultInNextRequest = inputs[1]?.messages.flatMap((message) => message.content)
+        .find((part) => part.type === "tool_result" && part.result.callId === ("visibility-list" as never));
+      expect(resultInNextRequest).toMatchObject({ type: "tool_result", result: { output } });
+      const nextText = inputs[1]?.messages.flatMap((message) => message.content)
+        .filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
+      expect(nextText).toContain("isOnScreen=true minimized=false app=TextEdit title=Open");
+      expect(nextText).toContain("isOnScreen=false minimized=true app=TextEdit title=Accessory");
+      expect(nextText).toContain("not current foreground or guaranteed activation");
+      expect(inputs[0]?.tools.find((tool) => tool.name === "list_windows")?.description).toContain("absent means unknown");
+      expect(controller.getEvents().some((item) => item.type === "action.proposed")).toBe(false);
+      expect(fake.calls.some((call) => ["bring_to_front", "click", "hotkey", "press_key", "type_text"].includes(call.name))).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("F045 strict completed bound-window missing boundary", () => {
+  it("continues through an ordinary model-selected task window after its completed close", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-ordinary-task-window-close-continuation-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setForegroundTarget(fake.target);
+    const taskTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const taskWindow = { ...taskTarget, appName: "TextEdit", title: "Untitled", isOnScreen: true, minimized: false };
+    const openPanelTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 3 };
+    const openPanelBounds = { x: 100, y: 120, width: 960, height: 680 };
+    const openedDocumentTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 2 };
+    const openedDocument = { ...openedDocumentTarget, appName: "TextEdit", title: "T2 output" };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    const applicationIdentityQueries: number[] = [];
+    const observeFailures: Array<{ message: string; stack?: string }> = [];
+    const originalObserve = computer.observe.bind(computer);
+    computer.observe = async (session, observationId, signal) => {
+      try {
+        return await originalObserve(session, observationId, signal);
+      } catch (error) {
+        observeFailures.push({
+          message: error instanceof Error ? error.message : String(error),
+          ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
+        });
+        throw error;
+      }
+    };
+    let manualHandoffs = 0;
+    const originalCallTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, inputJson, options) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      if (name === "get_window_state" && input.document_identity_query !== undefined) {
+        const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
+        applicationIdentityQueries.push(windowId);
+        const bounds = { x: 100, y: 120, width: 960, height: 680 };
+        const processStart = { seconds: 17, microseconds: 23 };
+        return result({ structuredJson: JSON.stringify({
+          _private_document_proof: {
+            version: "macos-document-identity-v1",
+            snapshot_id: `task-window-${windowId}`,
+            status: "unstable",
+            target: { pid: fake.target.pid, window_id: windowId, process_start: processStart },
+            application_identity: {
+              status: "verified",
+              target: {
+                pid: fake.target.pid, window_id: windowId, process_start: processStart,
+                bundle_id: "com.apple.TextEdit", executable_url: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+              },
+              instances: [{
+                pid: fake.target.pid, process_start: processStart,
+                bundle_id: "com.apple.TextEdit", executable_url: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+              }],
+            },
+            frontmost_pid: fake.target.pid,
+            focused_window_id: windowId,
+            window: { role: "AXWindow", pid: fake.target.pid, owner_pid: fake.target.pid, window_id: windowId, bounds },
+          },
+        }) });
+      }
+      if (name === "hotkey" || name === "press_key") {
+        const keys = name === "hotkey"
+          ? Array.isArray(input.keys) ? input.keys.map((key) => String(key).toUpperCase()) : []
+          : typeof input.key === "string" ? [input.key.toUpperCase()] : [];
+        const target = input.target !== null && typeof input.target === "object" && !Array.isArray(input.target)
+          ? input.target as Record<string, unknown>
+          : undefined;
+        const actionWindowId = typeof target?.window_id === "number" ? target.window_id : fake.target.windowId;
+        const response = await originalCallTool(name, inputJson, options);
+        if (keys.includes("N")) {
+          fake.setExtraWindow(taskWindow);
+          fake.setForegroundTarget(taskTarget);
+        } else if (keys.includes("W") && actionWindowId === fake.target.windowId) {
+          fake.omitBoundWindow(true);
+          fake.setForegroundTarget(taskTarget);
+        } else if (keys.includes("O")) {
+          fake.setWindowGroundingState(taskTarget.windowId, {
+            pid: taskTarget.pid,
+            window_id: taskTarget.windowId,
+            snapshot_id: "ordinary-open-panel-sheet-snapshot",
+            elements_complete: true,
+            attached_sheet_proof: {
+              version: "macos-attached-sheet-v1",
+              snapshot_id: "ordinary-open-panel-sheet-snapshot",
+              pid: taskTarget.pid,
+              parent_window_id: taskTarget.windowId,
+              parent_owner_pid: taskTarget.pid,
+              frontmost_pid: taskTarget.pid,
+              direct_children_status: "success",
+              direct_child_count: 1,
+              parent_role: "AXWindow",
+              parent_bounds: openPanelBounds,
+              status: "sheet",
+              focused_window_id: openPanelTarget.windowId,
+              sheet: {
+                role: "AXSheet",
+                ax_parent_verified: true,
+                pid: openPanelTarget.pid,
+                owner_pid: taskTarget.pid,
+                ax_parent_pid: taskTarget.pid,
+                ax_parent_window_id: taskTarget.windowId,
+                window_id: openPanelTarget.windowId,
+                bounds: openPanelBounds,
+              },
+            },
+          });
+          fake.setSecondExtraWindow({
+            pid: openPanelTarget.pid, windowId: openPanelTarget.windowId, appName: "TextEdit",
+            title: "Open panel", ownerPid: fake.target.pid, ownerWindowId: taskTarget.windowId,
+            bounds: openPanelBounds,
+          });
+          fake.setForegroundTarget(openPanelTarget);
+        } else if (keys.includes("ENTER")) {
+          fake.setSecondExtraWindow(undefined);
+          fake.setWindowGroundingState(taskTarget.windowId, {
+            pid: taskTarget.pid,
+            window_id: taskTarget.windowId,
+            snapshot_id: "ordinary-open-panel-dismissed-snapshot",
+            elements_complete: true,
+            attached_sheet_proof: {
+              version: "macos-attached-sheet-v1",
+              snapshot_id: "ordinary-open-panel-dismissed-snapshot",
+              pid: taskTarget.pid,
+              parent_window_id: taskTarget.windowId,
+              parent_owner_pid: taskTarget.pid,
+              frontmost_pid: taskTarget.pid,
+              direct_children_status: "success",
+              direct_child_count: 0,
+              parent_role: "AXWindow",
+              parent_bounds: openPanelBounds,
+              status: "none",
+              focused_window_id: taskTarget.windowId,
+            },
+          });
+          fake.setThirdExtraWindowOnListCall(fake.getListWindowsCallCount() + 1, openedDocument);
+          fake.setForegroundTarget(openedDocumentTarget);
+        }
+        return response;
+      }
+      if (name === "bring_to_front") {
+        const response = await originalCallTool(name, inputJson, options);
+        const pid = typeof input.pid === "number" ? input.pid : undefined;
+        const windowId = typeof input.window_id === "number" ? input.window_id : undefined;
+        if (pid !== undefined && windowId !== undefined) fake.setForegroundTarget({ pid, windowId });
+        return response;
+      }
+      return originalCallTool(name, inputJson, options);
+    };
+    const registry = createDefaultToolRegistry();
+    registry.registerMany(windowSwitchTools());
+    let controller!: RunController;
+    const providerWindowRefs: Array<{ callId: string; isCurrent: unknown; windowRef: unknown }> = [];
+    const parseListedWindowRef = (callId: string, selectCurrent: boolean): string | undefined => {
+      const event = controller.getEvents().find((item) => item.type === "tool.call.completed" && item.result.callId === callId);
+      const output = event?.type === "tool.call.completed" ? event.result.output : undefined;
+      const rows = output !== null && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>).windows
+        : undefined;
+      if (!Array.isArray(rows)) return undefined;
+      providerWindowRefs.push(...rows.filter((row) => row !== null && typeof row === "object" && !Array.isArray(row))
+        .map((row) => ({ callId, isCurrent: (row as Record<string, unknown>).isCurrent, windowRef: (row as Record<string, unknown>).windowRef })));
+      const selected = rows.find((row) => row !== null && typeof row === "object" && !Array.isArray(row) &&
+        (row as Record<string, unknown>).isCurrent === selectCurrent);
+      return selected !== undefined && typeof (selected as Record<string, unknown>).windowRef === "string"
+        ? (selected as Record<string, unknown>).windowRef as string
+        : undefined;
+    };
+    let approvedFirstSwitch = false;
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "ordinary-task-window-close-continuation-provider",
+      async generate(_input, { signal }): Promise<ModelTurn> {
+        signal.throwIfAborted();
+        const call = providerCalls++;
+        if (call === 0) return { type: "tool_calls", calls: [{ id: "task-create-window" as never, name: "hotkey", arguments: { keys: ["CMD", "N"] } }] };
+        if ([1, 4, 8].includes(call)) return { type: "tool_calls", calls: [{ id: `task-list-${call}` as never, name: "list_windows", arguments: {} }] };
+        if (call === 2) return { type: "tool_calls", calls: [{ id: "task-select-new-window" as never, name: "switch_window", arguments: {
+          windowRef: parseListedWindowRef("task-list-1", true)!,
+        } }] };
+        if (call === 3) return approvedFirstSwitch
+          ? { type: "tool_calls", calls: [{ id: "task-close-parent-window" as never, name: "hotkey", arguments: { keys: ["CMD", "W"] } }] }
+          : { type: "finish", summary: "stopped after the current-window switch was rejected" };
+        if (call === 5) return { type: "tool_calls", calls: [{ id: "task-return-to-live-peer" as never, name: "switch_window", arguments: {
+          windowRef: parseListedWindowRef("task-list-4", false)!,
+        } }] };
+        if (call === 6) return { type: "tool_calls", calls: [{ id: "task-open-document-dialog" as never, name: "hotkey", arguments: { keys: ["CMD", "O"] } }] };
+        if (call === 7) return { type: "tool_calls", calls: [{ id: "task-confirm-document-open" as never, name: "hotkey", arguments: { keys: ["ENTER"] } }] };
+        if (call === 9) return { type: "tool_calls", calls: [{ id: "task-select-reopened-document" as never, name: "switch_window", arguments: {
+          windowRef: parseListedWindowRef("task-list-8", false)!,
+        } }] };
+        return { type: "finish", summary: "continued after explicitly switching to the live task window" };
+      },
+    };
+    const contextCompiler: ContextCompiler = {
+      async compile(input, signal) {
+        signal.throwIfAborted();
+        return {
+          system: input.goal,
+          messages: [{ role: "user", content: [{ type: "text", text: input.goal }] }],
+          tools: registry.modelTools("main", { enabledToolNames: ["hotkey", "list_windows", "switch_window"] }),
+        };
+      },
+    };
+    const runId = "ordinary-task-window-close-continuation" as never;
+    let switchGuardEvaluations = 0;
+    let approvalRequestId = "";
+    let resolveApprovalRequested!: () => void;
+    const approvalRequested = new Promise<void>((resolve) => { resolveApprovalRequested = resolve; });
+    let currentWindowSwitchRejection = "";
+    let resolveCurrentWindowSwitchRejection!: (reason: string) => void;
+    const currentWindowSwitchRejected = new Promise<string>((resolve) => { resolveCurrentWindowSwitchRejection = resolve; });
+    let resolveHandoffRequested!: () => void;
+    const handoffRequested = new Promise<void>((resolve) => { resolveHandoffRequested = resolve; });
+    controller = new RunController({
+      runId, provider, computer, contextCompiler, toolRegistry: registry,
+      policy: new DefaultRuntimePolicy(20, 20),
+      actionPolicy: {
+        async evaluate(context, signal) {
+          signal.throwIfAborted();
+          const isSwitch = context.candidate.actions.some((action) => action.kind === "switch_window");
+          if (isSwitch && ++switchGuardEvaluations === 1) {
+            return { decision: "require_approval", categories: ["external_commitment"], reasonCode: "task_window_switch_review",
+              reason: "Review the completed-close task-window transition.", path: "local", policyVersion: "ordinary-task-window-test-v1", modelRequestCount: 0 };
+          }
+          return { decision: "allow", categories: [], reasonCode: isSwitch ? "run_scoped_window_switch" : "declared_low_impact",
+            reason: "The current Run task action is allowed.", path: "local", policyVersion: "ordinary-task-window-test-v1", modelRequestCount: 0 };
+        },
+      },
+      eventWriter: new JsonlRunEventWriter(join(directory, "trajectory.jsonl"), runId),
+      assetStore: new FileAssetStore(join(directory, "assets")),
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      enabledToolNames: ["hotkey", "list_windows", "switch_window"],
+      features: { planning: "off", memory: "off", batching: "off", riskGuard: "layered" },
+      onEventCommitted(event) {
+        if (event.type === "approval.requested") {
+          approvalRequestId = event.requestId;
+          resolveApprovalRequested();
+        }
+        if (event.type === "tool.call.rejected" && event.callId === "task-select-new-window" && event.reason.includes("current window")) {
+          currentWindowSwitchRejection = event.reason;
+          resolveCurrentWindowSwitchRejection(event.reason);
+        }
+        if (event.type === "computer.window.handoff.requested") resolveHandoffRequested();
+      },
+    });
+    const originalHandoff = computer.handoffWindow.bind(computer);
+    computer.handoffWindow = async (...args) => {
+      manualHandoffs += 1;
+      return originalHandoff(...args);
+    };
+    const peerActivations = () => fake.calls.filter((call) =>
+      call.name === "bring_to_front" && call.input?.window_id === taskTarget.windowId,
+    );
+    const parentActivations = () => fake.calls.filter((call) =>
+      call.name === "bring_to_front" && call.input?.window_id === fake.target.windowId,
+    );
+    const peerActivationsBeforeRun = peerActivations().length;
+    const parentActivationsBeforeRun = parentActivations().length;
+    const running = controller.start("Create and select a Run task window, close it once, then continue by selecting the live Task peer.");
+    try {
+      const activationGate = await Promise.race([
+        approvalRequested.then(() => "approval" as const),
+        currentWindowSwitchRejected.then(() => "current-window-rejected" as const),
+      ]);
+      expect(activationGate, JSON.stringify({
+        currentWindowSwitchRejection,
+        events: controller.getEvents().filter((event) => event.type === "tool.call.rejected" || event.type === "approval.requested"),
+        recentDriverCalls: fake.calls.slice(-12),
+      })).toBe("approval");
+      expect(controller.getSnapshot().status).toBe("waiting_approval");
+      expect(approvalRequestId).not.toBe("");
+      expect(manualHandoffs).toBe(0);
+      // Run startup activates the exact initial native window once; the selected
+      // current-window switch itself must wait for approval before another call.
+      expect(parentActivations()).toHaveLength(parentActivationsBeforeRun + 1);
+      expect(peerActivations()).toHaveLength(peerActivationsBeforeRun);
+      approvedFirstSwitch = true;
+      await controller.resolveApproval(approvalRequestId, true);
+      const terminal = await Promise.race([
+        running.then((outcome) => ({ kind: "finished" as const, outcome })),
+        handoffRequested.then(() => ({ kind: "handoff" as const })),
+      ]);
+      expect(terminal, JSON.stringify({
+        events: controller.getEvents().filter((event) =>
+          event.type === "runtime.error" || event.type === "computer.window.handoff.requested" ||
+          event.type === "tool.call.rejected" || event.type === "tool.call.failed" ||
+          event.type === "action.execution.failed" ||
+          event.type === "run.finished",
+        ),
+        recentDriverCalls: fake.calls.slice(-16),
+        providerCalls,
+        applicationIdentityQueries,
+        observeFailures,
+        recentInventories: fake.listWindowsResponses.slice(-6).map((response) => ({
+          complete: response.complete,
+          truncated: response.truncated,
+          foreground: [response.foreground_pid, response.foreground_window_id],
+          windows: Array.isArray(response.windows) ? response.windows.map((row) => {
+            const window = row as Record<string, unknown>;
+            return [window.pid, window.window_id, window.title, window.owner_window_id, window.is_on_screen];
+          }) : [],
+        })),
+      })).toEqual({ kind: "finished", outcome: "succeeded" });
+      expect(providerCalls).toBe(11);
+      const taskTransitionList = controller.getEvents().find((event) =>
+        event.type === "tool.call.completed" && event.result.callId === ("task-list-4" as never));
+      expect(taskTransitionList).toMatchObject({ result: { output: {
+        windows: [expect.objectContaining({ title: "Untitled", isOnScreen: true, minimized: false })],
+      } } });
+      const createdWindowCall = controller.getEvents().find((event) =>
+        event.type === "tool.call.completed" && event.result.callId === ("task-create-window" as never),
+      );
+      const createdWindowOutput = createdWindowCall?.type === "tool.call.completed" &&
+        createdWindowCall.result.output !== null && typeof createdWindowCall.result.output === "object" &&
+        !Array.isArray(createdWindowCall.result.output)
+        ? createdWindowCall.result.output as Record<string, unknown>
+        : undefined;
+      expect(createdWindowOutput?.message).toContain("Run-created TextEdit peer");
+      expect(createdWindowOutput?.message).toContain("list_windows");
+      expect(createdWindowOutput?.message).toContain("switch_window");
+      expect(createdWindowOutput?.message).toContain("even if isCurrent is true");
+      expect(applicationIdentityQueries).toContain(openedDocumentTarget.windowId);
+      expect(switchGuardEvaluations).toBe(3);
+      expect(parentActivations()).toHaveLength(parentActivationsBeforeRun + 2);
+      expect(peerActivations()).toHaveLength(peerActivationsBeforeRun + 1);
+      expect(manualHandoffs).toBe(0);
+      const completedActionIds = new Set(controller.getEvents()
+        .filter((event) => event.type === "action.execution.completed")
+        .map((event) => event.receipt.actionId));
+      expect(controller.getEvents()
+        .filter((event): event is Extract<RuntimeEvent, { type: "action.proposed" }> =>
+          event.type === "action.proposed" && completedActionIds.has(event.action.actionId))
+        .map((event) => event.action.kind), JSON.stringify(controller.getEvents().filter((event) =>
+          ["tool.call.rejected", "tool.call.completed", "action.execution.refused", "action.execution.failed"].includes(event.type),
+        ))).toEqual(["keypress", "switch_window", "keypress", "switch_window", "keypress", "keypress", "switch_window"]);
+      expect(fake.calls.filter((call) => call.name === "hotkey" || call.name === "press_key").map((call) =>
+        call.name === "hotkey" ? call.input?.keys : [call.input?.key],
+      )).toEqual([["CMD", "N"], ["CMD", "W"], ["CMD", "O"], ["ENTER"]]);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front" && call.input?.window_id === openedDocumentTarget.windowId)).toHaveLength(1);
+      expect(applicationIdentityQueries).toContain(taskTarget.windowId);
+      expect(applicationIdentityQueries).toContain(openedDocumentTarget.windowId);
+      expect(controller.getEvents().some((event) => event.type === "computer.window.handoff.requested")).toBe(false);
+      const observations = controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations.at(-1)?.observation.surfaceRef.kind).toBe("native_window");
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "unrelated-global-partial", "textedit-scope-partial", "preexisting-hidden-peer", "foreign-process-peer",
+  ] as const)(
+    "requires scoped proof before listing a Run-owned task peer when %s",
+    async (scenario) => {
+      const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-run-owned-process-inventory-")));
+      const fake = windowDriver();
+      fake.setPlatform("darwin");
+      fake.setForegroundTarget(fake.target);
+      const peerTarget = {
+        pid: scenario === "foreign-process-peer" ? fake.target.pid + 50 : fake.target.pid,
+        windowId: fake.target.windowId + 1,
+      };
+      const peerWindow = {
+        ...peerTarget,
+        appName: scenario === "foreign-process-peer" ? "ForeignEditor" : "TextEdit",
+        title: scenario === "preexisting-hidden-peer" ? "Pre-existing hidden peer" : "Run-owned task peer",
+      };
+      if (scenario === "preexisting-hidden-peer") {
+        fake.setExtraWindow({ ...peerWindow, isOnScreen: false, minimized: true });
+      }
+      let globalPartial = false;
+      let textEditProcessPartial = false;
+      const originalCallTool = fake.driver.callTool.bind(fake.driver);
+      fake.driver.callTool = async (name, inputJson, options) => {
+        const input = JSON.parse(inputJson) as Record<string, unknown>;
+        if (name === "get_window_state" && input.document_identity_query !== undefined) {
+          const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
+          const bounds = { x: 100, y: 120, width: 960, height: 680 };
+          const processStart = { seconds: 17, microseconds: 23 };
+          return result({ structuredJson: JSON.stringify({
+            _private_document_proof: {
+              version: "macos-document-identity-v1",
+              snapshot_id: `run-owned-process-${windowId}`,
+              status: "unstable",
+              target: { pid: fake.target.pid, window_id: windowId, process_start: processStart },
+              application_identity: {
+                status: "verified",
+                target: {
+                  pid: fake.target.pid, window_id: windowId, process_start: processStart,
+                  bundle_id: "com.apple.TextEdit", executable_url: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+                },
+                instances: [{
+                  pid: fake.target.pid, process_start: processStart,
+                  bundle_id: "com.apple.TextEdit", executable_url: "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit",
+                }],
+              },
+              frontmost_pid: fake.target.pid,
+              focused_window_id: windowId,
+              window: { role: "AXWindow", pid: fake.target.pid, owner_pid: fake.target.pid, window_id: windowId, bounds },
+            },
+          }) });
+        }
+        if (name === "list_windows") {
+          const response = await originalCallTool(name, inputJson, options);
+          const partial = typeof input.pid === "number" ? textEditProcessPartial : globalPartial;
+          if (partial && response.structuredJson !== undefined) {
+            const payload = JSON.parse(response.structuredJson) as Record<string, unknown>;
+            return { ...response, structuredJson: JSON.stringify({ ...payload, complete: false, truncated: true }) };
+          }
+          return response;
+        }
+        if (name === "hotkey" || name === "press_key") {
+          const keys = name === "hotkey"
+            ? Array.isArray(input.keys) ? input.keys.map((key) => String(key).toUpperCase()) : []
+            : typeof input.key === "string" ? [input.key.toUpperCase()] : [];
+          const response = await originalCallTool(name, inputJson, options);
+          if (keys.includes("N")) {
+            fake.setExtraWindow(peerWindow);
+            fake.setForegroundTarget(peerTarget);
+          }
+          return response;
+        }
+        return originalCallTool(name, inputJson, options);
+      };
+      const computer = new ProductionCuaDriverComputer({
+        platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+        windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+        grounding: "off", driverFactory: () => fake.driver,
+      });
+      const signal = new AbortController().signal;
+      try {
+        const session = await computer.open({}, signal);
+        const beforeId = `run-owned-process-${scenario}-before` as ObservationId;
+        const before = await computer.observe(session, beforeId, signal);
+        const created = await computer.execute(session, {
+          actionId: `run-owned-process-${scenario}-create` as ActionId,
+          basedOn: beforeId,
+          kind: "keypress",
+          keys: ["CMD", "N"],
+        }, signal);
+        expect(created, JSON.stringify({ created, observationRef: before.surfaceRef })).toMatchObject({ status: "completed" });
+
+        globalPartial = scenario === "unrelated-global-partial";
+        textEditProcessPartial = scenario === "textedit-scope-partial";
+        const listed = await computer.listWindows(session, signal);
+        if (scenario === "unrelated-global-partial") {
+          expect(listed.truncated).toBe(true);
+          expect(listed.options.some((window) => window.title === "Run-owned task peer")).toBe(true);
+          expect(fake.calls.some((call) => call.name === "list_windows" && call.input?.pid === fake.target.pid)).toBe(true);
+        } else if (scenario === "textedit-scope-partial") {
+          expect(listed.truncated).toBe(true);
+          expect(listed.options.some((window) => window.title === "Run-owned task peer")).toBe(false);
+          expect(fake.calls.some((call) => call.name === "list_windows" && call.input?.pid === fake.target.pid)).toBe(true);
+        } else {
+          expect(listed.truncated).toBe(false);
+          expect(listed.options.some((window) => window.title === peerWindow.title)).toBe(false);
+        }
+        await computer.close(session);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    "physical-bound-window",
+    "foreign-foreground",
+    "preexisting-hidden-peer",
+    "partial-scoped-inventory",
+    "stale-list-reference",
+    "capture-fails-after-activation",
+  ] as const)("does not activate a bound current window without fresh peer evidence: %s", async (scenario) => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-current-window-refocus-negative-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setForegroundTarget(fake.target);
+    const peerTarget = {
+      pid: scenario === "foreign-foreground" ? fake.target.pid + 50 : fake.target.pid,
+      windowId: fake.target.windowId + 1,
+    };
+    const peerWindow = {
+      ...peerTarget,
+      appName: scenario === "foreign-foreground" ? "ForeignEditor" : "TextEdit",
+      title: scenario === "preexisting-hidden-peer" ? "Pre-existing hidden peer" : "Run-owned task peer",
+      ...(scenario === "preexisting-hidden-peer" ? { isOnScreen: false, minimized: true } : {}),
+    };
+    if (scenario === "preexisting-hidden-peer") fake.setExtraWindow(peerWindow);
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    const originalCallTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, inputJson, options) => {
+      const input = JSON.parse(inputJson) as Record<string, unknown>;
+      if (name === "get_window_state" && input.document_identity_query !== undefined) {
+        const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
+        const pid = typeof input.pid === "number" ? input.pid : windowId === peerTarget.windowId ? peerTarget.pid : fake.target.pid;
+        const processStart = { seconds: 17, microseconds: 23 };
+        const bundleId = pid === fake.target.pid ? "com.apple.TextEdit" : "com.example.ForeignEditor";
+        const executableUrl = pid === fake.target.pid
+          ? "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit"
+          : "file:///Applications/ForeignEditor.app/Contents/MacOS/ForeignEditor";
+        const bounds = { x: 100, y: 120, width: 960, height: 680 };
+        return result({ structuredJson: JSON.stringify({
+          _private_document_proof: {
+            version: "macos-document-identity-v1",
+            snapshot_id: `current-window-${windowId}`,
+            status: "unstable",
+            target: { pid, window_id: windowId, process_start: processStart },
+            application_identity: {
+              status: "verified",
+              target: { pid, window_id: windowId, process_start: processStart, bundle_id: bundleId, executable_url: executableUrl },
+              instances: [{ pid, process_start: processStart, bundle_id: bundleId, executable_url: executableUrl }],
+            },
+            frontmost_pid: fake.target.pid,
+            focused_window_id: windowId,
+            window: { role: "AXWindow", pid, owner_pid: pid, window_id: windowId, bounds },
+          },
+        }) });
+      }
+      if (name === "list_windows") {
+        const response = await originalCallTool(name, inputJson, options);
+        if (scenario !== "foreign-foreground" || input.pid !== fake.target.pid || response.structuredJson === undefined) return response;
+        const payload = JSON.parse(response.structuredJson) as Record<string, unknown>;
+        const windows = Array.isArray(payload.windows)
+          ? payload.windows.filter((row) => row !== null && typeof row === "object" && (row as Record<string, unknown>).pid === fake.target.pid)
+          : [];
+        return { ...response, structuredJson: JSON.stringify({ ...payload, windows }) };
+      }
+      if (name === "hotkey" || name === "press_key") {
+        const keys = name === "hotkey"
+          ? Array.isArray(input.keys) ? input.keys.map((key) => String(key).toUpperCase()) : []
+          : typeof input.key === "string" ? [input.key.toUpperCase()] : [];
+        const response = await originalCallTool(name, inputJson, options);
+        if (keys.includes("N")) {
+          fake.setExtraWindow({ ...peerWindow, isOnScreen: true, minimized: false });
+          fake.setForegroundTarget(peerTarget);
+        }
+        return response;
+      }
+      if (name === "bring_to_front") {
+        const response = await originalCallTool(name, inputJson, options);
+        if (typeof input.pid === "number" && typeof input.window_id === "number") {
+          fake.setForegroundTarget({ pid: input.pid, windowId: input.window_id });
+        }
+        return response;
+      }
+      return originalCallTool(name, inputJson, options);
+    };
+    const signal = new AbortController().signal;
+    let openedSession: Awaited<ReturnType<typeof computer.open>> | undefined;
+    try {
+      openedSession = await computer.open({}, signal);
+      const session = openedSession;
+      const beforeId = `current-window-${scenario}-before` as ObservationId;
+      const before = await computer.observe(session, beforeId, signal);
+      const created = await computer.execute(session, {
+        actionId: `current-window-${scenario}-create` as ActionId,
+        basedOn: beforeId,
+        kind: "keypress",
+        keys: ["CMD", "N"],
+      }, signal);
+      expect(created.status, JSON.stringify({ created, scenario })).toBe("completed");
+      if (created.status !== "completed") throw new Error(`CMD+N fixture action did not complete: ${created.status}`);
+      if (scenario === "foreign-foreground" || scenario === "preexisting-hidden-peer") {
+        expect(created.message, JSON.stringify({ scenario, created })).not.toContain("Run-created TextEdit peer");
+      } else {
+        expect(created.message, JSON.stringify({ scenario, created })).toContain("Run-created TextEdit peer");
+      }
+      const afterId = `current-window-${scenario}-after-create` as ObservationId;
+      await computer.observe(created.sessionAfter ?? session, afterId, signal);
+      const listed = await computer.listWindows(session, signal);
+      const currentOption = listed.options.find((option) => option.isCurrent === true);
+      expect(currentOption, JSON.stringify({ scenario, listed })).toBeDefined();
+      const activationsBeforeSwitch = fake.calls.filter((call) => call.name === "bring_to_front").length;
+
+      let selectedRef = currentOption!.windowRef;
+      if (scenario === "physical-bound-window") {
+        fake.setForegroundTarget(fake.target);
+      } else if (scenario === "foreign-foreground") {
+        fake.setForegroundTarget({ pid: fake.target.pid + 50, windowId: 9001 });
+      } else if (scenario === "partial-scoped-inventory") {
+        fake.setWindowInventoryComplete(false);
+        fake.setWindowInventoryTruncated(true);
+      } else if (scenario === "stale-list-reference") {
+        await computer.listWindows(session, signal);
+      } else if (scenario === "capture-fails-after-activation") {
+        fake.setCaptureImages([[]]);
+        fake.setFallbackRefusal("CAPTURE_FAILED", "fixture transition capture unavailable");
+      }
+
+      const switched = await computer.execute(session, {
+        actionId: `current-window-${scenario}-switch` as ActionId,
+        basedOn: afterId,
+        kind: "switch_window",
+        windowRef: selectedRef,
+      }, signal);
+      if (scenario === "capture-fails-after-activation") {
+        expect(switched.status, JSON.stringify({ scenario, switched, calls: fake.calls.slice(-8) })).toBe("failed");
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBeforeSwitch + 1);
+        const staleReplay = await computer.execute(session, {
+          actionId: `current-window-${scenario}-stale-replay` as ActionId,
+          basedOn: afterId,
+          kind: "switch_window",
+          windowRef: selectedRef,
+        }, signal);
+        expect(staleReplay).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBeforeSwitch + 1);
+      } else {
+        expect(switched.status, JSON.stringify({ scenario, switched, calls: fake.calls.slice(-8) })).toBe("refused");
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBeforeSwitch);
+      }
+      if (scenario === "physical-bound-window") expect(switched).toMatchObject({ driverCode: "WINDOW_ALREADY_CURRENT" });
+      if (scenario === "stale-list-reference") expect(switched).toMatchObject({ driverCode: "WINDOW_REF_STALE" });
+      if (scenario === "preexisting-hidden-peer") {
+        expect(switched.message).toContain("Run-created TextEdit peer");
+      }
+      if (scenario === "foreign-foreground") {
+        expect(switched.message).toContain("physical foreground");
+      }
+    } finally {
+      if (openedSession !== undefined) await computer.close(openedSession).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on the pre-attestation macOS list_windows payload", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-macos-legacy-list-windows-payload-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    fake.setForegroundTarget(fake.target);
+    const originalCallTool = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, inputJson, options) => {
+      const response = await originalCallTool(name, inputJson, options);
+      if (name !== "list_windows" || response.structuredJson === undefined) return response;
+      const payload = JSON.parse(response.structuredJson) as Record<string, unknown>;
+      // Match the frozen Native 1df payload: rows only, with no scoped
+      // completeness or exact AppKit/AX foreground attestation.
+      delete payload.inventory;
+      delete payload.complete;
+      delete payload.truncated;
+      delete payload.foreground_pid;
+      delete payload.foreground_window_id;
+      return { ...response, structuredJson: JSON.stringify(payload) };
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "off",
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: Awaited<ReturnType<typeof computer.open>> | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = await computer.observe(session, "legacy-list-before" as ObservationId, signal);
+      const created = await computer.execute(session, {
+        actionId: "legacy-list-create-peer" as ActionId,
+        basedOn: "legacy-list-before" as ObservationId,
+        kind: "keypress",
+        keys: ["CMD", "N"],
+      }, signal);
+      expect(created.status).toBe("completed");
+      if (created.status !== "completed") throw new Error(`CMD+N fixture action did not complete: ${created.status}`);
+      expect(created.message ?? "").not.toContain("Run-created TextEdit peer");
+      await computer.observe(created.sessionAfter ?? session, "legacy-list-after-create" as ObservationId, signal);
+      const listed = await computer.listWindows(session, signal);
+      expect(listed.truncated).toBe(true);
+      expect(listed.options.some((window) => window.title === "Run-owned task peer")).toBe(false);
+      const rootRef = listed.options.find((window) => window.isCurrent === true)?.windowRef;
+      expect(rootRef).toBeDefined();
+      const bringCount = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      const switched = await computer.execute(session, {
+        actionId: "legacy-list-refuse-unproven-refocus" as ActionId,
+        basedOn: "legacy-list-after-create" as ObservationId,
+        kind: "switch_window",
+        windowRef: rootRef!,
+      }, signal);
+      expect(switched).toMatchObject({ status: "refused", driverCode: "WINDOW_SWITCH_STALE" });
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(bringCount);
+    } finally {
+      if (session !== undefined) await computer.close(session).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps explicit list_windows available in confirm-v1 after a completed action with no missing target", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-confirm-explicit-list-windows-")));
     const fake = windowDriver();
@@ -370,8 +1146,9 @@ describe("F045 strict completed bound-window missing boundary", () => {
       driverFactory: () => fake.driver,
     });
     const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
     try {
-      const session = await computer.open({}, signal);
+      session = await computer.open({}, signal);
       await computer.observe(session, `advisory-negative-${mode}` as ObservationId, signal);
       if (mode === "recovery-disabled") {
         expect((await computer.execute(session, {
@@ -723,11 +1500,13 @@ describe("native AXTextArea format metadata", () => {
       driverFactory: () => fake.driver,
     });
     const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
     try {
-      const session = await computer.open({}, signal);
+      const openedSession = await computer.open({}, signal);
+      session = openedSession;
       const observeElement = async (id: string, element: Record<string, unknown>) => {
         fake.setGroundingState({ snapshot_id: `s-${id}`, elements_complete: true, elements: [element] });
-        const result = await computer.observe(session, id as ObservationId, signal);
+        const result = await computer.observe(openedSession, id as ObservationId, signal);
         return result.grounding?.elements[0];
       };
 
@@ -803,6 +1582,50 @@ function pngWithDimensions(width: number, height: number): string {
   return bytes.toString("base64");
 }
 
+function foregroundPixelGuardDiagnosticJson(
+  target: { readonly pid: number; readonly windowId: number },
+  overrides: {
+    readonly schema?: string | undefined;
+    readonly diagnosticTarget?: { readonly pid: number; readonly windowId: number };
+    readonly frontmostPid?: number | null;
+    readonly focusedWindowId?: number | null;
+    readonly pointStatus?: string;
+  } = {},
+): string {
+  const diagnosticTarget = overrides.diagnosticTarget ?? target;
+  const frontmostPid = overrides.frontmostPid === undefined ? target.pid + 1 : overrides.frontmostPid;
+  const focusedWindowId = overrides.focusedWindowId === undefined ? target.windowId : overrides.focusedWindowId;
+  const available = (value: number | null) => ({ status: value === null ? "unavailable" : "available", value });
+  return JSON.stringify({ guard_diagnostic: {
+    schema: overrides.schema ?? "foreground-pixel-guard-diagnostic-v1",
+    target: { pid: diagnosticTarget.pid, window_id: diagnosticTarget.windowId },
+    frontmost_pid: available(frontmostPid),
+    focused_window_id: available(focusedWindowId),
+    point_hit_test: overrides.pointStatus === "blocked" ? {
+      status: "blocked_by_window", allowed: false,
+      enumeration: {
+        read_status: "ok", source_options: "onscreen_only_exclude_desktop_any_layer",
+        raw_row_count: 2, parsed_row_count: 2, malformed_row_count: 0,
+      },
+      target_row: {
+        pid: target.pid, window_id: target.windowId, layer: 0, z_index: 1, is_on_screen: true,
+        visibility_source: "cg_onscreen_only_membership", raw_is_on_screen: "true",
+        bounds: { x: 100, y: 120, width: 960, height: 680 },
+      },
+      first_blocking_row: {
+        pid: 999, window_id: 111, layer: 0, z_index: 2, is_on_screen: true,
+        visibility_source: "cg_onscreen_only_membership", raw_is_on_screen: "true",
+        bounds: { x: 100, y: 120, width: 300, height: 200 },
+      },
+    } : { status: overrides.pointStatus ?? "not_evaluated" },
+    ...(overrides.schema === "foreground-pixel-guard-diagnostic-v2" ? {
+      published_mouse_ignoring_overlay: { pid: 999, window_id: 111 },
+      translated_screen_point: { x: 110, y: 130 },
+      target_frame: { bounds: { x: 100, y: 120, width: 960, height: 680 }, scale: 1 },
+    } : {}),
+  } });
+}
+
 type FixtureWindow = {
   pid: number;
   windowId: number;
@@ -866,6 +1689,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
   let actionToolCallCount = 0;
   let failActionCallNumber: number | undefined;
   let actionFailure: { errorCode?: string; text: string; structuredJson?: string } | undefined;
+  let actionThrownError: Error | undefined;
   let actionDegradedCallNumber: number | undefined;
   let typeTextResult: Partial<ToolResult> | undefined;
   let typeTextThrownError: Error | undefined;
@@ -936,14 +1760,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
         if (secondExtraWindowOnListCall?.call === listWindowsCallCount) secondExtraWindow = secondExtraWindowOnListCall.value;
         if (thirdExtraWindowOnListCall?.call === listWindowsCallCount) thirdExtraWindow = thirdExtraWindowOnListCall.value;
         const unavailable = missing || (missingAfterListCall !== undefined && listWindowsCallCount >= missingAfterListCall);
-        const response = {
-          complete: windowInventoryComplete,
-          truncated: windowInventoryTruncated,
-          ...(foregroundTarget === undefined ? {} : {
-            foreground_pid: foregroundTarget.pid,
-            foreground_window_id: foregroundTarget.windowId,
-          }),
-          windows: unavailable ? [] : [
+        const allWindows = unavailable ? [] : [
           ...(omitBoundWindow ? [] : [{ pid: target.pid, window_id: target.windowId, title: "Safe fixture", app_name: "Computer Harness", bounds, z_index: 1, is_on_screen: true }]),
           ...(extraWindow === undefined ? [] : [{
             pid: extraWindow.pid,
@@ -985,7 +1802,44 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
             ...(thirdExtraWindow.minimized === undefined ? {} : { is_minimized: thirdExtraWindow.minimized }),
             ...(thirdExtraWindow.windowClass === undefined ? {} : { window_class: thirdExtraWindow.windowClass }),
           }]),
-        ] };
+        ];
+        const pidScopedWindows = typeof input.pid === "number"
+          ? allWindows.filter((window) => window.pid === input.pid)
+          : allWindows;
+        const scopedWindows = input.on_screen_only === true
+          ? pidScopedWindows.filter((window) => window.is_on_screen === true)
+          : pidScopedWindows;
+        const windows = platform === "darwin"
+          ? scopedWindows.map((window) => ({ ...window, layer: 0 }))
+          : scopedWindows;
+        const exactForegroundRows = windows.filter((window) => foregroundTarget !== undefined &&
+          window.pid === foregroundTarget.pid && window.window_id === foregroundTarget.windowId && window.is_on_screen === true,
+        );
+        const exactForeground = exactForegroundRows[0];
+        const response = {
+          complete: windowInventoryComplete,
+          truncated: windowInventoryTruncated,
+          ...(foregroundTarget === undefined ? {} : {
+            foreground_pid: foregroundTarget.pid,
+            foreground_window_id: foregroundTarget.windowId,
+          }),
+          windows,
+          ...(platform === "darwin" ? {
+            inventory: {
+              version: "macos-window-inventory-v1",
+              scope: { layer: 0, pid: typeof input.pid === "number" ? input.pid : null, on_screen_only: input.on_screen_only === true },
+              complete: windowInventoryComplete,
+              truncated: windowInventoryTruncated,
+              read_status: "ok",
+              raw_row_count: scopedWindows.length,
+              row_count: windows.length,
+              malformed_row_count: 0,
+              ...(exactForegroundRows.length === 1 && exactForeground !== undefined ? { foreground: {
+                status: "verified", pid: exactForeground.pid, window_id: exactForeground.window_id,
+              } } : {}),
+            },
+          } : {}),
+        };
         listWindowsResponses.push(response);
         return result({ structuredJson: JSON.stringify(response) });
       }
@@ -1047,6 +1901,11 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       }
       if (["click", "type_text", "press_key", "hotkey", "scroll", "drag"].includes(name)) {
         actionToolCallCount += 1;
+        if (actionThrownError !== undefined) {
+          const error = actionThrownError;
+          actionThrownError = undefined;
+          throw error;
+        }
         if (failActionCallNumber === actionToolCallCount && actionFailure !== undefined) {
           return result({
             isError: true,
@@ -1118,6 +1977,7 @@ function windowDriver(initialBounds = { x: 100, y: 120, width: 960, height: 680 
       failActionCallNumber = callNumber;
       actionFailure = { text, ...(errorCode === undefined ? {} : { errorCode }), ...(structuredJson === undefined ? {} : { structuredJson }) };
     },
+    setActionThrownError(value: Error | undefined) { actionThrownError = value; },
     setTypeTextResult(value: Partial<ToolResult> | undefined) { typeTextResult = value; },
     setTypeTextThrownError(value: Error | undefined) { typeTextThrownError = value; },
     setExtraWindowAfterTypeText(value: NonNullable<typeof extraWindow>) { extraWindowAfterTypeText = value; },
@@ -1308,6 +2168,382 @@ describe("CuaDriverComputer", () => {
       expect(fake.calls.filter((call) => call.name === "hotkey")).toHaveLength(1);
       await computer.close(session);
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("offers exact owned-browser restoration for a thrown no-input Native v2 Tool error without a foreign HWND", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-owned-browser-restore-thrown-"));
+    const fake = windowDriver();
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "fixture-profile", windowTarget: fake.target,
+      tabId: "owned-tab", generation: "owned-generation", delivery: "loopback-cdp",
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "win32", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: "owned-tab", generation: "owned-generation", candidates: [] }),
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    const session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "owned-browser-restore-thrown-before" as ObservationId, signal);
+      fake.setActionThrownError(Object.assign(new Error("Native Tool wrapper"), {
+        tag: "Tool",
+        inner: {
+          errorCode: "WINDOW_FOREGROUND_MISMATCH",
+          message: "foreground_unavailable: exact target was not focused; no mouse input was sent",
+        },
+      }));
+      const refused = await computer.execute(session, {
+        actionId: "owned-browser-restore-thrown-action" as ActionId,
+        basedOn: "owned-browser-restore-thrown-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      expect(refused).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
+      expect(await computer.listWindowHandoffCandidates(session, signal)).toEqual([
+        expect.objectContaining({ pid: fake.target.pid, windowId: fake.target.windowId, restoreCurrentManagedBrowser: true }),
+      ]);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+    } finally {
+      await computer.close(session).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      toolName: "hotkey",
+      action: { kind: "keypress" as const, keys: ["CMD", "SHIFT", "S"] },
+      message: "hotkey failed: exact target window did not become focused for foreground HID delivery",
+    },
+    {
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      schema: "foreground-pixel-guard-diagnostic-v1",
+    },
+    {
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+  ])("classifies a typed Tool throw for the exact $toolName guard literal ($schema)", async ({ toolName, action, message, schema }) => {
+    const directory = await mkdtemp(join(tmpdir(), `computer-harness-cua-${toolName}-thrown-focus-`));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = `${toolName}-thrown-before` as ObservationId;
+      await computer.observe(session, before, signal);
+      const callTool = fake.driver.callTool.bind(fake.driver);
+      fake.driver.callTool = async (name, input) => {
+        const result = await callTool(name, input);
+        if (name === toolName && result.isError) {
+          throw Object.assign(new Error(result.text), {
+            tag: "Tool",
+            inner: { message: result.text, errorCode: result.errorCode, structuredJson: result.structuredJson },
+          });
+        }
+        return result;
+      };
+      const structuredJson = toolName === "click" ? foregroundPixelGuardDiagnosticJson(fake.target, { schema }) : undefined;
+      fake.failActionOnCall(1, message, "CUA_TOOL_REFUSED", structuredJson);
+      const callStart = fake.calls.length;
+      const receipt = await computer.execute(session, {
+        actionId: `${toolName}-thrown-refusal` as ActionId, basedOn: before, ...action,
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
+      expect(fake.calls.slice(callStart).map((call) => call.name)).toEqual(["list_windows", toolName]);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["returned-result", "typed-tool-throw"] as const)("surfaces the native v2 point-block diagnostic from a %s", async (delivery) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-click-v2-result-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = "click-v2-result-before" as ObservationId;
+      await computer.observe(session, before, signal);
+      const message = "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched";
+      fake.failActionOnCall(1, message, "CUA_TOOL_REFUSED", foregroundPixelGuardDiagnosticJson(fake.target, {
+        schema: "foreground-pixel-guard-diagnostic-v2",
+        frontmostPid: fake.target.pid,
+        focusedWindowId: fake.target.windowId,
+        pointStatus: "blocked",
+      }));
+      if (delivery === "typed-tool-throw") {
+        const callTool = fake.driver.callTool.bind(fake.driver);
+        fake.driver.callTool = async (name, input) => {
+          const result = await callTool(name, input);
+          if (name === "click" && result.isError) {
+            throw Object.assign(new Error(result.text), {
+              tag: "Tool",
+              inner: { message: result.text, errorCode: result.errorCode, structuredJson: result.structuredJson },
+            });
+          }
+          return result;
+        };
+      }
+      const callStart = fake.calls.length;
+      const receipt = await computer.execute(session, {
+        actionId: `click-v2-${delivery}-refused` as ActionId, basedOn: before, kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "CUA_TOOL_REFUSED" });
+      expect(receipt.message).toContain("focus matched");
+      expect(receipt.message).toContain("target pid/window=1234/5678");
+      expect(receipt.message).toContain("point=110.00,130.00");
+      expect(receipt.message).toContain("pid/window/layer/z=999/111/0/2");
+      expect(receipt.message).toContain("no pointer or mouse event was dispatched");
+      expect(receipt.message).toContain("Do not repeat this click, or use another reference/tool to send the same click, while the reported blocker remains.");
+      expect(receipt.message).toContain("A target-window screenshot alone does not prove the blocker disappeared.");
+      expect(receipt.message).toContain("Use fresh GUI evidence to choose an unobstructed control, or a normal menu/keyboard path only after confirming the exact target is focused.");
+      expect(receipt.message).toContain("If safe progress cannot be verified, stop and report the blocker.");
+      expect(fake.calls.slice(callStart).map((call) => call.name)).toEqual(["list_windows", "click"]);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: "hotkey wording on click",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "hotkey failed: exact target window did not become focused for foreground HID delivery",
+    },
+    {
+      label: "nearby click wording",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched by caller",
+    },
+    {
+      label: "nearby hotkey wording",
+      toolName: "hotkey",
+      action: { kind: "keypress" as const, keys: ["CMD", "SHIFT", "S"] },
+      message: "hotkey failed: exact target window did not become focused for foreground HID delivery; no HID event was dispatched",
+    },
+    {
+      label: "click literal without structured focus proof",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+    },
+    {
+      label: "click occlusion with focus matching target",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "occluded",
+    },
+    {
+      label: "click diagnostic with unavailable foreground oracle",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "unavailable",
+    },
+    {
+      label: "click diagnostic bound to another target",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "stale-target",
+    },
+    {
+      label: "native v2 point blocked",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "occluded",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "native v2 string coordinate",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "native-v2-string-coordinate",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "native v2 out of bounds coordinate",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "native-v2-out-of-bounds-coordinate",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "native v2 missing blocker row",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "native-v2-missing-blocker",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "native v2 oversized diagnostic",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "native-v2-oversized",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "native v2 private diagnostic fields",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "native-v2-private-fields",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "native v2 wrong target",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "stale-target",
+      schema: "foreground-pixel-guard-diagnostic-v2",
+    },
+    {
+      label: "unknown diagnostic schema",
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+      diagnostic: "unknown-schema",
+      schema: "foreground-pixel-guard-diagnostic-v3",
+    },
+  ])("keeps cross-tool and near-match literals generic: $label", async (row) => {
+    const { toolName, action, message } = row;
+    const diagnostic = "diagnostic" in row ? row.diagnostic : undefined;
+    const schema = "schema" in row ? row.schema : undefined;
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-tool-literal-negative-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = `literal-negative-${toolName}` as ObservationId;
+      await computer.observe(session, before, signal);
+      let structuredJson: string | undefined;
+      if (toolName === "click") {
+        if (diagnostic === "occluded" || (typeof diagnostic === "string" && diagnostic.startsWith("native-v2-"))) {
+          structuredJson = foregroundPixelGuardDiagnosticJson(fake.target, {
+            schema, frontmostPid: fake.target.pid, focusedWindowId: fake.target.windowId, pointStatus: "blocked",
+          });
+        } else if (diagnostic === "unavailable") {
+          structuredJson = foregroundPixelGuardDiagnosticJson(fake.target, { frontmostPid: null });
+        } else if (diagnostic === "stale-target") {
+          structuredJson = foregroundPixelGuardDiagnosticJson(fake.target, {
+            schema,
+            diagnosticTarget: { pid: fake.target.pid, windowId: fake.target.windowId + 1 },
+          });
+        }
+        if (diagnostic === "unknown-schema") {
+          structuredJson = foregroundPixelGuardDiagnosticJson(fake.target, { schema });
+        }
+        if (structuredJson !== undefined && typeof diagnostic === "string" && diagnostic.startsWith("native-v2-")) {
+          if (diagnostic === "native-v2-string-coordinate" || diagnostic === "native-v2-out-of-bounds-coordinate") {
+            const envelope = JSON.parse(structuredJson) as Record<string, unknown>;
+            const guard = envelope.guard_diagnostic as Record<string, unknown>;
+            guard.translated_screen_point = diagnostic === "native-v2-string-coordinate"
+              ? { x: "110", y: 130 }
+              : { x: 1_000_001, y: 130 };
+            structuredJson = JSON.stringify(envelope);
+          } else if (diagnostic === "native-v2-missing-blocker") {
+            const envelope = JSON.parse(structuredJson) as Record<string, unknown>;
+            const guard = envelope.guard_diagnostic as Record<string, unknown>;
+            const hitTest = guard.point_hit_test as Record<string, unknown>;
+            delete hitTest.first_blocking_row;
+            structuredJson = JSON.stringify(envelope);
+          } else if (diagnostic === "native-v2-oversized") {
+            structuredJson = `${structuredJson}${" ".repeat(16_385)}`;
+          } else if (diagnostic === "native-v2-private-fields") {
+            const envelope = JSON.parse(structuredJson) as Record<string, unknown>;
+            const guard = envelope.guard_diagnostic as Record<string, unknown>;
+            guard.private_text = "PRIVATE-DIAGNOSTIC-SENTINEL";
+            guard.url = "https://private.example.test/path?token=PRIVATE-URL-TOKEN-SENTINEL";
+            guard.token = "PRIVATE-TOKEN-SENTINEL";
+            structuredJson = JSON.stringify(envelope);
+          }
+        }
+      }
+      fake.failActionOnCall(1, message, "CUA_TOOL_REFUSED", structuredJson);
+      const receipt = await computer.execute(session, {
+        actionId: `literal-negative-${toolName}` as ActionId, basedOn: before, ...action,
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "CUA_TOOL_REFUSED" });
+      if ((diagnostic === "occluded" || diagnostic === "native-v2-private-fields") && schema === "foreground-pixel-guard-diagnostic-v2") {
+        expect(receipt.message).toContain("focus matched");
+        expect(receipt.message).not.toContain("PRIVATE-DIAGNOSTIC-SENTINEL");
+        expect(receipt.message).not.toContain("private.example.test");
+        expect(receipt.message).not.toContain("PRIVATE-URL-TOKEN-SENTINEL");
+        expect(receipt.message).not.toContain("PRIVATE-TOKEN-SENTINEL");
+        expect(receipt.message!.length).toBeLessThan(800);
+      } else {
+        expect(receipt.message).toBe(message);
+      }
+      expect(fake.calls.filter((call) => call.name === toolName)).toHaveLength(1);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not classify a successful response that happens to contain a pinned native guard literal", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-tool-literal-success-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = "native-guard-success-literal" as ObservationId;
+      await computer.observe(session, before, signal);
+      fake.failActionOnCall(1, "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched");
+      const callTool = fake.driver.callTool.bind(fake.driver);
+      fake.driver.callTool = async (name, input) => {
+        const result = await callTool(name, input);
+        return name === "click" ? { ...result, isError: false } : result;
+      };
+      const receipt = await computer.execute(session, {
+        actionId: "native-guard-success-literal" as ActionId, basedOn: before,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      expect(receipt.status).toBe("completed");
+    } finally {
+      if (session !== undefined) await computer.close(session);
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -1573,7 +2809,7 @@ describe("CuaDriverComputer", () => {
       },
     } as unknown as CuaDriverLike;
     const probe = { read: vi.fn(async () => { throw new Error("complete CUA inventory must be sufficient"); }) };
-    const inventory = await listWindowInventory(driver, "relationship-direct", new AbortController().signal, undefined, true, probe);
+    const inventory = await listWindowInventory(driver, "relationship-direct", new AbortController().signal, undefined, true, probe, "win32");
 
     expect(inventory).toMatchObject({ complete: true, source: "cua_inventory", foregroundPid: 41, foregroundWindowId: 101 });
     expect(inventory.windows[0]).toMatchObject({ minimized: false, windowClass: "Notepad", ownerPid: 5, ownerWindowId: 20 });
@@ -1933,7 +3169,12 @@ describe("CuaDriverComputer", () => {
       const proofReadsAfterPop = fake.calls.filter((call) => call.name === "get_window_state" &&
         call.input?.window_id === fake.target.windowId && call.input?.include_screenshot === false).length;
       expect(proofReadsAfterPop - proofReadsBeforePop).toBe(2);
-      const finalInventory = fake.listWindowsResponses.at(-1);
+      const finalInventory = [...fake.listWindowsResponses].reverse().find((response) => {
+        const inventory = response.inventory;
+        return inventory !== null && typeof inventory === "object" &&
+          (inventory as Record<string, unknown>).scope !== null && typeof (inventory as Record<string, unknown>).scope === "object" &&
+          ((inventory as Record<string, unknown>).scope as Record<string, unknown>).on_screen_only === false;
+      });
       expect(finalInventory?.complete).toBe(false);
       const hiddenRow = (finalInventory?.windows as Array<Record<string, unknown>>).find((row) => row.window_id === sheet.windowId);
       expect(hiddenRow).toMatchObject({ is_on_screen: false });
@@ -2515,8 +3756,8 @@ describe("CuaDriverComputer", () => {
       expect(startingObservation.surfaceRef.kind).toBe("native_window");
       const initial = await computer.listWindows(session, signal);
       const editor = initial.options.find((window) => window.title === "Draft")!;
-      expect(editor).toMatchObject({ appName: "Editor", isCurrent: false });
-      expect(Object.keys(editor).sort()).toEqual(["appName", "isCurrent", "title", "windowRef"]);
+      expect(editor).toMatchObject({ appName: "Editor", isCurrent: false, isOnScreen: true });
+      expect(Object.keys(editor).sort()).toEqual(["appName", "isCurrent", "isOnScreen", "title", "windowRef"]);
       expect(fake.calls.filter((call) => call.name === "list_windows").at(-1)?.input)
         .toMatchObject({ on_screen_only: false });
       expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
@@ -2994,9 +4235,9 @@ describe("CuaDriverComputer", () => {
       expect(before.surfaceRef.kind).toBe("desktop");
       const listed = await computer.listWindows(session, signal);
       const candidate = listed.options.find((window) => window.title === editor.title);
-      expect(candidate).toMatchObject({ appName: editor.appName, isCurrent: false });
+      expect(candidate).toMatchObject({ appName: editor.appName, isCurrent: false, isOnScreen: true, minimized: false });
       expect(candidate === undefined ? [] : Object.keys(candidate).sort()).toEqual([
-        "appName", "isCurrent", "title", "windowRef",
+        "appName", "isCurrent", "isOnScreen", "minimized", "title", "windowRef",
       ]);
 
       const switched = await computer.execute(session, {
@@ -4250,6 +5491,222 @@ describe("CuaDriverComputer", () => {
       expect(fake.calls.filter((call) => call.name === "click").at(-1)?.input?.target).toMatchObject({ pid: candidate.pid, window_id: candidate.windowId });
       await computer.close(next);
     } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "type_text failed: exact foreground target is not currently focused; no text was dispatched",
+    "type_text failed: exact foreground target changed during settle; no text was dispatched",
+  ] as const)("classifies only a source-pinned type_text pre-input guard literal: %s", async (message) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-exact-focus-"));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-exact-focus-before" as ObservationId, signal);
+      fake.failActionOnCall(1, message);
+      const callStart = fake.calls.length;
+      const receipt = await computer.execute(session, {
+        actionId: "type-text-exact-focus-refused" as ActionId,
+        basedOn: "type-text-exact-focus-before" as ObservationId,
+        kind: "type",
+        text: "fixture text is not persisted",
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
+      const dispatched = fake.calls.slice(callStart).map((call) => call.name);
+      expect(dispatched).toEqual(["list_windows", "type_text"]);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: "incomplete-source-literal",
+      message: "type_text failed: exact foreground target is not currently focused",
+    },
+    {
+      label: "nearby-no-text-wording",
+      message: "type_text failed: exact foreground target is not currently focused; no text was dispatched by caller",
+    },
+    {
+      label: "foreground-prefix-without-no-input-proof",
+      message: "foreground_unavailable: exact foreground target was not active",
+    },
+    {
+      label: "ordinary-tool-error",
+      message: "fixture generic driver failure",
+    },
+  ] as const)("keeps non-exact type_text failures generic: $label", async ({ message }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-generic-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-generic-before" as ObservationId, signal);
+      fake.failActionOnCall(1, message);
+      const callStart = fake.calls.length;
+      const receipt = await computer.execute(session, {
+        actionId: "type-text-generic-refused" as ActionId,
+        basedOn: "type-text-generic-before" as ObservationId,
+        kind: "type",
+        text: "fixture text is not persisted",
+      }, signal);
+      if (message.startsWith("foreground_unavailable:")) {
+        expect(receipt).toMatchObject({ status: "partial", driverCode: "ACTION_OUTCOME_UNKNOWN" });
+      } else {
+        expect(receipt).toMatchObject({ status: "refused", driverCode: "CUA_TOOL_REFUSED" });
+      }
+      expect(fake.calls.slice(callStart).filter((call) => call.name === "type_text")).toHaveLength(1);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: "exact-native-preinput-literal",
+      message: "type_text failed: exact foreground target is not currently focused; no text was dispatched",
+      expected: { status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" },
+    },
+    {
+      label: "nearby-native-wording",
+      message: "type_text failed: exact foreground target is not currently focused; no text was dispatched by caller",
+      expected: { status: "refused", driverCode: "CUA_TOOL_REFUSED" },
+    },
+  ] as const)("classifies typed Tool throws only for the exact source literal: $label", async ({ message, expected }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-thrown-focus-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    fake.setPlatform("darwin");
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-thrown-before" as ObservationId, signal);
+      fake.setTypeTextThrownError(Object.assign(new Error(message), { tag: "Tool" }));
+      const receipt = await computer.execute(session, {
+        actionId: "type-text-thrown-focus" as ActionId,
+        basedOn: "type-text-thrown-before" as ObservationId,
+        kind: "type",
+        text: "fixture text is not persisted",
+      }, signal);
+      expect(receipt).toMatchObject(expected);
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not apply type_text-only refusal literals to another tool", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-literal-other-tool-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-other-tool-before" as ObservationId, signal);
+      fake.failActionOnCall(1, "type_text failed: exact foreground target is not currently focused; no text was dispatched");
+      const receipt = await computer.execute(session, {
+        actionId: "type-text-other-tool-refused" as ActionId,
+        basedOn: "type-text-other-tool-before" as ObservationId,
+        kind: "click",
+        point: { x: 10, y: 20 },
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "CUA_TOOL_REFUSED" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not classify a successful type_text response by error-only foreground literals", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-success-literal-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({
+      socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-success-before" as ObservationId, signal);
+      fake.setTypeTextResult({ text: "type_text failed: exact foreground target is not currently focused; no text was dispatched" });
+      const receipt = await computer.execute(session, {
+        actionId: "type-text-success-literal" as ActionId,
+        basedOn: "type-text-success-before" as ObservationId,
+        kind: "type",
+        text: "fixture text is not persisted",
+      }, signal);
+      expect(receipt.status).toBe("completed");
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      toolName: "hotkey",
+      action: { kind: "keypress" as const, keys: ["CMD", "SHIFT", "S"] },
+      message: "hotkey failed: exact target window did not become focused for foreground HID delivery",
+    },
+    {
+      toolName: "click",
+      action: { kind: "click" as const, point: { x: 10, y: 20 } },
+      message: "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+    },
+  ])("classifies only the pinned $toolName foreground pre-input refusal without dispatching adapter recovery", async ({ toolName, action, message }) => {
+    const directory = await mkdtemp(join(tmpdir(), `computer-harness-cua-${toolName}-exact-focus-`));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const computer = new CuaDriverComputer({
+      platform: "darwin", socketPath: "test-socket", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, `${toolName}-exact-focus-before` as ObservationId, signal);
+      const structuredJson = toolName === "click" ? foregroundPixelGuardDiagnosticJson(fake.target) : undefined;
+      fake.failActionOnCall(1, message, "CUA_TOOL_REFUSED", structuredJson);
+      const callStart = fake.calls.length;
+      const receipt = await computer.execute(session, {
+        actionId: `${toolName}-exact-focus-refused` as ActionId,
+        basedOn: `${toolName}-exact-focus-before` as ObservationId,
+        ...action,
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
+      expect(fake.calls.slice(callStart).map((call) => call.name)).toEqual(["list_windows", toolName]);
+      expect(fake.calls.slice(callStart).filter((call) => ["bring_to_front", "capture", "press_key", "hotkey", "click"].includes(call.name) && call.name !== toolName)).toEqual([]);
+    } finally {
+      if (session !== undefined) await computer.close(session);
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -9091,6 +10548,89 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  it.each([
+    { image: { width: 1568, height: 1181 }, domComplete: true },
+    { image: { width: 1568, height: 1181 }, domComplete: false },
+    { image: { width: 1200, height: 904 }, domComplete: true },
+    { image: { width: 1200, height: 904 }, domComplete: false },
+    { image: { width: 2400, height: 1808 }, domComplete: true },
+    { image: { width: 2400, height: 1808 }, domComplete: false },
+  ])("refuses collapsed managed content UIA at $image.width x $image.height with complete DOM=$domComplete", async ({ image, domComplete }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-uia-content-strip-"));
+    const bounds = { x: 100, y: 120, width: 1200, height: 904 };
+    const fake = windowDriver(bounds, image);
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "AXWebArea", frame: { x: 100, y: 207, width: 1200, height: 817 }, enabled: true },
+      // A31: after scrolling, Search was reduced to one native geometry
+      // unit and its center landed on the unrelated sticky price header.
+      { role: "AXButton", name: "Collapsed Search", frame: { x: 1106, y: 207, width: 31, height: 1 }, enabled: true },
+      { role: "AXButton", name: "Collapsed width", frame: { x: 300, y: 400, width: 1, height: 31 }, enabled: true },
+      { role: "AXButton", name: "Visible content", frame: { x: 300, y: 450, width: 100, height: 30 }, enabled: true },
+      { role: "AXButton", name: "Two-unit content", frame: { x: 300, y: 500, width: 31, height: 2 }, enabled: true },
+      { role: "AXButton", name: "Chrome strip", frame: { x: 110, y: 130, width: 31, height: 1 }, enabled: true },
+      { role: "AXButton", name: "Unknown strip", frame: { x: 300, y: 206, width: 31, height: 1 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "fixture", windowTarget: fake.target, tabId: "tab", generation: "generation", delivery: "loopback-cdp" };
+    const transport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      collect: async () => ({ complete: domComplete, tabId: "tab", generation: "generation", coordinateSpace: "physical", candidates: [] }),
+      click: vi.fn(async () => ({ status: "completed" as const, tabId: "tab", generation: "generation" })),
+    };
+    const computer = new CuaDriverComputer({ platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget, domGroundingTransport: transport, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "collapsed-content-observation" as ObservationId;
+      const capture = await computer.observe(session, basedOn, signal);
+      expect(capture.grounding).toMatchObject({ source: "hybrid", completeness: domComplete ? "complete" : "partial" });
+      for (const name of ["Collapsed Search", "Collapsed width"]) {
+        const candidate = capture.grounding!.elements.find((element) => element.name === name)!;
+        // Keep the observed evidence but do not advertise an actionable ref.
+        expect(candidate).toMatchObject({ source: "uia", browserRegion: "content", state: { enabled: false } });
+        if (name === "Collapsed Search") expect(candidate.bbox!.height).toBeCloseTo(image.height / bounds.height, 10);
+        const point = { x: candidate.bbox!.x + candidate.bbox!.width / 2, y: candidate.bbox!.y + candidate.bbox!.height / 2 };
+        // Also test the Computer boundary directly, bypassing the normal
+        // Runtime rejection of the public disabled state.
+        await expect(computer.execute(session, { kind: "click", actionId: `strip-${name}` as ActionId, basedOn, groundingRef: candidate.elementRef, point }, signal))
+          .resolves.toMatchObject({ status: "refused", driverCode: "GROUNDING_ELEMENT_NOT_ACTIONABLE" });
+      }
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      expect(transport.click).not.toHaveBeenCalled();
+      for (const [name, region] of [["Visible content", "content"], ["Two-unit content", "content"], ["Chrome strip", "chrome"], ["Unknown strip", "unknown"]] as const) {
+        const candidate = capture.grounding!.elements.find((element) => element.name === name)!;
+        expect(candidate).toMatchObject({ browserRegion: region, state: { enabled: true } });
+        const point = { x: candidate.bbox!.x + candidate.bbox!.width / 2, y: candidate.bbox!.y + candidate.bbox!.height / 2 };
+        await expect(computer.execute(session, { kind: "click", actionId: `allowed-${name}` as ActionId, basedOn, groundingRef: candidate.elementRef, point }, signal))
+          .resolves.toMatchObject({ status: "completed" });
+      }
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(4);
+      expect(transport.click).not.toHaveBeenCalled();
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("preserves one-unit native UIA controls outside managed-browser grounding", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-native-strip-"));
+    const fake = windowDriver({ x: 100, y: 120, width: 1200, height: 904 }, { width: 1568, height: 1181 });
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "AXButton", name: "Native control", frame: { x: 300, y: 400, width: 31, height: 1 }, enabled: true },
+    ] });
+    const computer = new CuaDriverComputer({ platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target, windowDeliveryMode: "foreground", grounding: "uia-catalog-v1", driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      const basedOn = "ordinary-native-strip" as ObservationId;
+      const capture = await computer.observe(session, basedOn, signal);
+      const candidate = capture.grounding!.elements.find((element) => element.name === "Native control")!;
+      expect(candidate.state?.enabled).toBe(true);
+      expect(candidate.browserRegion).toBeUndefined();
+      await expect(computer.execute(session, { kind: "click", actionId: "ordinary-native-click" as ActionId, basedOn, groundingRef: candidate.elementRef, point: { x: candidate.bbox!.x + candidate.bbox!.width / 2, y: candidate.bbox!.y + candidate.bbox!.height / 2 } }, signal))
+        .resolves.toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      await computer.close(session);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("calibrates a DOM control against the same observation's UIA Document rect", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-calibration-"));
     const bounds = { x: 100, y: 120, width: 1_828, height: 1_528 };
@@ -10241,6 +11781,15 @@ describe("CuaDriverComputer", () => {
 
       const fresh = await computer.observe(session, "window-fresh" as ObservationId, new AbortController().signal);
       expect(fresh.viewport).toEqual({ width: 1038, height: 718, coordinateSpace: "physical" });
+      expect(fresh.surfaceRef).toMatchObject({
+        kind: "native_window", surfaceId: oldObservation.surfaceRef.surfaceId,
+        generation: oldObservation.surfaceRef.generation + 1,
+      });
+      expect(await computer.execute(session, {
+        actionId: "window-old-after-refresh" as ActionId,
+        basedOn: "window-old" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, new AbortController().signal)).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
       const current = await computer.execute(session, {
         actionId: "window-current" as ActionId,
         basedOn: "window-fresh" as ObservationId,
@@ -11085,6 +12634,90 @@ describe("CuaDriverComputer", () => {
   });
 
   it.each([
+    { route: "isError", delivered: 0, requested: 21 },
+    { route: "thrown Tool error", delivered: 8, requested: 21 },
+    { route: "malformed counts", delivered: "8", requested: 21 },
+    { route: "missing counts", delivered: undefined, requested: undefined },
+    { route: "structured-code-only", delivered: 8, requested: 21 },
+    { route: "malformed JSON", delivered: 8, requested: 21 },
+  ])("classifies native type_text_incomplete as unknown after $route", async ({ route, delivered, requested }) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-incomplete-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    const structuredJson = route === "malformed JSON" ? "{malformed" : JSON.stringify({
+      code: "type_text_incomplete",
+      effect: "partial",
+      requested_chars: requested,
+      delivered_chars: delivered,
+      retry_from_character: 9,
+    });
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-incomplete-before" as ObservationId, signal);
+      if (route === "thrown Tool error") {
+        const error = Object.assign(new Error("native incomplete"), {
+          tag: "Tool",
+          inner: { message: "native incomplete", errorCode: "type_text_incomplete", structuredJson },
+        });
+        fake.setTypeTextThrownError(error);
+      } else {
+        fake.setTypeTextResult({
+          isError: true,
+          errorCode: route === "structured-code-only" ? "GENERIC_FAILURE" : "type_text_incomplete",
+          text: "native incomplete",
+          structuredJson,
+        });
+      }
+      const receipt = await computer.execute(session, {
+        actionId: `type-text-incomplete-${route}` as ActionId,
+        basedOn: "type-text-incomplete-before" as ObservationId,
+        kind: "type",
+        text: "private input must not enter the receipt",
+      }, signal);
+
+      expect(receipt).toMatchObject({ status: "partial", driverCode: "ACTION_OUTCOME_UNKNOWN" });
+      expect(receipt.message).not.toContain("private input");
+      expect(receipt.message).not.toContain("retry_from_character");
+      expect(receipt).not.toHaveProperty("safeRecovery");
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      const staleReplay = await computer.execute(session, {
+        actionId: `type-text-incomplete-replay-${route}` as ActionId,
+        basedOn: "type-text-incomplete-before" as ObservationId,
+        kind: "type",
+        text: "private input must not enter the receipt",
+      }, signal);
+      expect(staleReplay).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
+      expect(fake.calls.filter((call) => call.name === "type_text")).toHaveLength(1);
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an explicit no-input type_text refusal", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-type-text-no-input-"));
+    const fake = windowDriver();
+    const computer = new CuaDriverComputer({ socketPath: "test-socket", screenshotDir: directory, driverFactory: () => fake.driver });
+    const signal = new AbortController().signal;
+    try {
+      const session = await computer.open({}, signal);
+      await computer.observe(session, "type-text-no-input-before" as ObservationId, signal);
+      fake.setTypeTextResult({ isError: true, errorCode: "CUA_TOOL_REFUSED", text: "input was not sent" });
+      const receipt = await computer.execute(session, {
+        actionId: "type-text-no-input" as ActionId,
+        basedOn: "type-text-no-input-before" as ObservationId,
+        kind: "type",
+        text: "safe to retry only after a new decision",
+      }, signal);
+      expect(receipt).toMatchObject({ status: "refused", driverCode: "CUA_TOOL_REFUSED" });
+      await computer.close(session);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
     { name: "no editor", elements: [{ role: "Button", name: "Save", frame: { x: 200, y: 240, width: 120, height: 32 }, element_token: "button-token" }] },
     { name: "ambiguous editors", elements: [
       { role: "Edit", name: "Title", frame: { x: 200, y: 240, width: 220, height: 32 }, element_token: "title-token" },
@@ -11662,6 +13295,199 @@ describe("CuaDriverComputer", () => {
 });
 
 describe("window repair integration boundaries", () => {
+  it("offers an explicit exact owned-browser restore after a no-input foreground mismatch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-owned-browser-restore-"));
+    const fake = windowDriver();
+    fake.setGroundingState({ elements_complete: true, elements: [
+      { role: "Document", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+      { role: "AXWebArea", frame: { x: 100, y: 120, width: 960, height: 680 }, enabled: true },
+    ] });
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "fixture-profile", windowTarget: fake.target,
+      tabId: "owned-tab", generation: "owned-generation", delivery: "loopback-cdp",
+    };
+    let domCollectCount = 0;
+    let domClickCount = 0;
+    const collectedTargets: Array<{ pid: number; windowId: number }> = [];
+    const domTransport: DomGroundingTransport = {
+      kind: "managed-loopback-cdp-v1",
+      async collect(request) {
+        domCollectCount += 1;
+        collectedTargets.push({ ...request.browserTarget.windowTarget });
+        return {
+          complete: true,
+          tabId: "owned-tab",
+          generation: "owned-generation",
+          coordinateSpace: "physical",
+          candidates: [{
+            tagName: "button", ariaRole: "button", name: "Continue",
+            frame: { x: 200, y: 220, width: 80, height: 30 }, visible: true, interactive: true,
+            state: { enabled: true },
+          }],
+        };
+      },
+      async click(_request, signal) {
+        signal.throwIfAborted();
+        domClickCount += 1;
+        return { status: "completed", tabId: "owned-tab", generation: "owned-generation" };
+      },
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "win32", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: domTransport,
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const before = await computer.observe(session, "owned-browser-restore-before" as ObservationId, signal);
+      expect(before.grounding?.source).toBe("hybrid");
+      const oldDomElement = before.grounding?.elements.find((element) => element.source === "dom" && element.name === "Continue");
+      expect(oldDomElement).toBeDefined();
+      expect(domCollectCount).toBe(1);
+      expect(collectedTargets).toEqual([fake.target]);
+      fake.setForegroundRefusal(true,
+        "foreground_unavailable: the exact foreground target is not focused; no mouse input was sent",
+        "WINDOW_FOREGROUND_MISMATCH");
+      const refused = await computer.execute(session, {
+        actionId: "owned-browser-restore-refused" as ActionId,
+        basedOn: "owned-browser-restore-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      expect(refused).toMatchObject({ status: "refused", driverCode: "WINDOW_FOREGROUND_MISMATCH" });
+
+      const candidates = await computer.listWindowHandoffCandidates(session, signal);
+      expect(candidates).toEqual([expect.objectContaining({
+        pid: fake.target.pid, windowId: fake.target.windowId, restoreCurrentManagedBrowser: true,
+      })]);
+      expect(fake.calls.filter((call) => call.name === "list_windows").at(-1)?.input).toMatchObject({ pid: fake.target.pid });
+      expect(domCollectCount).toBe(1);
+      const freshCandidates = await computer.listWindowHandoffCandidates(session, signal);
+      expect(freshCandidates).toHaveLength(1);
+      await expect(computer.handoffWindow(session, candidates[0]!, signal)).rejects.toMatchObject({ code: "WINDOW_HANDOFF_STALE" });
+      await expect(computer.handoffWindow(session, { ...freshCandidates[0]!, pid: fake.target.pid + 1 }, signal))
+        .rejects.toMatchObject({ code: "WINDOW_HANDOFF_STALE" });
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+      const beforeActivation = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      await computer.handoffWindow(session, freshCandidates[0]!, signal);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(beforeActivation + 1);
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      expect(domCollectCount).toBe(1);
+      const staleObservationAction = await computer.execute(session, {
+        actionId: "owned-browser-restore-stale-frame" as ActionId,
+        basedOn: "owned-browser-restore-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      expect(staleObservationAction).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      const after = await computer.observe(session, "owned-browser-restore-after" as ObservationId, signal);
+      fake.setForegroundRefusal(false);
+      expect(after.grounding?.source).toBe("hybrid");
+      expect(after.surfaceRef.surfaceId).toBe(before.surfaceRef.surfaceId);
+      expect(after.surfaceRef.generation).toBeGreaterThan(before.surfaceRef.generation);
+      expect(domCollectCount).toBe(2);
+      expect(collectedTargets).toEqual([fake.target, fake.target]);
+      const newDomElement = after.grounding?.elements.find((element) => element.source === "dom" && element.name === "Continue");
+      expect(newDomElement).toBeDefined();
+      const staleDomAction = await computer.execute(session, {
+        actionId: "owned-browser-restore-stale-dom" as ActionId,
+        basedOn: "owned-browser-restore-after" as ObservationId,
+        kind: "click", groundingRef: oldDomElement!.elementRef, point: { x: 240, y: 235 },
+      }, signal);
+      expect(staleDomAction).toMatchObject({ status: "refused", driverCode: "GROUNDING_REF_STALE" });
+      expect(domClickCount).toBe(0);
+      expect(await computer.execute(session, {
+        actionId: "owned-browser-restore-fresh-dom" as ActionId,
+        basedOn: "owned-browser-restore-after" as ObservationId,
+        kind: "click", groundingRef: newDomElement!.elementRef, point: { x: 240, y: 235 },
+      }, signal)).toMatchObject({ status: "completed" });
+      expect(domClickCount).toBe(1);
+      expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+    } finally {
+      if (session !== undefined) await computer.close(session).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["unknown-input mismatch", "foreground_unavailable: foreground changed while dispatching; input outcome is unknown", "WINDOW_FOREGROUND_MISMATCH"],
+    ["generic refusal", "fixture generic driver failure", "GENERIC_FAILURE"],
+  ] as const)("does not offer owned-browser restoration for %s", async (_name, message, driverCode) => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-owned-browser-restore-negative-"));
+    const fake = windowDriver();
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "fixture-profile", windowTarget: fake.target,
+      tabId: "owned-tab", generation: "owned-generation", delivery: "loopback-cdp",
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "win32", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: "owned-tab", generation: "owned-generation", candidates: [] }),
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    const session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "owned-browser-restore-negative-before" as ObservationId, signal);
+      const activationsBefore = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      fake.setForegroundRefusal(true, message, driverCode);
+      const refused = await computer.execute(session, {
+        actionId: "owned-browser-restore-negative-action" as ActionId,
+        basedOn: "owned-browser-restore-negative-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      expect(["refused", "partial"]).toContain(refused.status);
+      await expect(computer.listWindowHandoffCandidates(session, signal)).rejects.toThrow(
+        "window handoff is available only for an explicitly bound native window",
+      );
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBefore);
+    } finally {
+      await computer.close(session).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps current-browser restoration disabled when window switching is off", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "computer-harness-owned-browser-restore-off-"));
+    const fake = windowDriver();
+    const browserTarget: ManagedBrowserTarget = {
+      kind: "managed-chromium", browser: "edge", profileId: "fixture-profile", windowTarget: fake.target,
+      tabId: "owned-tab", generation: "owned-generation", delivery: "loopback-cdp",
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "win32", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "off", grounding: "hybrid-catalog-v1",
+      browserTarget,
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: "owned-tab", generation: "owned-generation", candidates: [] }),
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    const session = await computer.open({}, signal);
+    try {
+      await computer.observe(session, "owned-browser-restore-off-before" as ObservationId, signal);
+      const activationsBefore = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      fake.setForegroundRefusal(true,
+        "foreground_unavailable: the exact foreground target is not focused; no mouse input was sent",
+        "WINDOW_FOREGROUND_MISMATCH");
+      await computer.execute(session, {
+        actionId: "owned-browser-restore-off-action" as ActionId,
+        basedOn: "owned-browser-restore-off-before" as ObservationId,
+        kind: "click", point: { x: 10, y: 20 },
+      }, signal);
+      await expect(computer.listWindowHandoffCandidates(session, signal)).rejects.toThrow(
+        "window handoff is available only for an explicitly bound native window",
+      );
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationsBefore);
+    } finally {
+      await computer.close(session).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("classifies only ENOENT as absent and keeps permission or other IO failures unverified", async () => {
     const enoent = Object.assign(new Error("missing"), { code: "ENOENT" });
     const eacces = Object.assign(new Error("permission denied"), { code: "EACCES" });

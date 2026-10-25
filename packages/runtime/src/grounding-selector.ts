@@ -62,6 +62,7 @@ const SPECIFIC_MATCH_REASON_CODES = new Set([
   "plan_match",
   "goal_match",
   "structured_control",
+  "enabled_bounded_radio",
 ]);
 const REASON_CODE_PRIORITY = [
   "local_recovery_region",
@@ -175,6 +176,7 @@ interface ScoredElement {
   readonly intent: boolean;
   readonly focusedOrEditable: boolean;
   readonly structured: boolean;
+  readonly enabledBoundedRadio: boolean;
 }
 
 interface NormalizedStructuredToolHint {
@@ -317,6 +319,8 @@ function scoreElement(
     score += 1_500;
     reasonCodes.push("structured_control");
   }
+  const enabledBoundedRadio = isEnabledBoundedRadio(element, catalogSource);
+  if (enabledBoundedRadio) reasonCodes.push("enabled_bounded_radio");
   const focusedOrEditable = element.state?.focused === true || element.state?.editable === true;
   if (element.state?.focused === true) {
     score += 220;
@@ -362,7 +366,18 @@ function scoreElement(
     intent: localMatches + correctionMatches + planMatches + goalMatches > 0,
     focusedOrEditable,
     structured,
+    enabledBoundedRadio,
   };
+}
+
+function isEnabledBoundedRadio(element: GroundingElement, catalogSource: GroundingCatalogSource): boolean {
+  if (catalogSource === "hybrid" && element.source === undefined) return false;
+  const bbox = element.bbox;
+  if (element.state?.enabled !== true || bbox === undefined || !hasUsableBoundingBox(bbox)) return false;
+  if (bbox.x < 0 || bbox.y < 0) return false;
+  const role = normalizeStructuredRole(element.role);
+  return role === "radio" || role === "radiobutton" || role === "axradiobutton" ||
+    role === "uiaradiobutton" || role === "uiaradiobuttoncontroltypeid";
 }
 
 function boundedFusion(
@@ -416,6 +431,17 @@ function boundedFusion(
   // Source caps are a fairness guard, not a hard total. Borrow any remaining
   // capacity when one source has fewer candidates or a high-confidence local
   // candidate from one source should not be crowded out by unrelated items.
+  // A radio may lead only the existing final borrow when no remaining
+  // candidate can still be admitted under its source cap. The ordinary global
+  // quota and the final generic borrow ordering remain unchanged.
+  if (selected.length < limit && !selected.some((candidate) => candidate.enabledBoundedRadio)) {
+    const hasCapEligibleCandidate = ranked.some((candidate) => {
+      if (used.has(candidate.element.elementRef)) return false;
+      const source = candidate.element.source ?? inferElementSource(catalogSource);
+      return (selectedBySource.get(source) ?? 0) < (sourceCaps.get(source) ?? limit);
+    });
+    if (!hasCapEligibleCandidate) take((candidate) => candidate.enabledBoundedRadio, 1, false);
+  }
   take(() => true, limit - selected.length, false);
   return selected;
 }
