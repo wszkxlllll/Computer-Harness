@@ -36,12 +36,12 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "type",
-      description: "Type ordinary single-line text into the currently focused GUI control. On window-bound Windows CUA multiline input, prefer a current UIA editable elementRef. Omitting it permits automatic targeting only when fresh grounding is complete and identifies one unambiguous editable UIA control; a partial catalog may be refused rather than guessed. The UIA path appends to the end of the target's current value regardless of caret or selection; it does not replace selected text or submit/send. On macOS, omit elementRef and use the native focused-control typing route. Windows desktop-wide CUA multiline input is not supported by this path; without the Host-only foreground-caret profile, use separate single-line type calls with Enter between lines only when the target is confirmed to accept line breaks and the Goal calls for them. Enter is a real key event and can submit/send in controls where Enter has that meaning; check the control before typing. Other platforms keep their native multiline typing route. Compose the complete intended text before entering it; for separate range edits, verify the selection because soft-wrapped visual lines are not paragraph boundaries. Do not use elementRef for ordinary single-line typing.",
+      description: "Type ordinary single-line text into the currently focused GUI control. On window-bound Windows CUA multiline input, prefer a current UIA editable elementRef. Omitting it permits automatic targeting only when fresh grounding is complete and identifies one unambiguous editable UIA control; a partial catalog may be refused rather than guessed. The UIA path appends to the end of the target's current value regardless of caret or selection; it does not replace selected text or submit/send. On macOS, omit elementRef and use the native focused-control typing route. Windows desktop-wide CUA multiline input is not supported by this path; without the Host-only foreground-caret profile, use separate single-line type calls with Enter between lines only when the target is confirmed to accept line breaks and the Goal calls for them. Enter is a real key event and can submit/send in controls where Enter has that meaning; check the control before typing. Do not assume line breaks are literal text: use a single paragraph in submit-on-Enter controls unless the current route is explicitly documented to preserve literal line breaks. After verifying the entered content, perform any send/submit as a separate deliberate action. Other platforms keep their native multiline typing route. Compose the complete intended text before entering it; for separate range edits, verify the selection because soft-wrapped visual lines are not paragraph boundaries. Do not use elementRef for ordinary single-line typing.",
       category: "computer",
       inputSchema: {
         type: "object",
         properties: {
-          text: { type: "string", description: "Text to type. Window-bound Windows CUA multiline input prefers a current UIA editable elementRef. Omission permits automatic targeting only with complete fresh grounding and one unambiguous editable UIA control; partial evidence may be refused. The UIA route appends at the end regardless of caret or selection. On macOS, omit elementRef and use native focused-control typing. Windows desktop-wide CUA multiline input is not supported by this path; without the Host-only foreground-caret profile, use one single-line type call per line with Enter between lines only when the target is confirmed to support line breaks and the Goal requires them. Enter is a real key event and may submit/send in search or message controls; check the target first. Other platforms use their native multiline typing route." },
+          text: { type: "string", description: "Text to type. Window-bound Windows CUA multiline input prefers a current UIA editable elementRef. Omission permits automatic targeting only with complete fresh grounding and one unambiguous editable UIA control; partial evidence may be refused. The UIA route appends at the end regardless of caret or selection. On macOS, omit elementRef and use native focused-control typing. Windows desktop-wide CUA multiline input is not supported by this path; without the Host-only foreground-caret profile, use one single-line type call per line with Enter between lines only when the target is confirmed to support line breaks and the Goal requires them. Enter is a real key event and may submit/send in search or message controls; check the target first. Do not assume line breaks are literal text: use a single paragraph in submit-on-Enter controls unless the current route is explicitly documented to preserve literal line breaks. After verifying the entered content, perform any send/submit as a separate deliberate action. Other platforms use their native multiline typing route." },
           elementRef: { type: "string", minLength: 1, maxLength: 96, description: "Current UIA editable element reference from the exact observation, preferred for window-bound Windows multiline input. Omit on macOS and use native focused-control typing. The UIA route appends to the end of the value and does not replace a selection. Expires when the observation or target window changes." },
         },
         required: ["text"],
@@ -119,7 +119,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
     },
     {
       name: "scroll",
-      description: "Scroll at a screen point by positive wheel ticks.",
+      description: "Scroll at a screen point. Supply x, y, direction (up, down, left, or right), and positive integer ticks; all four are required. Do not use delta, amount, negative ticks, or extra fields.",
       category: "computer",
       coordinate: { fields: ["x", "y"] },
       inputSchema: {
@@ -452,6 +452,11 @@ function parseSingleKey(value: JsonValue): string[] {
 function parseScroll(value: JsonValue): Extract<GuiActionDraft, { kind: "scroll" }> extends infer T
   ? T extends { kind: "scroll" } ? Omit<T, "kind"> : never : never {
   const object = asObject(value, "scroll");
+  for (const key of Object.keys(object)) {
+    if (key !== "x" && key !== "y" && key !== "direction" && key !== "ticks") {
+      throw new Error(`scroll.${key} is not an accepted argument`);
+    }
+  }
   const direction = object.direction;
   if (direction !== "up" && direction !== "down" && direction !== "left" && direction !== "right") {
     throw new Error("scroll.direction must be up, down, left, or right");

@@ -12,6 +12,23 @@ import { domCandidateFingerprint, type DomGroundingRawCandidate } from "./dom-gr
 import { resolveOwnedManagedBrowserWindow } from "./managed-browser-resolver.js";
 import { activateManagedBrowserPage, acquireManagedBrowserProfileLease, browserBoundsToCuaScaleFromPageMetrics, buildManagedBrowserLaunchUrls, buildManagedDomClickExpression, cleanupManagedBrowser, createManagedBrowserWindowBindingHint, formatManagedBrowserStartupDiagnostic, closeManagedBrowserGracefully, createManagedBrowserPage, defaultManagedBrowserKind, inspectManagedPageActivity, managedBrowserExecutableCandidates, MANAGED_DOM_EVALUATION_SCRIPT, LoopbackWebSocket, ManagedBrowserHost, normalizeManagedBrowserStartupUrl, prepareManagedBrowserDevToolsLaunch, readManagedBrowserStartupUrls, registerManagedBrowserStartupUrl, resolveManagedBrowserActivePage, resolveManagedBrowserActivePageSet, selectManagedBrowserStartupActivity, validateManagedBrowserPageSet, validateOwnedWindowResolution, waitForDevToolsBrowserEndpoint, waitForDevToolsPort, waitForManagedBrowserNavigationReady, type ManagedBrowserDevToolsPage, type ManagedBrowserHostOptions, type ManagedBrowserWindowResolution } from "./managed-browser-host.js";
 
+function createStartupSyncHost(profileRoot: string): ManagedBrowserHost {
+  const host = new ManagedBrowserHost({
+    browser: "edge",
+    url: "about:blank",
+    profileMode: "persistent",
+    profileLabel: "fixture-profile",
+    persistentProfileRoot: profileRoot,
+    resolveOwnedWindowTarget: async () => undefined,
+  });
+  (host as unknown as { state: { profileMode: "persistent"; debuggerPort: number; profileRoot: string } }).state = {
+    profileMode: "persistent",
+    debuggerPort: 45678,
+    profileRoot,
+  };
+  return host;
+}
+
 describe("managed browser host pilot", () => {
   it("selects a platform browser and bounded executable candidates", () => {
     expect(defaultManagedBrowserKind("win32")).toBe("edge");
@@ -574,6 +591,119 @@ describe("managed browser host pilot", () => {
     }
   });
 
+  it("replaces saved startup URLs from all current HTTP pages and drops a tab after it closes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-startup-sync-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      await registerManagedBrowserStartupUrl(root, "https://old.test/");
+      const host = createStartupSyncHost(root);
+      fetchSpy
+        .mockResolvedValueOnce(new Response(JSON.stringify([
+          { id: "tab-1", type: "page", url: "https://one.test/path?secret=hidden#fragment" },
+          { id: "tab-2", type: "page", url: "https://two.test/" },
+          { id: "worker", type: "service_worker", url: "https://worker.test/" },
+          { id: "settings", type: "page", url: "edge://settings" },
+        ])))
+        .mockResolvedValueOnce(new Response(JSON.stringify([
+          { id: "tab-2", type: "page", url: "https://two.test/" },
+        ])));
+
+      await expect(host.syncStartupUrlsFromCurrentPages(new AbortController().signal)).resolves.toBe(true);
+      await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual([
+        "https://one.test/path",
+        "https://two.test/",
+      ]);
+      await expect(host.syncStartupUrlsFromCurrentPages(new AbortController().signal)).resolves.toBe(true);
+      await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual(["https://two.test/"]);
+      expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:45678/json/list", expect.any(Object));
+      expect(await readFile(join(root, "managed-browser-startup.json"), "utf8")).not.toContain("secret");
+    } finally {
+      fetchSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("clears saved startup URLs only when an explicit blank page is present", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-startup-blank-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      await registerManagedBrowserStartupUrl(root, "https://old.test/");
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify([{ id: "blank", type: "page", url: "about:blank" }])));
+      const host = createStartupSyncHost(root);
+      await expect(host.syncStartupUrlsFromCurrentPages(new AbortController().signal)).resolves.toBe(true);
+      await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual([]);
+    } finally {
+      fetchSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves saved startup URLs when the page query fails, is empty, or contains only workers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-startup-query-failure-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      await registerManagedBrowserStartupUrl(root, "https://old.test/");
+      fetchSpy
+        .mockRejectedValueOnce(new Error("CDP unavailable"))
+        .mockResolvedValueOnce(new Response(JSON.stringify([])))
+        .mockResolvedValueOnce(new Response(JSON.stringify([{ id: "worker", type: "service_worker", url: "https://worker.test/" }])));
+      const host = createStartupSyncHost(root);
+      for (let index = 0; index < 3; index += 1) {
+        await expect(host.syncStartupUrlsFromCurrentPages(new AbortController().signal)).resolves.toBe(false);
+        await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual(["https://old.test/"]);
+      }
+    } finally {
+      fetchSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds a hung CDP page query and preserves the old startup list", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-startup-query-timeout-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      await registerManagedBrowserStartupUrl(root, "https://old.test/");
+      fetchSpy.mockImplementation((_input, init) => new Promise<Response>((_resolve, reject) => {
+        const querySignal = init?.signal;
+        if (querySignal === undefined || querySignal === null) {
+          reject(new Error("query signal missing"));
+          return;
+        }
+        if (querySignal.aborted) {
+          reject(querySignal.reason);
+          return;
+        }
+        querySignal.addEventListener("abort", () => reject(querySignal.reason), { once: true });
+      }));
+      const host = createStartupSyncHost(root);
+      await expect(host.syncStartupUrlsFromCurrentPages(new AbortController().signal)).resolves.toBe(false);
+      await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual(["https://old.test/"]);
+    } finally {
+      fetchSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 3_000);
+
+  it("does not truncate a refreshed list beyond the existing eight-URL bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "computer-harness-startup-sync-cap-"));
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      await registerManagedBrowserStartupUrl(root, "https://old.test/");
+      const pages = Array.from({ length: 9 }, (_, index) => ({
+        id: `tab-${index}`,
+        type: "page",
+        url: `https://site-${index}.test/`,
+      }));
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify(pages)));
+      const host = createStartupSyncHost(root);
+      await expect(host.syncStartupUrlsFromCurrentPages(new AbortController().signal)).resolves.toBe(false);
+      await expect(readManagedBrowserStartupUrls(root)).resolves.toEqual(["https://old.test/"]);
+    } finally {
+      fetchSpy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps prepared startup URLs bounded while reserving the current URL for CDP creation", () => {
     expect(buildManagedBrowserLaunchUrls(["https://prepared.test/", "https://current.test/path"], "https://current.test/path?query=ignored")).toEqual(["https://prepared.test/"]);
     expect(buildManagedBrowserLaunchUrls(["https://prepared.test/", "https://other.test/"], "about:blank")).toEqual([
@@ -622,32 +752,49 @@ describe("managed browser host pilot", () => {
     expect(selectManagedBrowserStartupActivity([{ ...activity, visibilityState: "unloaded" as const }], "current-target", true)).toBeUndefined();
   });
 
-  it("waits for the explicit startup target to leave blank and expose a ready redirected document", async () => {
+  it("accepts the exact redirected HTTP(S) target for observation while document.readyState is still loading", async () => {
     const target = { id: "startup-target", type: "page" };
     const readiness = vi.fn()
       .mockResolvedValueOnce({ url: "about:blank", readyState: "complete", hasDocumentElement: true, hasBody: true })
-      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true })
-      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "interactive", hasDocumentElement: true, hasBody: true });
+      .mockResolvedValueOnce({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true });
 
     await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 1_000))
-      .resolves.toMatchObject({ url: "https://redirected.example/path", readyState: "interactive" });
-    expect(readiness).toHaveBeenCalledTimes(3);
+      .resolves.toMatchObject({ url: "https://redirected.example/path", readyState: "loading", hasDocumentElement: true, hasBody: true });
+    expect(readiness).toHaveBeenCalledTimes(2);
     expect(readiness.mock.calls.every(([page]) => page.id === "startup-target")).toBe(true);
   });
 
-  it("does not treat a blank, non-http, loading, or bodyless page as navigation ready", async () => {
+  it("continues waiting for a missing target, blank/error URL, or missing DOM/body", async () => {
     const target = { id: "startup-target", type: "page" };
-    const readiness = vi.fn().mockResolvedValue({
-      url: "about:blank",
-      readyState: "complete",
-      hasDocumentElement: true,
-      hasBody: true,
-    });
-    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 20)).resolves.toBeUndefined();
-    expect(readiness).toHaveBeenCalled();
+    const readiness = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ url: "about:blank", readyState: "complete", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "chrome-error://chromewebdata/", readyState: "complete", hasDocumentElement: true, hasBody: true })
+      .mockResolvedValueOnce({ url: "https://example.test/", readyState: "loading", hasDocumentElement: false, hasBody: false })
+      .mockResolvedValueOnce({ url: "https://example.test/", readyState: "loading", hasDocumentElement: true, hasBody: false })
+      .mockResolvedValueOnce({ url: "https://example.test/", readyState: "loading", hasDocumentElement: true, hasBody: true });
+
+    await expect(waitForManagedBrowserNavigationReady(target, readiness, new AbortController().signal, 1_000))
+      .resolves.toMatchObject({ url: "https://example.test/", readyState: "loading", hasDocumentElement: true, hasBody: true });
+    expect(readiness).toHaveBeenCalledTimes(6);
   });
 
-  it("bounds a navigation readiness reader that never resolves and aborts its signal", async () => {
+  it("aborts a startup observation readiness wait when the caller aborts", async () => {
+    const target = { id: "startup-target", type: "page" };
+    const controller = new AbortController();
+    let readerSignal: AbortSignal | undefined;
+    const readiness = vi.fn((_page, signal: AbortSignal) => {
+      readerSignal = signal;
+      return new Promise<undefined>((resolve) => signal.addEventListener("abort", () => resolve(undefined), { once: true }));
+    });
+    const pending = waitForManagedBrowserNavigationReady(target, readiness, controller.signal, 5_000);
+    controller.abort(new Error("run cancelled"));
+
+    await expect(pending).rejects.toThrow("run cancelled");
+    expect(readerSignal?.aborted).toBe(true);
+  });
+
+  it("bounds a startup observation readiness reader that never resolves and aborts its signal", async () => {
     const target = { id: "startup-target", type: "page" };
     let readerSignal: AbortSignal | undefined;
     const readiness = vi.fn((_page, signal: AbortSignal) => {

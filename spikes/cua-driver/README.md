@@ -109,7 +109,7 @@ Existing failed/partial artifacts remain evidence, not passing acceptance result
 
 All three can create real windows and dispatch input. Run only with explicit
 permission, a private socket/output directory, and no concurrent desktop driver.
-See the [current evidence and limitations](../../docs/travel-pilot-preparation-2026-09-20.md#117-用户决定停止追加实验当前交付状态).
+See the [current evidence and limitations](../../docs/history/2026-10-20-release-convergence/travel-pilot-preparation-2026-09-20.md#117-用户决定停止追加实验当前交付状态).
 
 `probe:adapter:side-by-side` launches two owned WinForms fixtures side by side
 (left witness/control, right target) and drives only the exact target PID/window
@@ -181,7 +181,7 @@ new observation. The second observation is not a claim that an action happened.
 Create a disposable image on Windows:
 
 ```text
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-nonsensitive-fixture.ps1 -Output runs/api-conformance/non-sensitive-ui.png
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/history/2026-10-24/create-nonsensitive-fixture.ps1 -Output runs/api-conformance/non-sensitive-ui.png
 ```
 
 Run all providers whose keys are present in the selected environment file:

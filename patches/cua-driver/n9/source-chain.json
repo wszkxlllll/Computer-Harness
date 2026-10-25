@@ -80,7 +80,7 @@
       "availableAtMain": false
     }
   ],
-  "apply": "Apply these 12 patches exactly once and in order to the pinned upstream checkout. Do not additionally stack other native7/native9 aggregate closures. path is the Computer Harness repository path; packagePath is the self-contained source package path.",
+  "apply": "Apply the 12 patches exactly once in order to the pinned upstream checkout; do not stack aggregate closures. path is repository-relative; alternatePaths are hash-identical historical aliases.",
   "toolchain": "1.97.1",
   "cargoLockSha256": "cb7cdf7d03eee68f2dd48b6dc75a6005e74ca96a5604a7a88a2994ddd5125a2f",
   "sourcePins": "final-source-pins.json",

@@ -3,7 +3,7 @@
   "pilotId": "shanghai-pilot-20261001",
   "localDate": "2026-10-01",
   "timezone": "Asia/Shanghai",
-  "taskDocument": "docs/shanghai-government-travel-pilot-2026-10-01.md",
+  "taskDocument": "docs/history/2026-10-20-product-docs/shanghai-government-travel-pilot-2026-10-01.md",
   "budgetByDifficulty": {
     "easy": { "maxSteps": 100, "maxModelRequests": 100 },
     "medium": { "maxSteps": 100, "maxModelRequests": 100 },

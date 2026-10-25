@@ -18,6 +18,7 @@ const VALUE_OPTIONS = new Set([
   "--max-model-requests",
   "--env-file",
   "--screenshot-dir",
+  "--multiline-type-profile",
   "--qwen-coordinate-mode",
   "--qwen-thinking",
   "--qwen-output-mode",

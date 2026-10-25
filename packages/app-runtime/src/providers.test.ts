@@ -88,8 +88,14 @@ describe("app-runtime provider factory", () => {
     for (const [model, modelConfig, credentials] of [
       ["glm-5.3-flash", config(), {}],
       ["qwen3.8-flash", config({ model: "qwen3.8-flash" }), {}],
+      ["deepseek-flash", config({ model: "deepseek-flash" }), {}],
       ["glm-5.3-flash", config(), { glmApiKey: "  " }],
       ["qwen3.8-flash", config({ model: "qwen3.8-flash" }), { qwenApiKey: "\t" }],
+      ["deepseek-flash", config({ model: "deepseek-flash" }), { deepseekApiKey: "\t" }],
+      ["deepseek-v4.1-flash", config({ model: "deepseek-v4.1-flash" }), {}],
+      ["deepseek-v4.1-flash", config({ model: "deepseek-v4.1-flash" }), { deepseekApiKey: "fixture-official-key" }],
+      ["deepseek-v4.1-flash", config({ model: "deepseek-v4.1-flash" }), { arkApiKey: "\t" }],
+      ["deepseek-flash", config({ model: "deepseek-flash" }), { arkApiKey: "fixture-ark-key" }],
     ] as const) {
       let thrown: unknown;
       try { createProvider({ model, config: modelConfig, assetReader, outputDir: "runs/provider", credentials }); } catch (error) { thrown = error; }
@@ -103,6 +109,102 @@ describe("app-runtime provider factory", () => {
     const qwen = createProvider({ model: "qwen3.8-flash", config: config({ model: "qwen3.8-flash", qwenCoordinateMode: "normalized_1000", qwenThinking: "low", qwenOutputMode: "strict_json" }), assetReader, outputDir: "runs/qwen", credentials: { qwenApiKey: "fixture-qwen-key" } });
     expect(glm.id).toBe("glm-5.3-flash");
     expect(qwen.id).toBe("qwen3.8-flash");
+  });
+
+  it("produces official DeepSeek pixel actions without GLM credentials or transport", async () => {
+    let requests = 0;
+    const provider = await createProvider({
+      model: "deepseek-flash",
+      config: config({ model: "deepseek-flash" }),
+      assetReader,
+      outputDir: "unused",
+      credentials: { deepseekApiKey: "fixture-deepseek" },
+      httpClients: {
+        glm: { async post() { throw new Error("GLM must not be used"); } },
+        deepseek: { async post(url, body, headers) {
+          requests += 1;
+          expect(url).toBe("https://api.deepseek.com/chat/completions");
+          expect(headers.Authorization).toBe("Bearer fixture-deepseek");
+          expect(body).toMatchObject({ model: "deepseek-flash", thinking: { type: "disabled" }, max_tokens: 4096 });
+          return { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "deepseek-action", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 20, y: 30 }) } }] } }] };
+        } },
+      },
+    });
+    await expect(provider.generate(clickInputWithImage(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ id: "deepseek-action", arguments: { x: 20, y: 30 } }] });
+    expect(requests).toBe(1);
+  });
+
+  it.each([undefined, "https://fixture.invalid/api/plan/v3/", "https://fixture.invalid/api/plan/v3/chat/completions/"])("routes Ark through its independent key and HTTP seam with endpoint %s", async (arkEndpoint) => {
+    const provider = createProvider({
+      model: "deepseek-v4.1-flash",
+      config: config({
+        model: "deepseek-v4.1-flash",
+        deepseekEndpoint: "https://official.invalid",
+        deepseekMaxOutputTokens: 999,
+        arkMaxOutputTokens: 123,
+        ...(arkEndpoint === undefined ? {} : { arkEndpoint }),
+      }),
+      assetReader, outputDir: "unused",
+      credentials: { arkApiKey: "fixture-ark", deepseekApiKey: "fixture-official" },
+      httpClients: {
+        deepseek: { async post() { throw new Error("official transport must not be used"); } },
+        ark: { async post(url, body, headers) {
+          expect(url).toBe(arkEndpoint === undefined ? "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions" : "https://fixture.invalid/api/plan/v3/chat/completions");
+          expect(headers.Authorization).toBe("Bearer fixture-ark");
+          expect(body).toMatchObject({ model: "deepseek-v4.1-flash", thinking: { type: "disabled" }, max_tokens: 123 });
+          return { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{ id: "ark-click", type: "function", function: { name: "click", arguments: JSON.stringify({ x: 20, y: 30 }) } }] } }] };
+        } },
+      },
+    });
+    expect(provider.id).toBe("deepseek-v4.1-flash");
+    await expect(provider.generate(clickInputWithImage(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "tool_calls", calls: [{ id: "ark-click", arguments: { x: 20, y: 30 } }] });
+  });
+
+  it("projects Ark protocol errors without an official DeepSeek identity", async () => {
+    const provider = createProvider({
+      model: "deepseek-v4.1-flash", config: config({ model: "deepseek-v4.1-flash" }),
+      assetReader, outputDir: "unused", credentials: { arkApiKey: "fixture" },
+      httpClients: { ark: { async post() { return { choices: [] }; } } },
+    });
+    await expect(provider.generate(clickInputWithImage(), { signal: new AbortController().signal })).rejects.toMatchObject({ name: "ArkProviderError", code: "ARK_INVALID_RESPONSE", retryable: true, retryMode: "feedback" });
+  });
+
+  it("validates Ark budgets independently of official settings", () => {
+    const options = { model: "deepseek-v4.1-flash" as const, assetReader, outputDir: "unused", credentials: { arkApiKey: "fixture" } };
+    for (const arkRequestTimeoutMs of [999, 240001, 1.5, Number.NaN]) {
+      expect(() => createProvider({ ...options, config: config({ model: "deepseek-v4.1-flash", arkRequestTimeoutMs }) })).toThrow(/request timeout/u);
+    }
+    for (const arkMaxOutputTokens of [0, 131073, 1.5, Number.NaN]) {
+      expect(() => createProvider({ ...options, config: config({ model: "deepseek-v4.1-flash", arkMaxOutputTokens }) })).toThrow(/max output tokens/u);
+    }
+    expect(() => createProvider({ ...options, config: config({ model: "deepseek-v4.1-flash", deepseekRequestTimeoutMs: 0, deepseekMaxOutputTokens: 0 }) })).not.toThrow();
+  });
+
+  it("returns explicit DeepSeek finish reports with configured output bounds", async () => {
+    const provider = await createProvider({
+      model: "deepseek-flash", config: config({ model: "deepseek-flash", deepseekMaxOutputTokens: 1234, deepseekRequestTimeoutMs: 1000, deepseekEndpoint: "https://fixture.invalid/v1" }),
+      assetReader, outputDir: "unused", credentials: { deepseekApiKey: "fixture" },
+      httpClients: { deepseek: { async post(url, body) {
+        expect(url).toBe("https://fixture.invalid/v1/chat/completions");
+        expect(body.max_tokens).toBe(1234);
+        return { choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{ id: "finish", type: "function", function: { name: "finish", arguments: JSON.stringify({ status: "failure", text: "The fixture could not be completed." }) } }] } }] };
+      } } },
+    });
+    await expect(provider.generate(finishInput(), { signal: new AbortController().signal })).resolves.toMatchObject({ type: "finish", reportedStatus: "failure", summary: "The fixture could not be completed." });
+  });
+
+  it("rejects unknown models rather than falling back to GLM", () => {
+    expect(() => createProvider({ model: "unknown" as ResolvedRunConfig["model"], config: config(), assetReader, outputDir: "unused", credentials: { glmApiKey: "fixture" } })).toThrow(/unsupported Provider model/u);
+  });
+
+  it("rejects invalid DeepSeek deadlines and output bounds before requests", () => {
+    const options = { model: "deepseek-flash" as const, assetReader, outputDir: "unused", credentials: { deepseekApiKey: "fixture" } };
+    for (const deepseekRequestTimeoutMs of [999, 240001, 1000.5, Number.NaN]) {
+      expect(() => createProvider({ ...options, config: config({ model: "deepseek-flash", deepseekRequestTimeoutMs }) })).toThrow(/DeepSeek request timeout/u);
+    }
+    for (const deepseekMaxOutputTokens of [0, 131073, 1.5, Number.NaN]) {
+      expect(() => createProvider({ ...options, config: config({ model: "deepseek-flash", deepseekMaxOutputTokens }) })).toThrow(/DeepSeek max output tokens/u);
+    }
   });
 
   it("rejects invalid resolved GLM input budgets before creating or calling HTTP", () => {

@@ -4,7 +4,7 @@ import { prepareManagedBrowserProfile, type ManagedBrowserPreparationCuaModule, 
 
 describe("managed browser preparation seam", () => {
   it("keeps preparation host-only and closes bootstrap/host after the wait seam", async () => {
-    const calls = { bootstrapOpen: 0, bootstrapClose: 0, hostStart: 0, hostClose: 0 };
+    const calls = { bootstrapOpen: 0, bootstrapClose: 0, hostStart: 0, hostClose: 0, startupSync: 0 };
     const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() { calls.bootstrapClose += 1; } };
     const openBootstrap = vi.fn(async () => { calls.bootstrapOpen += 1; return bootstrap; });
     const host = {
@@ -12,6 +12,7 @@ describe("managed browser preparation seam", () => {
         calls.hostStart += 1;
         return {};
       },
+      async syncStartupUrlsFromCurrentPages() { calls.startupSync += 1; return false; },
       async close() { calls.hostClose += 1; },
     } as ManagedBrowserPreparationHost;
     const createHost = vi.fn((options: ManagedBrowserPreparationHostOptions) => {
@@ -35,7 +36,7 @@ describe("managed browser preparation seam", () => {
       waitForContinue: async () => "enter",
       onReady,
     })).resolves.toMatchObject({ outcome: "enter", cleanupDiagnostics: [], profileRetention: "confirmed" });
-    expect(calls).toEqual({ bootstrapOpen: 1, bootstrapClose: 1, hostStart: 1, hostClose: 1 });
+    expect(calls).toEqual({ bootstrapOpen: 1, bootstrapClose: 1, hostStart: 1, hostClose: 1, startupSync: 1 });
     expect(onReady).toHaveBeenCalledWith({ profileLabel: "fixture", urlHost: "example.test" });
     expect(JSON.stringify(onReady.mock.calls)).not.toContain("hidden=query");
     expect(loadCua).not.toHaveBeenCalled();
@@ -43,7 +44,8 @@ describe("managed browser preparation seam", () => {
 
   it("never registers about:blank as a startup URL", async () => {
     const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() {} };
-    const host = { async start() { return {}; }, async close() {} } as ManagedBrowserPreparationHost;
+    const startupSync = vi.fn(async () => true);
+    const host = { async start() { return {}; }, syncStartupUrlsFromCurrentPages: startupSync, async close() {} } as ManagedBrowserPreparationHost;
     const createHost = vi.fn((options: ManagedBrowserPreparationHostOptions) => {
       expect(options.url).toBe("about:blank");
       expect(options.registerStartupUrl).toBe(false);
@@ -61,14 +63,17 @@ describe("managed browser preparation seam", () => {
       waitForContinue: async () => "enter",
     });
     expect(createHost).toHaveBeenCalledOnce();
+    expect(startupSync).toHaveBeenCalledOnce();
   });
 
   it("reports host cleanup diagnostics and does not claim retention when cleanup is unconfirmed", async () => {
     const calls = { bootstrapClose: 0, hostClose: 0 };
     const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() { calls.bootstrapClose += 1; } };
     let reportDiagnostic: ((kind: Parameters<NonNullable<ManagedBrowserPreparationHostOptions["onCleanupDiagnostic"]>>[0]) => void) | undefined;
+    const startupSync = vi.fn(async () => true);
     const host = {
       async start() { return {}; },
+      syncStartupUrlsFromCurrentPages: startupSync,
       async close() { calls.hostClose += 1; },
     } as ManagedBrowserPreparationHost;
     const result = await prepareManagedBrowserProfile({
@@ -95,6 +100,7 @@ describe("managed browser preparation seam", () => {
       profileRetention: "unknown",
     });
     expect(calls).toEqual({ bootstrapClose: 1, hostClose: 1 });
+    expect(startupSync).toHaveBeenCalledOnce();
   });
 
   it("propagates host close failure and still closes the bootstrap session", async () => {
@@ -133,6 +139,7 @@ describe("managed browser preparation seam", () => {
       openBootstrap: async () => ({ driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", close: async () => { throw bootstrapCloseError; } }),
       createHost: () => ({
         async start() { return {}; },
+        async syncStartupUrlsFromCurrentPages() { return true; },
         async close() { /* successful host cleanup */ },
       } as ManagedBrowserPreparationHost),
       resolveOwnedWindow: async () => undefined,
@@ -146,7 +153,8 @@ describe("managed browser preparation seam", () => {
 
   it("allows a noncritical graceful-close diagnostic when cleanup otherwise completes", async () => {
     const bootstrap: CuaBootstrapSession = { driver: {} as CuaBootstrapSession["driver"], label: "bootstrap", async close() {} };
-    const host = { async start() { return {}; }, async close() {} } as ManagedBrowserPreparationHost;
+    const startupSync = vi.fn(async () => true);
+    const host = { async start() { return {}; }, syncStartupUrlsFromCurrentPages: startupSync, async close() {} } as ManagedBrowserPreparationHost;
     let reportDiagnostic: ((kind: Parameters<NonNullable<ManagedBrowserPreparationHostOptions["onCleanupDiagnostic"]>>[0]) => void) | undefined;
     const result = await prepareManagedBrowserProfile({
       socketPath: "fixture.sock",
@@ -170,6 +178,7 @@ describe("managed browser preparation seam", () => {
       cleanupDiagnostics: ["graceful_close_failed"],
       profileRetention: "confirmed",
     });
+    expect(startupSync).not.toHaveBeenCalled();
   });
 
   it("marks constructor failure cleanup confirmed when bootstrap close succeeds", async () => {

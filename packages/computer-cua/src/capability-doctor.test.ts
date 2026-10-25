@@ -39,6 +39,7 @@ function fakeDriver(options: {
   const calls: string[] = [];
   let destroyCount = 0;
   let activeLabel = "private-session";
+  let activeCaptureScope = 0;
   const driver = {
     async metadata() {
       calls.push("metadata");
@@ -59,18 +60,21 @@ function fakeDriver(options: {
       calls.push("listToolsJson");
       return options.inventory ?? JSON.stringify({ tools: [{ name: "list_windows" }, { name: "bring_to_front" }, { name: "get_desktop_state" }] });
     },
-    async startSession(input: { session?: string }) {
+    async startSession(input: { session?: string; captureScope?: number }) {
       calls.push("startSession");
+      // Reproduce the pinned SDK's Auto default instead of granting desktop
+      // scope unconditionally. Doctor must request its declared desktop scope.
+      activeCaptureScope = input.captureScope ?? 0;
       if (typeof input.session === "string") activeLabel = input.session;
       options.onStart?.();
       if (options.hangStart === true) return await new Promise<never>(() => undefined);
-      return { active: true, revived: false, state: { session: activeLabel, captureScope: 2, effectiveScope: 1, desktopUnlocked: true } } as never;
+      return { active: true, revived: false, state: { session: activeLabel, captureScope: activeCaptureScope, effectiveScope: activeCaptureScope === 2 ? 1 : 0, desktopUnlocked: activeCaptureScope === 2 } } as never;
     },
     async getSession() {
       calls.push("getSession");
       return { session: activeLabel, implicit: false, state: 0, clientKind: 4, transport: 1, cursorVisible: true, recordingActive: false, idleSeconds: 0n, expiresInSeconds: 60n } as never;
     },
-    async getSessionState() { calls.push("getSessionState"); return { session: activeLabel, captureScope: 2, effectiveScope: 1, desktopUnlocked: true, ...options.sessionState } as never; },
+    async getSessionState() { calls.push("getSessionState"); return { session: activeLabel, captureScope: activeCaptureScope, effectiveScope: activeCaptureScope === 2 ? 1 : 0, desktopUnlocked: activeCaptureScope === 2, ...options.sessionState } as never; },
     async endSession(_input?: unknown, callOptions?: { signal?: AbortSignal }) {
       calls.push("endSession");
       options.captureCleanupSignal?.(callOptions?.signal);
@@ -84,7 +88,11 @@ function fakeDriver(options: {
       if (name === "check_permissions" && options.permissionFailure !== undefined) throw options.permissionFailure;
       if (name === "check_permissions" && options.permission !== undefined) return options.permission;
       if (name === "health_report") return options.health ?? toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: process.platform, driver_version: LOCAL_SDK_VERSION, overall: "ok", checks: [{ name: "binary_version", status: "pass" }] }) });
-      if (name === "check_permissions") return toolResult({ structuredJson: JSON.stringify(LOCAL_SDK_VERSION === "0.32.0" ? { x11: true, wayland: false, atspi: true } : { accessibility: true, screen_recording: true, source: "cua-driver" }) });
+      if (name === "check_permissions") return toolResult({ structuredJson: JSON.stringify(LOCAL_SDK_VERSION === "0.32.0"
+        ? { x11: true, wayland: false, atspi: true }
+        : process.platform === "win32"
+          ? { elevated: false, integrity_level: "Medium", integrity_level_rid: 8192, post_message: true, uia: true }
+          : { accessibility: true, screen_recording: true, source: "cua-driver" }) });
       return toolResult();
     },
     uniffiDestroy() { destroyCount += 1; },
@@ -93,6 +101,36 @@ function fakeDriver(options: {
 }
 
 describe("CUA capability doctor", () => {
+  it("recognizes only documented Windows not-applicable health entries", async () => {
+    const skipped = ["bundle_identity", "tcc_accessibility", "tcc_screen_recording"].map((name) => ({ name, status: "skip", message: "not applicable on Windows" }));
+    for (const [checks, status, reasonCode] of [
+      [[{ name: "binary_version", status: "pass" }, ...skipped], "supported", undefined],
+      [skipped, "unknown", "health_checks_unverified"],
+      [[{ name: "binary_version", status: "pass" }, { ...skipped[0], message: "unverified" }], "degraded", "health_checks_skipped"],
+      [[{ name: "binary_version", status: "pass" }, { ...skipped[0], status: "fail" }], "unknown", "health_failed"],
+    ] as const) {
+      const fake = fakeDriver({ health: toolResult({ structuredJson: JSON.stringify({ schema_version: "1", platform: "win32", driver_version: LOCAL_SDK_VERSION, overall: "ok", checks }) }) });
+      const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });
+      expect(report.verified.health).toEqual(reasonCode === undefined ? { status } : { status, reasonCode });
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("checks Windows permissions without requiring administrator elevation", async () => {
+    const permission = { elevated: false, integrity_level: "Medium", integrity_level_rid: 8192, post_message: true, uia: true };
+    for (const [value, reason] of [
+      [permission, undefined],
+      [{ ...permission, uia: false }, "permission_not_granted"],
+      [{ ...permission, post_message: false }, "permission_not_granted"],
+      [{ ...permission, integrity_level_rid: "8192" }, "permission_schema"],
+      [{ accessibility: true, screen_recording: true, source: "cua-driver" }, "permission_schema"],
+    ] as const) {
+      const fake = fakeDriver({ permission: toolResult({ structuredJson: JSON.stringify(value) }) });
+      const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });
+      expect(report.verified.permissions).toEqual(reason === undefined ? { status: "supported" } : { status: "unknown", reasonCode: reason });
+      expect(report.cleanup.status).toBe("supported");
+    }
+  });
+
   it("returns redacted daemon checks without discovering windows or dispatching actions", async () => {
     const fake = fakeDriver();
     const report = await inspectCuaCapabilities({ socketPath: "fixture-socket", driverFactory: () => fake.driver });

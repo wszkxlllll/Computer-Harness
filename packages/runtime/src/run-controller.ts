@@ -48,6 +48,7 @@ import type {
   ComputerSession,
   ComputerToolDefinition,
   ContextCompiler,
+  ContextCompileInput,
   GuiActionDraft,
   IdFactory,
   NonComputerToolDefinition,
@@ -71,21 +72,20 @@ import { randomIdFactory, systemClock } from "./defaults.js";
 import { validateActionIntent } from "./action-validation.js";
 import { restrictToolNamesForCapabilities, ToolRegistry } from "./tool-registry.js";
 import type { CommittedEventListener } from "./committed-events.js";
-import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange, type ProgressMonitorState } from "./progress-monitor.js";
+import { createProgressMonitorState, reduceProgressMonitor, type ProgressMonitorState } from "./progress-monitor.js";
 import { createMonitorPolicyState, reduceMonitorPolicy, type MonitorPolicyProposal, type MonitorPolicyState, type MonitorPolicyMode, type MonitorWorkClock } from "./monitor-policy.js";
 import { DeterministicGroundingSelector, type GroundingSelector, type GroundingSelectionQuery, type GroundingStructuredToolHint } from "./grounding-selector.js";
 import { finishSummaryRejectionReason } from "./finish-summary.js";
 import { currentObservationAssessmentBinding, parseObservationAssessment } from "./observation-assessment.js";
+import { boundedRecoveryIntent, projectCurrentMonitorGuidance, projectMonitorCandidateGuidance, type MonitorGuidanceProjection } from "./monitor-guidance.js";
 import { canonicalizeSourceLinkedFinish, isWellFormedSourceLinkedFinishReport, validateSourceLinkedFinishContract } from "./source-linked-finish.js";
 
 const MAX_PROVIDER_RETRIES = 1;
 const PROVIDER_RETRY_BASE_DELAY_MS = 500;
 const PROVIDER_RETRY_DELAY_CAP_MS = 5_000;
-// Retry admission only reserves enough window for one configured Provider
-// attempt; this is not a Runtime-side cancellation deadline.
+// One HTTP deadline per attempt, plus the bounded delay for the sole retry.
+// The HTTP client still owns its attempt timer; Runtime owns Run cancellation.
 const DEFAULT_PROVIDER_ATTEMPT_RESERVE_MS = 90_000;
-/** Legacy backoff window; explicit format feedback also reserves both configured attempts. */
-const MAX_PROVIDER_RETRY_WINDOW_MS = 120_000;
 /** Once GUI actions are exhausted, allow only a small number of model decisions for finish/plan closure. */
 const MAX_ACTION_BUDGET_CLOSE_TURNS = 2;
 const DEFAULT_CLEANUP_DEADLINE_MS = 5_000;
@@ -97,12 +97,16 @@ export interface RunControllerDependencies {
   contextCompiler: ContextCompiler;
   toolRegistry: ToolRegistry;
   policy: RuntimePolicy;
-  /** Retry-window admission reserve only; the HTTP client owns the actual request timer. */
+  /** Actual single-request HTTP deadline used to reserve a full recovery attempt. */
   providerAttemptReserveMs?: number;
   /** Opt-in one-use recovery for an exact typed ambiguous pre-header Provider timeout. */
   providerRecovery?: "off" | "ambiguous-headers-once-v1";
   /** Absolute Run-start eligibility window for the recovery attempt. */
   providerRecoveryRunWindowMs?: number;
+  /** Optional hard wall-clock deadline measured from start(), not construction. */
+  runTimeoutMs?: number;
+  /** Begin terminate-only closing at this remaining wall clock; defaults to one HTTP deadline. */
+  finishReserveMs?: number;
   /** Optional action-level policy. Omitted preserves the pre-Guard baseline. */
   actionPolicy?: ActionPolicy;
   eventWriter: RunEventWriter;
@@ -359,6 +363,11 @@ export class RunController {
   private providerRecoveryScheduled = false;
   private providerRecoveryAttemptStarted = false;
   private providerRemoteOutcomeUnknown = false;
+  private readonly providerRetryWindowMs: number;
+  private readonly runTimeoutMs: number | undefined;
+  private readonly finishReserveMs: number;
+  private runDeadlineAt: number | undefined;
+  private runDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly actionPolicy: ActionPolicy | undefined;
   private readonly eventWriter: RunEventWriter;
   private readonly assetStore: AssetStore;
@@ -384,6 +393,8 @@ export class RunController {
   private lateComputerCleanupResult: boolean | undefined;
   private lateComputerCleanupConfirmation: Promise<boolean> | undefined;
   private readonly abortController = new AbortController();
+  /** Cancellation intent is distinct from internal fail-closed aborts. */
+  private cancellationRequested = false;
   private readonly events: RuntimeEvent[] = [];
   /** Full bounded adapter catalog for the latest observation; the model only sees the hot projection. */
   private readonly groundingCandidates = new Map<string, import("@computer-harness/protocol").GroundingCatalog>();
@@ -415,7 +426,6 @@ export class RunController {
   private monitorPolicyState: MonitorPolicyState | undefined;
   private monitorWorkClock: MonitorWorkClock = { modelDecisionCount: 0, guiActionCount: 0 };
   private monitorPendingGuidance: MonitorGuidance | undefined;
-  private monitorPendingHelp: Extract<MonitorPolicyProposal, { kind: "help_requested" }> | undefined;
   /** Short-lived local recall for the next GroundingCatalog projection. */
   private groundingRecoveryHint: GroundingRecoveryHint | undefined;
   private monitorProcessing = false;
@@ -444,6 +454,15 @@ export class RunController {
     if (this.providerRecovery !== "off" && this.providerRecovery !== "ambiguous-headers-once-v1") throw new Error("providerRecovery must be off or ambiguous-headers-once-v1");
     if (!Number.isSafeInteger(this.providerRecoveryRunWindowMs) || this.providerRecoveryRunWindowMs <= 0 || this.providerRecoveryRunWindowMs > 900_000) {
       throw new Error("providerRecoveryRunWindowMs must be a positive safe integer no greater than 900000");
+    }
+    this.providerRetryWindowMs = Math.min(Number.MAX_SAFE_INTEGER, this.providerAttemptReserveMs * (MAX_PROVIDER_RETRIES + 1) + providerRetryDelayMs(1));
+    this.runTimeoutMs = dependencies.runTimeoutMs;
+    this.finishReserveMs = dependencies.finishReserveMs ?? this.providerAttemptReserveMs;
+    if (this.runTimeoutMs !== undefined && (!Number.isSafeInteger(this.runTimeoutMs) || this.runTimeoutMs <= 0)) {
+      throw new Error("runTimeoutMs must be a positive safe integer");
+    }
+    if (!Number.isSafeInteger(this.finishReserveMs) || this.finishReserveMs <= 0) {
+      throw new Error("finishReserveMs must be a positive safe integer");
     }
     this.actionPolicy = dependencies.actionPolicy;
     this.eventWriter = dependencies.eventWriter;
@@ -504,6 +523,10 @@ export class RunController {
     this.started = true;
     this.goal = goal;
     this.providerRecoveryRunStartedAt = performance.now();
+    if (this.runTimeoutMs !== undefined) {
+      this.runDeadlineAt = Date.now() + this.runTimeoutMs;
+      this.armRunDeadline();
+    }
     return this.run(goal);
   }
 
@@ -514,6 +537,7 @@ export class RunController {
     if (this.snapshot.status === "finished") {
       throw new Error(`RunController for ${this.runId} is already finished`);
     }
+    if (!this.abortController.signal.aborted) this.cancellationRequested = true;
     this.abortController.abort(new Error(reason));
   }
 
@@ -659,6 +683,9 @@ export class RunController {
   }
 
   private modelEnabledToolNames(): string[] {
+    if (this.wallClockClosing()) {
+      return this.isToolEnabled("terminate") ? ["terminate"] : [];
+    }
     if (this.isBoundWindowRecoveryActive()) {
       const tool = this.recoveryStage === "list" ? "list_windows" : this.recoveryStage === "select" ? "switch_window" : undefined;
       return tool === undefined || !this.isToolEnabled(tool) ? [] : [tool];
@@ -670,7 +697,7 @@ export class RunController {
   }
 
   private isBoundWindowRecoveryActive(): boolean {
-    return this.recoveryStage === "list" || this.recoveryStage === "select";
+    return !this.wallClockClosing() && (this.recoveryStage === "list" || this.recoveryStage === "select");
   }
 
   private recoveryContextEvents(): readonly RuntimeEvent[] {
@@ -726,6 +753,93 @@ export class RunController {
     return budget !== undefined && budget.remaining === 0;
   }
 
+
+  private wallClockBudget(): ContextCompileInput["wallClockBudget"] {
+    return this.runDeadlineAt === undefined ? undefined : {
+      remainingMs: Math.max(0, this.runDeadlineAt - Date.now()),
+      finishReserveMs: this.finishReserveMs,
+    };
+  }
+
+  private wallClockClosing(): boolean {
+    const budget = this.wallClockBudget();
+    return budget !== undefined && budget.remainingMs <= budget.finishReserveMs;
+  }
+
+  private closingDecision(): boolean {
+    const budget = this.requestBudget();
+    return this.wallClockClosing() || budget?.remaining === 1;
+  }
+
+  private armRunDeadline(): void {
+    if (this.runDeadlineAt === undefined || this.abortController.signal.aborted) return;
+    const remainingMs = this.runDeadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      this.cancellationRequested = true;
+      this.abortController.abort(new Error(`Run wall-clock deadline exceeded after ${this.runTimeoutMs}ms`));
+      return;
+    }
+    // Chunk very long deadlines instead of overflowing the platform timer.
+    this.runDeadlineTimer = setTimeout(() => this.armRunDeadline(), Math.min(remainingMs, 2_147_483_647));
+  }
+
+  private providerRetryRejectionReason(error: unknown, retryCount: number, startedAt: number, delayMs: number): string | undefined {
+    if (this.isAborted()) return "Run cancellation takes precedence over recovery";
+    if (this.snapshot.unresolvedActionId !== undefined) return "an unresolved GUI side effect must not be replayed";
+    if (this.isBoundWindowRecoveryActive()) return "bound-window recovery does not allow Provider retries";
+    if (providerErrorDetails(error).retryable !== true) return "Provider marked this response non-retryable";
+    if (retryCount >= MAX_PROVIDER_RETRIES) return `retry limit reached after ${MAX_PROVIDER_RETRIES} retries`;
+    const budget = this.policy.checkBudget(this.snapshot);
+    if (!budget.allowed) return `model request budget does not allow recovery: ${budget.reason ?? "budget exhausted"}`;
+    const requiredMs = delayMs + this.providerAttemptReserveMs;
+    // Main's two-attempt window already covers slow format feedback. Preserve
+    // N9's one-millisecond strict-comparison headroom for explicit, non-ambiguous
+    // feedback only; transport/429 admission keeps the main window unchanged.
+    const feedbackHeadroom = providerErrorDetails(error).retryMode === "feedback"
+      && ambiguousHeadersRecoveryHint(error) === undefined ? 1 : 0;
+    const decisionWindowMs = Math.min(Number.MAX_SAFE_INTEGER, this.providerRetryWindowMs + feedbackHeadroom);
+    const decisionRemainingMs = decisionWindowMs - (Date.now() - startedAt);
+    if (decisionRemainingMs <= requiredMs) return `decision recovery window insufficient: ${Math.max(0, decisionRemainingMs)}ms remaining, requires more than ${requiredMs}ms (${delayMs}ms delay + ${this.providerAttemptReserveMs}ms HTTP deadline)`;
+    const wallClock = this.wallClockBudget();
+    if (wallClock !== undefined && wallClock.remainingMs <= requiredMs) return `Run wall clock insufficient for recovery: ${wallClock.remainingMs}ms remaining, requires more than ${requiredMs}ms (${delayMs}ms delay + ${this.providerAttemptReserveMs}ms HTTP deadline)`;
+    return undefined;
+  }
+
+  private async compileModelContext(goal: string): Promise<ModelInput> {
+    const recovery = this.isBoundWindowRecoveryActive();
+    const currentWindow = this.currentWindowMetadata();
+    const windowSwitchState = this.windowSwitchAvailable()
+      ? {
+          ...(currentWindow === undefined ? {} : { currentWindow }),
+          ...(this.latestWindowOptions === undefined ? {} : { options: this.latestWindowOptions }),
+          ...(this.latestWindowListStatus === undefined ? {} : this.latestWindowListStatus),
+        }
+      : undefined;
+    const requestBudget = this.requestBudget();
+    const wallClockBudget = this.wallClockBudget();
+    const monitorGuidance = this.monitorGuidanceForCurrentObservation();
+    return this.contextCompiler.compile({
+      runId: this.runId,
+      goal: recovery
+        ? `${goal}\n\nHarness recovery control: the previously bound window was closed after a completed action. Use only the offered list_windows or switch_window control. Do not repeat the completed action or perform ordinary GUI work until a fresh observation is supplied.`
+        : goal,
+      recentEvents: recovery ? this.recoveryContextEvents() : this.events,
+      ...(requestBudget === undefined ? {} : { requestBudget }),
+      ...(wallClockBudget === undefined ? {} : { wallClockBudget }),
+      enabledCategories: recovery ? ["side", "computer"] : [...this.enabledCategories],
+      enabledToolNames: this.modelEnabledToolNames(),
+      ...(recovery ? {} : this.planningEnabled ? { plan: this.snapshot.plan } : {}),
+      ...(!recovery && this.snapshot.executionSegment !== undefined ? { executionSegment: this.snapshot.executionSegment } : {}),
+      ...(!recovery && this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
+      ...(!recovery && this.snapshot.computerSession !== undefined ? { computerSession: this.snapshot.computerSession } : {}),
+      ...(!recovery && windowSwitchState !== undefined ? { windowSwitchState } : {}),
+      features: recovery ? { planning: "off", memory: "off", batching: "off" } : this.features,
+      ...(!recovery && this.assistantPreferences !== undefined ? { assistantPreferences: this.assistantPreferences } : {}),
+      ...(!recovery && this.sourceLinkedFinish !== undefined ? { sourceLinkedFinish: this.sourceLinkedFinish } : {}),
+      ...(!recovery && monitorGuidance !== undefined ? { monitorGuidance } : {}),
+      ...(!recovery && this.latestObservation !== undefined ? { latestObservation: this.observationForContext(this.latestObservation) } : {}),
+    }, this.abortController.signal);
+  }
   private async run(goal: string): Promise<RunOutcome> {
     let session: ComputerSession | undefined;
     let outcome: RunOutcome = "failed";
@@ -839,39 +953,9 @@ export class RunController {
           turn = pendingModelTurn.turn;
         } else {
           if (turn === undefined) {
-          const currentWindow = this.currentWindowMetadata();
-          const windowSwitchState = this.windowSwitchAvailable()
-            ? {
-                ...(currentWindow === undefined ? {} : { currentWindow }),
-                ...(this.latestWindowOptions === undefined ? {} : { options: this.latestWindowOptions }),
-                ...(this.latestWindowListStatus === undefined ? {} : this.latestWindowListStatus),
-              }
-            : undefined;
-          const requestBudget = this.requestBudget();
+          let compiledClosing = this.closingDecision();
           localRequestPreparation = true;
-          const context = await this.contextCompiler.compile(
-            {
-              runId: this.runId,
-              goal: this.isBoundWindowRecoveryActive()
-                ? `${goal}\n\nHarness recovery control: the previously bound window was closed after a completed action. Use only the offered list_windows or switch_window control. Do not repeat the completed action or perform ordinary GUI work until a fresh observation is supplied.`
-                : goal,
-              recentEvents: this.isBoundWindowRecoveryActive() ? this.recoveryContextEvents() : this.events,
-              ...(requestBudget === undefined ? {} : { requestBudget }),
-              enabledCategories: this.isBoundWindowRecoveryActive() ? ["side", "computer"] : [...this.enabledCategories],
-              enabledToolNames: this.modelEnabledToolNames(),
-              ...(this.isBoundWindowRecoveryActive() ? {} : this.planningEnabled ? { plan: this.snapshot.plan } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.snapshot.executionSegment !== undefined ? { executionSegment: this.snapshot.executionSegment } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.memoryEnabled ? { memory: this.snapshot.memory } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.snapshot.computerSession !== undefined ? { computerSession: this.snapshot.computerSession } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && windowSwitchState !== undefined ? { windowSwitchState } : {}),
-              features: this.isBoundWindowRecoveryActive() ? { planning: "off", memory: "off", batching: "off" } : this.features,
-              ...(!this.isBoundWindowRecoveryActive() && this.assistantPreferences !== undefined ? { assistantPreferences: this.assistantPreferences } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.sourceLinkedFinish !== undefined ? { sourceLinkedFinish: this.sourceLinkedFinish } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.monitorPendingGuidance !== undefined ? { monitorGuidance: this.monitorPendingGuidance } : {}),
-              ...(!this.isBoundWindowRecoveryActive() && this.latestObservation !== undefined ? { latestObservation: this.observationForContext(this.latestObservation) } : {}),
-            },
-            this.abortController.signal,
-          );
+          let context = await this.compileModelContext(goal);
           localRequestPreparation = false;
           this.throwIfAborted();
           // A user correction may arrive while the compiler is awaiting
@@ -892,6 +976,7 @@ export class RunController {
             outcome = "failed";
             break;
           }
+          if (compiledClosing !== this.closingDecision()) continue;
           let requestContext = context;
           const decisionId = this.idFactory.eventId();
           const prepareProvider = this.provider.prepare?.bind(this.provider);
@@ -903,30 +988,8 @@ export class RunController {
           let decisionInvalidated = false;
           let requestIdForResponse: string | undefined;
           const retryWindowStartedAt = Date.now();
+          let retryError: unknown;
           let closeTurnConsumed = false;
-          if (canPrepareProvider) {
-            localRequestPreparation = true;
-            prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
-            localRequestPreparation = false;
-            // Preparation may read assets or otherwise await provider-local
-            // work.  Re-check the command barrier before any network attempt.
-            const afterPrepare = await this.drainCommands();
-            this.throwIfAborted();
-            if ((this.snapshot.status as string) === "paused" || afterPrepare.correction) {
-              if (afterPrepare.correction) {
-                if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
-                else await this.refreshAfterUserInput(session);
-              }
-              decisionInvalidated = true;
-            }
-          }
-          if (this.providerRecoveryScheduled && !this.providerRecoveryHasReserve()) {
-            await this.commitEvent({ type: "runtime.error", category: "provider", message: "ambiguous-header recovery window expired during Provider preparation" });
-            this.providerRecoveryScheduled = false;
-            outcome = "failed";
-            providerFailed = true;
-            decisionInvalidated = true;
-          }
           turn = undefined;
           while (turn === undefined && !decisionInvalidated) {
             this.throwIfAborted();
@@ -938,15 +1001,59 @@ export class RunController {
               decisionInvalidated = true;
               break;
             }
+            // Closing may change during retry delay or asynchronous preparation.
+            // Keep this decision/attempt count, but never reuse its old GUI tools.
+            if (compiledClosing !== this.closingDecision()) {
+              compiledClosing = this.closingDecision();
+              localRequestPreparation = true;
+              context = await this.compileModelContext(goal);
+              localRequestPreparation = false;
+              requestContext = retryCount > 0 && providerErrorDetails(retryError).retryMode !== "same_input"
+                ? addProviderRetryFeedback(context, retryError, retryCount, MAX_PROVIDER_RETRIES)
+                : context;
+              prepared = undefined;
+              const afterRecompile = await this.drainCommands();
+              this.throwIfAborted();
+              if ((this.snapshot.status as string) === "paused" || afterRecompile.correction) {
+                if (afterRecompile.correction) {
+                  if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
+                  else await this.refreshAfterUserInput(session);
+                }
+                decisionInvalidated = true;
+                break;
+              }
+              continue;
+            }
+            if (canPrepareProvider && prepared === undefined) {
+              localRequestPreparation = true;
+              prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
+              localRequestPreparation = false;
+              const afterPrepare = await this.drainCommands();
+              this.throwIfAborted();
+              if ((this.snapshot.status as string) === "paused" || afterPrepare.correction) {
+                if (afterPrepare.correction) {
+                  if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
+                  else await this.refreshAfterUserInput(session);
+                }
+                decisionInvalidated = true;
+                break;
+              }
+              if (this.providerRecoveryScheduled && !this.providerRecoveryHasReserve()) {
+                await this.commitEvent({ type: "runtime.error", category: "provider", message: "ambiguous-header recovery window expired during Provider preparation" });
+                this.providerRecoveryScheduled = false;
+                outcome = "failed";
+                providerFailed = true;
+                decisionInvalidated = true;
+                break;
+              }
+              if (compiledClosing !== this.closingDecision()) continue;
+            }
             if (retryCount > 0) {
-              const retryBudget = this.policy.checkBudget(this.snapshot);
-              if (!retryBudget.allowed) {
-                await this.commitEvent({
-                  type: "runtime.error",
-                  category: "budget",
-                  message: retryBudget.reason ?? "model retry budget exhausted",
-                });
-                outcome = "budget_exhausted";
+              const rejection = this.providerRetryRejectionReason(retryError, retryCount - 1, retryWindowStartedAt, 0);
+              if (rejection !== undefined) {
+                await this.commitEvent({ type: "runtime.error", category: this.isAborted() ? "cancelled" : "budget", message: `model recovery was not dispatched: ${rejection}; no tool was executed` });
+                outcome = this.snapshot.unresolvedActionId !== undefined ? "outcome_unknown" : this.isAborted() ? "cancelled" : "failed";
+                providerFailureSummary = this.providerFailureProgressSummary();
                 providerFailed = true;
                 break;
               }
@@ -1000,21 +1107,21 @@ export class RunController {
               const recoveryHint = ambiguousHeadersRecoveryHint(error);
               if (recoveryHint !== undefined) this.providerRemoteOutcomeUnknown = true;
               const nextRetryCount = retryCount + 1;
-              const retryDelayMs = providerRetryDelayMs(nextRetryCount);
-              const retryWindowMs = providerRetryWindowMs(details.retryMode, this.providerAttemptReserveMs, recoveryHint !== undefined);
-              const retryElapsedMs = Date.now() - retryWindowStartedAt;
-              const retryWindowHasReserve = retryWindowMs !== undefined && Number.isSafeInteger(retryElapsedMs) && retryElapsedMs >= 0 &&
-                retryWindowMs - retryElapsedMs - retryDelayMs > this.providerAttemptReserveMs;
+              const retryAdvice = providerRetryAdvice(error, this.providerRetryWindowMs - this.providerAttemptReserveMs);
+              const retryDelayMs = providerRetryDelayMs(nextRetryCount, retryAdvice.retryAfterMs);
+              // Opted-in typed ambiguity starts a new decision only after a fresh
+              // observation; it must never fall through to a generic same-input retry.
               const optedInTransportRecovery = this.providerRecovery === "ambiguous-headers-once-v1"
                 && recoveryHint === "ambiguous-headers-transport-v1";
-              const retry = !optedInTransportRecovery && !this.isBoundWindowRecoveryActive() && !this.isAborted()
-                && details.retryable === true
-                && retryCount < MAX_PROVIDER_RETRIES
-                && retryWindowHasReserve;
+              const retryRejection = optedInTransportRecovery
+                ? "typed ambiguous-header transport failure requires a fresh recovery decision"
+                : this.providerRetryRejectionReason(error, retryCount, retryWindowStartedAt, retryDelayMs)
+                  ?? (retryAdvice.allowed ? undefined : "Provider retry advice does not allow recovery");
+              const retry = retryRejection === undefined;
               await this.commitEvent({
                 type: "model.request.failed",
                 category: this.isAborted() ? "cancelled" : "provider",
-                message: `${providerFailureMessage(error, retry, retryCount + 1)}${recoveryHint !== undefined ? "; remote outcome and usage are unknown" : ""}`,
+                message: `${providerFailureMessage(error, retryRejection, nextRetryCount)}${recoveryHint !== undefined ? "; remote outcome and usage are unknown" : ""}`,
                 requestId,
                 decisionId,
                 attempt,
@@ -1065,8 +1172,9 @@ export class RunController {
                 providerFailed = true;
                 break;
               }
+              retryError = error;
               retryCount = nextRetryCount;
-              await waitBeforeProviderRetry(this.abortController.signal, retryCount);
+              await waitBeforeProviderRetry(this.abortController.signal, retryCount, retryAdvice.retryAfterMs);
               const retryEffects = await this.drainCommands();
               if ((this.snapshot.status as string) === "paused" || retryEffects.correction) {
                 if (retryEffects.correction) {
@@ -1076,22 +1184,9 @@ export class RunController {
                 decisionInvalidated = true;
                 break;
               }
-              if (providerErrorDetails(error).retryMode !== "same_input") {
+              if (details.retryMode !== "same_input") {
                 requestContext = addProviderRetryFeedback(context, error, retryCount, MAX_PROVIDER_RETRIES);
-                if (canPrepareProvider) {
-                  localRequestPreparation = true;
-                  prepared = await prepareProvider(requestContext, { signal: this.abortController.signal });
-                  localRequestPreparation = false;
-                  const afterRetryPrepare = await this.drainCommands();
-                  if ((this.snapshot.status as string) === "paused" || afterRetryPrepare.correction) {
-                    if (afterRetryPrepare.correction) {
-                      if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
-                      else await this.refreshAfterUserInput(session);
-                    }
-                    decisionInvalidated = true;
-                    break;
-                  }
-                }
+                prepared = undefined;
               }
             }
           }
@@ -1260,6 +1355,10 @@ export class RunController {
             outcome = await this.commitRunFinished({ outcome: "budget_exhausted" });
             break;
           }
+          if (this.wallClockClosing()) {
+            await this.commitEvent({ type: "runtime.error", category: "budget", message: "reserved closing budget requires a final result with verified findings and missing items, not a user-input request" });
+            continue;
+          }
           await this.commitEvent({ type: "user.input.requested", question: turn.question });
           continue;
         }
@@ -1282,7 +1381,7 @@ export class RunController {
       return outcome;
     } catch (error) {
       if (this.snapshot.status !== "finished") {
-        if (this.isAborted() && this.snapshot.unresolvedActionId === undefined) {
+        if (this.isAborted() && this.cancellationRequested && this.snapshot.unresolvedActionId === undefined) {
           await this.commitEvent({
             type: "runtime.error",
             category: "cancelled",
@@ -1310,6 +1409,10 @@ export class RunController {
       }
       return outcome;
     } finally {
+      if (this.runDeadlineTimer !== undefined) {
+        clearTimeout(this.runDeadlineTimer);
+        this.runDeadlineTimer = undefined;
+      }
       this.commandInbox.close();
       await this.cleanup(this.activeComputerSession ?? session);
       this.activeComputerSession = undefined;
@@ -1473,7 +1576,9 @@ export class RunController {
     if (startedAt === undefined) return false;
     const elapsed = performance.now() - startedAt;
     const remaining = this.providerRecoveryRunWindowMs - elapsed;
-    return Number.isFinite(elapsed) && elapsed >= 0 && remaining >= this.providerAttemptReserveMs;
+    const wallClock = this.wallClockBudget();
+    return Number.isFinite(elapsed) && elapsed >= 0 && remaining >= this.providerAttemptReserveMs
+      && (wallClock === undefined || wallClock.remainingMs > this.providerAttemptReserveMs);
   }
 
   /** Shared reset after the private binding changes (or a confirmed popup is
@@ -1613,6 +1718,7 @@ export class RunController {
           // a control decision, not a new task correction. Abort immediately
           // so the provider cannot turn it into another GUI action or a
           // follow-up planning retry.
+          if (!this.abortController.signal.aborted) this.cancellationRequested = true;
           this.abortController.abort(new Error("cancelled by explicit user stop input"));
           return { correction: true };
         }
@@ -1852,6 +1958,10 @@ export class RunController {
     }
 
     this.throwIfAborted();
+    if (this.wallClockClosing()) {
+      await this.rejectToolCall(candidate.call.id, "Run wall clock is reserved for termination; approval was not requested");
+      return;
+    }
     const requestId = this.idFactory.eventId();
     await this.commitEvent({
       type: "approval.requested",
@@ -1872,6 +1982,10 @@ export class RunController {
   }
 
   private async executeApprovedCall(pending: PendingApproval): Promise<void> {
+    if (this.wallClockClosing()) {
+      await this.rejectToolCall(pending.call.id, "Run wall clock is reserved for termination; approved tool was not dispatched");
+      return;
+    }
     if (this.finalRequestConsumed()) {
       await this.rejectToolCall(pending.call.id, "model request budget is exhausted; approved action was not dispatched");
       return;
@@ -1916,7 +2030,6 @@ export class RunController {
     } else {
       await this.executeNonComputerCall(pending.call, pending.definition, context);
     }
-    await this.flushDeferredMonitorHelp();
   }
 
   private isToolEnabled(name: string): boolean {
@@ -2156,6 +2269,10 @@ export class RunController {
     if (calls.length === 0) {
       throw new Error("model returned an empty tool_calls turn");
     }
+    if (this.wallClockClosing()) {
+      for (const call of calls) await this.rejectToolCall(call.id, "Run wall clock is reserved for termination; only a terminate decision is accepted and no tool was executed");
+      return { correction: false };
+    }
     if (this.finalRequestConsumed()) {
       await this.commitEvent({ type: "runtime.error", category: "budget", message: "the final reserved model request was consumed without a valid terminate decision; no returned tool call was executed" });
       for (const call of calls) await this.rejectToolCall(call.id, "model request budget is exhausted; no tool calls can be dispatched");
@@ -2313,6 +2430,11 @@ export class RunController {
         return { correction: false };
       }
       await this.commitGuardDecision(computerPreflight, guardDecision, decisionObservation.surfaceRef);
+      this.throwIfAborted();
+      if (this.wallClockClosing()) {
+        await this.rejectPendingEntries(preflight, 0, "Run entered terminate-only closing during Guard evaluation; no tool was executed");
+        return { correction: false };
+      }
       if (guardDecision.decision === "deny") {
         for (const call of calls) await this.rejectToolCall(call.id, guardDecision.reason);
         return { correction: false };
@@ -2545,6 +2667,10 @@ export class RunController {
       }
       const context = this.toolExecutionContext(pendingTurn.session);
       this.throwIfAborted();
+      if (this.wallClockClosing()) {
+        await this.rejectPendingEntries(pendingTurn.entries, index, "Run wall clock is reserved for termination; remaining tools were not dispatched");
+        return { correction: false };
+      }
       if (this.finalRequestConsumed()) {
         await this.rejectPendingEntries(pendingTurn.entries, index, "model request budget is exhausted; no remaining tool calls can be dispatched");
         return { correction: false };
@@ -2574,19 +2700,14 @@ export class RunController {
         );
         // A completed action that opened the private recovery phase is a hard
         // source-turn boundary even though the reducer remains `running`.
-        // Its suffix was rejected by the handoff callback; do not flush old
-        // target monitor help or continue dispatching remaining entries.
+        // Its suffix was rejected by the handoff callback; do not continue
+        // dispatching entries for the old target.
         if (this.recoveryControlInFlight) return { correction: false };
       } else if (entry.definition.category === "control") {
         await this.rejectToolCall(entry.call.id, "control decisions must be mapped by the Provider, not executed as tools");
       } else {
         await this.executeNonComputerCall(entry.call, entry.definition, context);
       }
-      // Monitor help is deferred until the complete tool/action boundary has
-      // settled.  In particular, an action receipt is followed by its
-      // terminal ToolResult and post-action observation before status changes
-      // to waiting_user.
-      await this.flushDeferredMonitorHelp();
       if (this.snapshot.status === "waiting_window") {
         return { correction: false };
       }
@@ -2645,6 +2766,11 @@ export class RunController {
     definition: NonComputerToolDefinition,
     context: ToolExecutionContext,
   ): Promise<void> {
+    this.throwIfAborted();
+    if (this.wallClockClosing()) {
+      await this.rejectToolCall(call.id, "Run wall clock is reserved for termination; tool was not dispatched");
+      return;
+    }
     try {
       const output = await definition.execute(call.arguments, context);
       if (definition.category === "planning" && definition.planMutationFromResult !== undefined) {
@@ -2729,6 +2855,10 @@ export class RunController {
     beforeWindowHandoff?: () => Promise<void>,
   ): Promise<void> {
     this.throwIfAborted();
+    if (this.wallClockClosing()) {
+      await this.rejectToolCall(call.id, "Run wall clock is reserved for termination; GUI action was not dispatched");
+      return;
+    }
     const executionObservationId = this.snapshot.latestObservationId;
     const preActionFingerprint = this.latestObservationFingerprint;
     // WindowHandoff is a native-window picker. A desktop observation has no
@@ -2784,13 +2914,6 @@ export class RunController {
       // erase a still-valid local demand before they can execute anything.
       await this.commitEvent({ type: "execution.segment.updated", source: "runtime", mutation: { operation: "invalidated", segmentId: activeSegment.id, reason: "main_provider_replanned" } });
     }
-    if (this.monitorMode === "guidance" && this.monitorState !== undefined && shouldRejectRepeatedNoChange(this.monitorState, action)) {
-      await this.rejectToolCall(
-        call.id,
-        "Monitor blocked a repeated GUI action after an unchanged observation; re-observe and re-localize the target before trying a different action",
-      );
-      return;
-    }
     if (this.callStates.get(call.id) !== "received") {
       throw new Error(`ToolCall ${call.id} is not available for action proposal`);
     }
@@ -2828,10 +2951,13 @@ export class RunController {
     let receipt: import("@computer-harness/protocol").ActionReceipt;
     try {
       const executeOptions: ComputerExecuteOptions = executionObservationId === undefined ? {} : { executionObservationId };
-      const rawReceipt = await this.computer.execute(context.session, action, this.abortController.signal, {
-        ...executeOptions,
-        ...(action.kind !== "switch_window" && action.kind !== "reopen_saved_document" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
-      });
+      this.throwIfAborted();
+      const rawReceipt = this.wallClockClosing()
+        ? { actionId: action.actionId, status: "refused" as const, driverCode: "RUN_WALL_CLOCK_CLOSING", message: "Run wall clock is reserved for termination; GUI action was not dispatched" }
+        : await this.computer.execute(context.session, action, this.abortController.signal, {
+            ...executeOptions,
+            ...(action.kind !== "switch_window" && action.kind !== "reopen_saved_document" && this.windowHandoff === "confirm-v1" ? { detectNewWindowHandoff: true } : {}),
+          });
       receipt = normalizeActionReceiptForAction(
         action,
         rawReceipt,
@@ -3603,6 +3729,12 @@ export class RunController {
       }
       if (outcome === "succeeded") outcome = "failed";
     }
+    // An explicit unknown outcome survives cancellation even when a failed
+    // receipt cleared unresolvedActionId. Internal safety aborts are failures,
+    // not caller cancellation.
+    if (this.isAborted() && this.cancellationRequested && outcome !== "outcome_unknown") {
+      outcome = this.snapshot.unresolvedActionId === undefined ? "cancelled" : "outcome_unknown";
+    }
     await this.commitEvent({
       type: "run.finished",
       outcome,
@@ -3713,6 +3845,16 @@ export class RunController {
       const progress = reduceProgressMonitor(this.monitorState, event);
       this.monitorState = progress.state;
       this.updateGroundingRecoveryHint(event, progress.output);
+      const keepUnverifiedEpisode = event.type === "monitor.transition"
+        && event.transition === "changed"
+        && this.hasUnresolvedActionMonitorGuidance();
+      if ((event.type === "monitor.transition" && event.transition !== "unchanged" && !keepUnverifiedEpisode)
+        || event.type === "computer.window.handoff.requested"
+        || event.type === "computer.window.handoff.completed"
+        || event.type === "computer.window.handoff.ignored"
+        || event.type === "model.response.received" && event.turn.observationAssessment !== undefined && progress.output.assessmentOutcome === "uncertain") {
+        this.monitorPendingGuidance = undefined;
+      }
       const executionBarrier = this.monitorExecutionBarrier();
       if (this.monitorBarrierClearsPendingRecommendations() || this.snapshot.status === "finished") {
         this.clearMonitorPendingRecommendations();
@@ -3723,19 +3865,24 @@ export class RunController {
         this.clearMonitorPendingRecommendations();
       }
       this.monitorLastPartitionKey = partitionKey;
+      const previousCandidateFingerprint = this.monitorPolicyState.candidateFingerprint;
+      const candidateGuidance = progress.output.candidate
+        ? this.monitorGuidanceForCandidate(event, progress.output)
+        : undefined;
       const policy = reduceMonitorPolicy(this.monitorPolicyState, {
         runId: this.runId,
         partitionKey,
         sequence: event.sequence,
         clock: this.monitorWorkClock,
         monitor: progress.output,
+        ...(candidateGuidance === undefined ? {} : { guidanceText: candidateGuidance.text }),
         ...(executionBarrier === undefined ? {} : { executionBarrier }),
         ...(this.snapshot.status === "finished" ? { terminal: true } : {}),
       });
       this.monitorPolicyState = policy.state;
-      if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
-      const proposalEvent = this.monitorProposalEvent(policy.proposal, progress.output, event.eventId);
-      if (proposalEvent === undefined || this.monitorProposalCount >= 64) return;
+      if (previousCandidateFingerprint !== undefined && policy.state.candidateFingerprint === undefined) {
+        this.monitorLastPersistedKey = undefined;
+      }
       // The monitor still consumes control events to keep its in-memory state
       // and policy lifecycle coherent, but trajectory proposals are legal only
       // while the Run reducer is in `running`. In particular, approval and
@@ -3745,36 +3892,23 @@ export class RunController {
         this.clearMonitorPendingRecommendations();
         return;
       }
+      if (policy.proposal.kind === "guidance") {
+        this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
+      }
+      if (!this.shouldPersistMonitorProposal(policy.proposal, progress.output)) return;
+      const proposalEvent = this.monitorProposalEvent(
+        policy.proposal,
+        progress.output,
+        event.eventId,
+        candidateGuidance?.text,
+        candidateGuidance?.sourceEventIds,
+      );
+      if (proposalEvent === undefined || this.monitorProposalCount >= 64) return;
       this.monitorProposalCount += 1;
       this.monitorLastPersistedKey = this.monitorProposalKey(policy.proposal, progress.output);
       await this.commitEvent(proposalEvent);
-      if (policy.proposal.kind === "guidance") {
-        this.monitorPendingGuidance = { text: policy.proposal.text, fingerprint: policy.proposal.fingerprint };
-      } else if (policy.proposal.kind === "help_requested" && this.snapshot.status === "running" && this.monitorExecutionBarrier() === undefined) {
-        // Do not transition status from inside action.execution.completed or
-        // before the matching ToolResult/post-observation has been committed.
-        // The owning tool-turn loop flushes this deferred request at its
-        // atomic boundary.
-        this.monitorPendingHelp = policy.proposal;
-      }
     } finally {
       this.monitorProcessing = false;
-    }
-  }
-
-  private async flushDeferredMonitorHelp(): Promise<void> {
-    const pending = this.monitorPendingHelp;
-    if (pending === undefined || this.snapshot.status !== "running" || this.monitorExecutionBarrier() !== undefined) return;
-    this.monitorPendingHelp = undefined;
-    try {
-      await this.commitEvent({
-        type: "user.input.requested",
-        question: "页面连续多次操作后没有出现可确认的变化，任务已暂停。请检查电脑当前画面后再补充下一步；不要重复输入网址或重复点击同一入口。若页面仍无变化，请说明“停止任务”。",
-      });
-    } catch (error) {
-      // A diagnostic request is best effort.  If its own event cannot be
-      // committed, leave the already-completed action outcome untouched.
-      await this.recordMonitorDiagnosticFailure(error);
     }
   }
 
@@ -3793,7 +3927,65 @@ export class RunController {
 
   private clearMonitorPendingRecommendations(): void {
     this.monitorPendingGuidance = undefined;
-    this.monitorPendingHelp = undefined;
+  }
+
+  private hasUnresolvedActionMonitorGuidance(): boolean {
+    const fingerprint = this.monitorPolicyState?.candidateFingerprint;
+    const isUnresolvedActionEpisode = fingerprint?.startsWith("action_stall:") === true
+      || fingerprint?.startsWith("no_observed_change:") === true;
+    return this.monitorPendingGuidance !== undefined && isUnresolvedActionEpisode;
+  }
+
+  private monitorGuidanceForCandidate(
+    event: RuntimeEvent,
+    output: import("./progress-monitor.js").ProgressMonitorOutput,
+  ): MonitorGuidanceProjection {
+    return projectMonitorCandidateGuidance({
+      event,
+      output,
+      events: this.events,
+      runId: this.runId,
+      ...(this.latestObservation === undefined ? {} : { latestObservation: this.latestObservation }),
+    });
+  }
+
+  private monitorGuidanceForCurrentObservation(): MonitorGuidance | undefined {
+    const pending = this.monitorPendingGuidance;
+    const latestObservation = this.latestObservation;
+    if (pending === undefined) return undefined;
+    if (latestObservation === undefined || this.monitorState?.lastObservationId !== String(latestObservation.id)) {
+      this.monitorPendingGuidance = undefined;
+      return undefined;
+    }
+
+    const projection = projectCurrentMonitorGuidance(this.events, this.runId, latestObservation);
+    if (projection !== undefined) return { ...pending, text: projection.text };
+
+    const transition = this.monitorState.lastTransition;
+    if (transition?.postObservationId === String(latestObservation.id)
+      && transition.transition === "unknown") {
+      this.monitorPendingGuidance = undefined;
+      return undefined;
+    }
+    if (transition?.postObservationId === String(latestObservation.id)
+      && transition.transition === "changed"
+      && this.hasUnresolvedActionMonitorGuidance()) {
+      return {
+        ...pending,
+        text: "Earlier action/result evidence remains unverified. Recheck the newest image before choosing a strategy; a changed screen alone does not establish progress.",
+      };
+    }
+    if (transition?.postObservationId === String(latestObservation.id) && transition.transition === "changed") {
+      this.monitorPendingGuidance = undefined;
+      return undefined;
+    }
+    // A generic note never describes an old action as a current fact. It is
+    // still bounded to this request and asks the model to inspect the current
+    // image before deciding what to do.
+    return {
+      ...pending,
+      text: "Monitor evidence is incomplete for this action. Inspect the newest image before choosing the next step; do not assume the requested result is present.",
+    };
   }
 
   /**
@@ -3955,34 +4147,44 @@ export class RunController {
 
   private monitorPartitionKey(): string {
     const session = this.snapshot.computerSession;
-    const viewport = this.latestObservation?.viewport ?? session?.viewport;
+    const observation = this.latestObservation;
+    const viewport = observation?.viewport ?? session?.viewport;
     return session === undefined || viewport === undefined
       ? `run:${String(this.runId)}`
-      : `session:${String(session.id)}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
+      : `session:${String(session.id)}|surface:${JSON.stringify(observation?.surfaceRef ?? "unbound")}|viewport:${viewport.coordinateSpace}:${viewport.width}x${viewport.height}`;
   }
 
-  private monitorExecutionBarrier(): "unknown_outcome" | "pending_side_effect" | undefined {
+  private monitorExecutionBarrier(): "unknown_outcome" | "pending_side_effect" | "action_in_flight" | undefined {
     if (this.snapshot.outcome === "outcome_unknown") return "unknown_outcome";
-    if (this.isAborted() || this.snapshot.pendingApproval !== undefined || this.snapshot.pendingUserQuestion !== undefined || this.snapshot.unresolvedActionId !== undefined) return "pending_side_effect";
+    if (this.isAborted() || this.snapshot.pendingApproval !== undefined || this.snapshot.pendingUserQuestion !== undefined) return "pending_side_effect";
+    // Routine execution suppresses Monitor output but must not reset its
+    // candidate episode. The policy preserves the candidate and spent budget
+    // while this Run-owned action is in flight; approval/input/abort and
+    // unknown-outcome barriers above retain their original clearing behavior.
+    if (this.snapshot.unresolvedActionId !== undefined) return "action_in_flight";
     return undefined;
   }
 
   private shouldPersistMonitorProposal(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): boolean {
-    if (proposal.kind === "guidance" || proposal.kind === "help_requested") return true;
-    if (!output.candidate) return proposal.reason === "suppressed_by_execution_barrier";
-    return proposal.reason === "candidate_observed" || proposal.reason === "shadow" || proposal.reason === "suppressed_by_execution_barrier";
+    if (proposal.kind === "guidance") return true;
+    return output.candidate && (proposal.reason === "candidate_observed" || proposal.reason === "shadow");
   }
 
   private monitorProposalKey(proposal: MonitorPolicyProposal, output: import("./progress-monitor.js").ProgressMonitorOutput): string {
     const fingerprint = proposal.kind === "none" ? this.monitorPolicyState?.candidateFingerprint ?? output.eventIds.join(",") : proposal.fingerprint;
-    const reason = proposal.kind === "none" ? proposal.reason : proposal.kind === "guidance" ? "guidance" : proposal.reason;
-    return `${proposal.kind}:${reason}:${fingerprint}`;
+    const reason = proposal.kind === "none"
+      ? proposal.reason
+      : `guidance-${this.monitorPolicyState?.guidanceCount ?? 0}`;
+    const evidenceTier = output.evidence.some((item) => item.kind === "semantic_assessment") ? "assessed" : "candidate";
+    return `${proposal.kind}:${reason}:${fingerprint}:${evidenceTier}`;
   }
 
   private monitorProposalEvent(
     proposal: MonitorPolicyProposal,
     output: import("./progress-monitor.js").ProgressMonitorOutput,
     sourceEventId: EventId,
+    candidateText?: string,
+    candidateSourceEventIds: readonly EventId[] = [],
   ): Extract<RuntimeEventData, { type: "monitor.proposal" }> | undefined {
     const key = this.monitorProposalKey(proposal, output);
     if (key === this.monitorLastPersistedKey) return undefined;
@@ -3991,25 +4193,31 @@ export class RunController {
       type: "monitor.proposal",
       mode: this.monitorMode === "guidance" ? "guidance" : "shadow",
       proposal: proposal.kind === "none"
-        ? proposal.reason === "suppressed_by_execution_barrier" ? "suppressed_by_execution_barrier" : output.candidate ? "candidate" : "suppressed_by_execution_barrier"
+        ? output.candidate ? "candidate" : "suppressed_by_execution_barrier"
         : proposal.kind,
       fingerprint,
-      sourceEventIds: [...new Set([sourceEventId, ...output.eventIds])].slice(-12),
+      // Projections order their bounded provenance with source response/action/
+      // receipt and current observation/transition first. Do not append the
+      // current event and then tail-slice away the assessment that grounds it.
+      sourceEventIds: [...new Set(candidateSourceEventIds.length > 0
+        ? candidateSourceEventIds
+        : [sourceEventId, ...output.eventIds, ...output.reasons.flatMap((reason) => reason.eventIds), ...output.evidence.flatMap((item) => item.eventIds)])].slice(0, 12),
       reasonCodes: output.reasons.map((reason) => reason.code).slice(-8),
       evidenceKinds: output.evidence.map((item) => item.kind).slice(-8),
       modelDecisionCount: this.monitorWorkClock.modelDecisionCount,
       guiActionCount: this.monitorWorkClock.guiActionCount,
-      ...(proposal.kind === "guidance" ? { guidanceText: proposal.text } : {}),
+      ...(proposal.kind === "guidance" ? { guidanceText: proposal.text } : output.candidate && candidateText !== undefined ? { guidanceText: candidateText } : {}),
     };
   }
 
   private throwIfAborted(): void {
-    if (this.abortController.signal.aborted) {
+    if (this.isAborted()) {
       throw this.abortController.signal.reason ?? new Error("run aborted");
     }
   }
 
   private isAborted(): boolean {
+    if (this.runDeadlineAt !== undefined && Date.now() >= this.runDeadlineAt) this.armRunDeadline();
     return this.abortController.signal.aborted;
   }
 }
@@ -4435,16 +4643,6 @@ function pointDistance(point: { x: number; y: number }, box: GroundingBoundingBo
   return Math.hypot(point.x - centerX, point.y - centerY);
 }
 
-function boundedRecoveryIntent(value: string): string | undefined {
-  const normalized = value
-    .replace(/[\u0000-\u001F\u007F]/gu, " ")
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
-    .replace(/\b1\d{10}\b/gu, "[redacted-phone]")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return normalized.length === 0 ? undefined : normalized.slice(0, 160);
-}
-
 function boundedUIEvidence(value: string, limit: number): string {
   const normalized = value.replace(/[\u0000-\u001F\u007F]/gu, " ").replace(/\s+/gu, " ").trim();
   return normalized.slice(0, limit);
@@ -4557,8 +4755,8 @@ function validateCompositeCallOrder(entries: readonly PreflightEntry[]): string 
   return undefined;
 }
 
-async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number): Promise<void> {
-  const delayMs = providerRetryDelayMs(retryCount);
+async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number, retryAfterMs?: number): Promise<void> {
+  const delayMs = providerRetryDelayMs(retryCount, retryAfterMs);
   await new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
       reject(signal.reason ?? new Error("run aborted"));
@@ -4577,38 +4775,46 @@ async function waitBeforeProviderRetry(signal: AbortSignal, retryCount: number):
   });
   }
 
-function providerRetryDelayMs(retryCount: number): number {
-  return Math.min(
+function providerRetryDelayMs(retryCount: number, retryAfterMs?: number): number {
+  const existingDelay = Math.min(
     PROVIDER_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, retryCount - 1)),
     PROVIDER_RETRY_DELAY_CAP_MS,
   );
+  const boundedRetryAfter = Number.isSafeInteger(retryAfterMs) && retryAfterMs! >= 0
+    ? retryAfterMs!
+    : 0;
+  return Math.max(existingDelay, boundedRetryAfter);
 }
 
-function providerRetryWindowMs(
-  retryMode: "same_input" | "feedback" | undefined,
-  attemptReserveMs: number,
-  ambiguousOutcome: boolean,
-): number | undefined {
-  // A response rejected before dispatch may need one newly prepared format
-  // correction after a slow first response. Transport retries and ambiguous
-  // header recovery keep their existing windows and policies.
-  if (retryMode !== "feedback" || ambiguousOutcome) return MAX_PROVIDER_RETRY_WINDOW_MS;
-  let delayBudgetMs = 0;
-  for (let retry = 1; retry <= MAX_PROVIDER_RETRIES; retry += 1) delayBudgetMs += providerRetryDelayMs(retry);
-  const overheadMs = delayBudgetMs + 1; // The existing admission comparison is strict.
-  const attempts = MAX_PROVIDER_RETRIES + 1;
-  if (attemptReserveMs > Math.floor((Number.MAX_SAFE_INTEGER - overheadMs) / attempts)) return undefined;
-  return Math.max(MAX_PROVIDER_RETRY_WINDOW_MS, attemptReserveMs * attempts + overheadMs);
+function providerRetryAdvice(error: unknown, maxRetryDelayMs: number): { allowed: boolean; retryAfterMs?: number } {
+  if (!(error instanceof Error) || error.name !== "ArkProviderError") return { allowed: true };
+  const candidate = error as Error & { code?: unknown; httpFailure?: unknown };
+  if (candidate.code !== "ARK_HTTP_429") return { allowed: true };
+  const defaultArkDelay = { allowed: true, retryAfterMs: 2_000 } as const;
+  const failure = candidate.httpFailure;
+  if (typeof failure !== "object" || failure === null || Array.isArray(failure) ||
+      (failure as { httpStatus?: unknown }).httpStatus !== 429) return defaultArkDelay;
+  const retryAfterState = (failure as { retryAfterState?: unknown }).retryAfterState;
+  if (retryAfterState === "too_long") return { allowed: false };
+  if (retryAfterState === "accepted") {
+    const retryAfterMs = (failure as { retryAfterMs?: unknown }).retryAfterMs;
+    if (!Number.isSafeInteger(retryAfterMs) || (retryAfterMs as number) < 0) {
+      return defaultArkDelay;
+    }
+    // The Provider bounds header parsing independently. Runtime must also leave
+    // one configured HTTP attempt inside this decision's recovery window; never
+    // replace a valid but inadmissible server delay with an earlier retry.
+    if ((retryAfterMs as number) >= maxRetryDelayMs) return { allowed: false };
+    return { allowed: true, retryAfterMs: retryAfterMs as number };
+  }
+  return defaultArkDelay;
 }
 
-
-function providerFailureMessage(error: unknown, retry: boolean, attempt: number): string {
+function providerFailureMessage(error: unknown, retryRejection: string | undefined, attempt: number): string {
   const reason = errorMessage(error);
-  if (retry) return `${reason}; no tool was executed; retrying model request ${attempt}/${MAX_PROVIDER_RETRIES}`;
-  const details = providerErrorDetails(error);
-  return details.retryable === true && attempt > MAX_PROVIDER_RETRIES
-    ? `${reason}; no tool was executed; retry limit reached after ${MAX_PROVIDER_RETRIES} retries`
-    : reason;
+  return retryRejection === undefined
+    ? `${reason}; no tool was executed; retrying model request ${attempt}/${MAX_PROVIDER_RETRIES}`
+    : `${reason}; no tool was executed; recovery refused: ${retryRejection}`;
 }
 
 function addProviderRetryFeedback(
@@ -4623,7 +4829,7 @@ function addProviderRetryFeedback(
     role: "user",
     content: [{
       type: "text",
-      text: `The previous model response was rejected before any tool was executed. Reason: ${code}${errorMessage(error)}. This is retry ${retryCount}/${maxRetries}; return one valid response that matches the supplied provider contract. Do not repeat the rejected representation or assume that any tool was executed.`,
+      text: `The previous model response was rejected before any tool was executed. Reason: ${code}${errorMessage(error)}. This is retry ${retryCount}/${maxRetries}; return one valid response that matches the supplied provider contract. Do not repeat the rejected representation or assume any tool from that rejected response was executed. Preserve earlier completed action receipts and do not replay earlier GUI work.`,
     }],
   };
   return { ...context, messages: [...context.messages, feedback] };

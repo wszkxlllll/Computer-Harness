@@ -11,7 +11,7 @@ import type { ProviderHttpClient, ResolvedRunConfig } from "../../../packages/ap
 import { parseGlmInputBudgets, parseGlmOutputBudget, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
 
 describe("Host GLM output budget", () => {
-  it("wires the CLI parser result to config and the safe startup audit (source contract)", () => {
+  it("wires GLM settings, env load order, startup audit, and Windows caret opt-in (source contract)", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const configSource = readFileSync(new URL("./session-config.ts", import.meta.url), "utf8");
     expect(source).toContain('parseGlmOutputBudget(one("--glm-max-output-tokens"))');
@@ -151,10 +151,13 @@ describe("Host GLM output budget", () => {
       expect(requestEvent?.type).toBe("model.request.started");
       expect(bodies).toHaveLength(1);
       expect(prepared?.estimate).toMatchObject({ imageCount: 1, estimationMethod: "provider_projection" });
-      expect(requestEvent?.type === "model.request.started" ? requestEvent.contextBudget : undefined).toMatchObject({
+      const contextBudget = requestEvent?.type === "model.request.started" ? requestEvent.contextBudget : undefined;
+      expect(contextBudget).toMatchObject({
         maxInputTokens: 16_384,
         maxWireInputTokens: 24_576,
+        estimatedFixedTextTokens: expect.any(Number),
       });
+      expect(contextBudget?.estimatedFixedTextTokens).toBeLessThan(inputBudgets.contextMaxInputTokens);
       const estimatedTextTokens = prepared?.estimate?.estimatedTextTokens;
       const imageTokens = Math.min(480, Math.ceil((viewport.width * viewport.height) / 750) + 128);
       const estimatedWireTokens = (estimatedTextTokens ?? 0) + imageTokens + 32;
@@ -211,6 +214,7 @@ describe("Host GLM output budget", () => {
       console.info("[glm-budget-offline-fixture]", JSON.stringify({
         estimatedTextTokens,
         estimatedWireTokens,
+        fixedTextTokens: contextBudget?.estimatedFixedTextTokens,
         maxInputTokens: inputBudgets.contextMaxInputTokens,
         maxWireInputTokens: inputBudgets.contextMaxWireInputTokens,
         toolCount: toolNames.length,

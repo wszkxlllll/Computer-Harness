@@ -3,10 +3,10 @@
 /**
  * Bounded, offline metrics for one travel trial.
  *
- * This module intentionally reads only the trial manifest, the Runtime
- * summary, and the Runtime trajectory.  It never reads provider exchanges,
- * screenshots, goal text, manual-review.md, or action arguments.  The output
- * is evidence, not an evaluator: businessOutcome remains manual_pending.
+ * This module reads the trial manifest, Runtime summary/trajectory, and the
+ * redacted per-call provider exchange log. It never reads screenshots, goal
+ * text, manual-review.md, or action arguments. The output is evidence, not an
+ * evaluator: businessOutcome remains manual_pending.
  */
 
 import { lstat, readFile, realpath, stat, writeFile } from "node:fs/promises";
@@ -205,6 +205,54 @@ async function readTrajectory(filePath, errors, relativePath = "runtime/trajecto
     }
   }
   return { present: true, events, parseErrors, path: relativePath };
+}
+
+async function readProviderExchanges(filePath, errors, relativePath = "runtime/provider-exchanges.jsonl") {
+  try {
+    const entry = await lstat(filePath);
+    if (entry.isSymbolicLink()) {
+      addError(errors, "symlink_file", relativePath);
+      return { present: false, readable: false, records: [], parseErrors: 0, invalidRecords: 0, path: relativePath };
+    }
+    if (!entry.isFile()) {
+      addError(errors, "not_a_file", relativePath);
+      return { present: false, readable: false, records: [], parseErrors: 0, invalidRecords: 0, path: relativePath };
+    }
+  } catch (error) {
+    if (error?.code === "ENOENT") return { present: false, readable: true, records: [], parseErrors: 0, invalidRecords: 0, path: relativePath };
+    addError(errors, "read_error", relativePath);
+    return { present: false, readable: false, records: [], parseErrors: 0, invalidRecords: 0, path: relativePath };
+  }
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(await readFile(filePath));
+  } catch (error) {
+    addError(errors, error instanceof TypeError ? "invalid_encoding" : "read_error", relativePath);
+    return { present: true, readable: false, records: [], parseErrors: 0, invalidRecords: 0, path: relativePath };
+  }
+  const records = [];
+  let parseErrors = 0;
+  let invalidRecords = 0;
+  const lines = text.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim().length === 0) continue;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      parseErrors += 1;
+      addError(errors, "invalid_jsonl", relativePath, { line: index + 1 });
+      continue;
+    }
+    if (!isRecord(value)) {
+      invalidRecords += 1;
+      addError(errors, "invalid_exchange_record", relativePath, { line: index + 1 });
+      continue;
+    }
+    records.push(value);
+  }
+  return { present: true, readable: true, records, parseErrors, invalidRecords, path: relativePath };
 }
 
 function parseTime(value) {
@@ -525,8 +573,10 @@ function createContextMetrics(events) {
       for (const key of ["estimatedInputTokens", "estimatedFixedTextTokens", "estimatedHistoryTextTokens", "estimatedToolSchemaTokens", "estimatedMemoryTokens", "estimatedMonitorGuidanceTokens", "imageCount"]) {
         if (typeof budget[key] === "number" && Number.isFinite(budget[key])) tokenSums[key].push(budget[key]);
       }
-      if (typeof budget.monitorGuidanceIncluded === "boolean") incrementBoolean(guidanceIncluded, budget.monitorGuidanceIncluded);
     }
+    const monitorIncludedMarkers = [budget?.monitorGuidanceIncluded, trace?.monitorGuidanceIncluded]
+      .filter((value) => typeof value === "boolean");
+    if (monitorIncludedMarkers.length > 0) incrementBoolean(guidanceIncluded, monitorIncludedMarkers.includes(true));
     if (trace === null) continue;
     if (typeof trace.stablePrefixHash === "string") stablePrefixHashes.push(trace.stablePrefixHash);
     if (Array.isArray(trace.selectedEventIds)) selectedEventCount += trace.selectedEventIds.length;
@@ -537,7 +587,6 @@ function createContextMetrics(events) {
     }
     if (Array.isArray(trace.authoritativeUserEventIds)) authoritativeUserEventCount += trace.authoritativeUserEventIds.length;
     if (typeof trace.observationIncluded === "boolean") incrementBoolean(observationIncluded, trace.observationIncluded);
-    if (typeof trace.monitorGuidanceIncluded === "boolean") incrementBoolean(guidanceIncluded, trace.monitorGuidanceIncluded);
     if (trace.monitorGuidanceOmittedReason === "budget") guidanceIncluded.omittedByBudget += 1;
     if (Array.isArray(trace.fixedBlocks)) {
       for (const block of trace.fixedBlocks) {
@@ -966,7 +1015,106 @@ function extractOutcome(summary, events) {
   return { runtimeOutcome, modelReportedStatus };
 }
 
-function buildMetrics({ trial, summary, trajectory }) {
+const PROVIDER_USAGE_FIELDS = {
+  inputTokens: ["promptTokens", "inputTokens"],
+  outputTokens: ["completionTokens", "outputTokens"],
+  totalTokens: ["totalTokens"],
+  cacheReadTokens: ["cachedReadTokens", "cacheReadTokens"],
+  cacheMissTokens: ["cacheMissTokens"],
+};
+
+function providerUsageValue(usage, names) {
+  for (const name of names) {
+    if (!Object.hasOwn(usage, name)) continue;
+    return finiteNonNegativeInteger(usage[name]);
+  }
+  return null;
+}
+
+function createProviderApiUsage(exchanges, turnUsage) {
+  if (exchanges?.present !== true || exchanges?.readable === false) {
+    const unreadable = exchanges?.readable === false;
+    return {
+      source: unreadable && exchanges?.present === true ? "provider-exchanges.jsonl" : "unavailable",
+      status: unreadable ? "unreadable" : "missing",
+      calls: { observed: null, withReportedUsage: null, withoutReportedUsage: null, unparsedRecords: null },
+      totals: Object.fromEntries(Object.keys(PROVIDER_USAGE_FIELDS).map((key) => [key, null])),
+      fieldCoverage: Object.fromEntries(Object.keys(PROVIDER_USAGE_FIELDS).map((key) => [key, null])),
+      latency: { count: 0, totalMs: null, averageMs: null, maxMs: null },
+      retryRecords: null,
+      byProvider: null,
+      fallback: { source: "Runtime successful-turn usage; excludes rejected/transport-failed API responses", usage: turnUsage },
+      interpretation: "No provider-exchanges.jsonl evidence; fallback is not an API-call or billed-total count.",
+    };
+  }
+
+  const records = Array.isArray(exchanges.records) ? exchanges.records : [];
+  const totals = Object.fromEntries(Object.keys(PROVIDER_USAGE_FIELDS).map((key) => [key, 0]));
+  const fieldReportedCalls = Object.fromEntries(Object.keys(PROVIDER_USAGE_FIELDS).map((key) => [key, 0]));
+  const providers = {};
+  const latencies = [];
+  let withReportedUsage = 0;
+  let withoutReportedUsage = 0;
+  let retryRecords = 0;
+  for (const record of records) {
+    increment(providers, ["glm", "deepseek", "ark", "qwen"].includes(record.provider) ? record.provider : "other");
+    if (Number.isSafeInteger(record.attempt) && record.attempt > 1) retryRecords += 1;
+    const latencyMs = finiteNonNegativeInteger(record.latencyMs);
+    if (latencyMs !== null) latencies.push(latencyMs);
+    const usage = isRecord(record.response?.usage) ? record.response.usage : null;
+    if (usage === null) {
+      withoutReportedUsage += 1;
+      continue;
+    }
+    withReportedUsage += 1;
+    for (const [key, names] of Object.entries(PROVIDER_USAGE_FIELDS)) {
+      const value = providerUsageValue(usage, names);
+      if (value === null) continue;
+      totals[key] += value;
+      fieldReportedCalls[key] += 1;
+    }
+  }
+
+  const unparsedRecords = (exchanges.parseErrors ?? 0) + (exchanges.invalidRecords ?? 0);
+  const calls = records.length;
+  const fieldCoverage = Object.fromEntries(Object.keys(PROVIDER_USAGE_FIELDS).map((key) => {
+    const reportedCalls = fieldReportedCalls[key];
+    const unknownCalls = Math.max(0, calls - reportedCalls) + unparsedRecords;
+    return [key, { reportedCalls, unknownCalls, complete: unknownCalls === 0 }];
+  }));
+  const normalizedTotals = Object.fromEntries(Object.keys(PROVIDER_USAGE_FIELDS).map((key) => [
+    key,
+    fieldReportedCalls[key] > 0 ? totals[key] : null,
+  ]));
+  const requiredFieldsIncomplete = ["inputTokens", "outputTokens", "totalTokens"]
+    .some((key) => fieldCoverage[key].unknownCalls > 0);
+  const status = exchanges.readable === false
+    ? "unreadable"
+    : unparsedRecords > 0 || withoutReportedUsage > 0 || requiredFieldsIncomplete
+      ? "partial"
+      : "complete";
+  return {
+    source: "provider-exchanges.jsonl",
+    status,
+    calls: {
+      observed: calls,
+      withReportedUsage,
+      withoutReportedUsage,
+      unparsedRecords,
+    },
+    totals: normalizedTotals,
+    fieldCoverage,
+    latency: summaryForDurations(latencies),
+    retryRecords,
+    byProvider: sortedEntries(providers),
+    fallback: null,
+    interpretation: status === "partial"
+      ? "Token totals sum only fields present in parsed exchanges; missing usage is unknown, not zero."
+      : "One record is counted per recorded HTTP call, including retries; no monetary price is applied.",
+  };
+}
+
+function buildMetrics({ trial, summary, trajectory, providerExchanges }) {
   const allEvents = trajectory?.events ?? [];
   const runIds = uniqueStrings([
     ...eventRunIds(allEvents),
@@ -1006,6 +1154,8 @@ function buildMetrics({ trial, summary, trajectory }) {
   // `usage` is the all-model total. Per-component values remain available for
   // the main Provider and optional Guard assessor.
   const knownUsage = sumNormalizedUsages(Object.values(usageByComponent));
+  const turnUsage = usageByComponent.mainProvider;
+  const providerApiUsage = createProviderApiUsage(providerExchanges, turnUsage);
   const runId = runIds.length === 1 ? runIds[0] : null;
   return {
     schemaVersion: 1,
@@ -1042,6 +1192,8 @@ function buildMetrics({ trial, summary, trajectory }) {
       usage: eventDataAvailable ? knownUsage : null,
       allModelUsage: eventDataAvailable ? knownUsage : null,
       usageByComponent: eventDataAvailable ? usageByComponent : null,
+      turnUsage: eventDataAvailable ? turnUsage : null,
+      providerApiUsage,
       durations: eventDataAvailable ? {
         runMs: runDuration,
         requests: request.durations,
@@ -1051,6 +1203,8 @@ function buildMetrics({ trial, summary, trajectory }) {
     usage: eventDataAvailable ? knownUsage : null,
     allModelUsage: eventDataAvailable ? knownUsage : null,
     usageByComponent: eventDataAvailable ? usageByComponent : null,
+    turnUsage: eventDataAvailable ? turnUsage : null,
+    providerApiUsage,
     timing: eventDataAvailable ? {
       runMs: runDuration,
       requests: request.durations,
@@ -1108,28 +1262,35 @@ function finalizeDataQuality(metrics, errors, trajectory, trial, summary) {
  * Pure aggregation entry point used by tests and by the travel CLI bridge.
  * It does not perform I/O and does not include any raw Runtime payload.
  */
-export function collectMetrics({ trial = null, summary = null, events = [], trajectory = { present: true, events }, errors = [] } = {}) {
+export function collectMetrics({ trial = null, summary = null, events = [], trajectory = { present: true, events }, providerExchanges = null, errors = [] } = {}) {
   const normalizedTrajectory = trajectory?.present === false
     ? { present: false, events: [], path: trajectory?.path ?? "runtime/trajectory.jsonl" }
     : { present: true, events: Array.isArray(events) ? events : [], path: trajectory?.path ?? "runtime/trajectory.jsonl" };
-  return finalizeDataQuality(buildMetrics({ trial, summary, trajectory: normalizedTrajectory }), [...errors], normalizedTrajectory, trial, summary);
+  const normalizedProviderExchanges = isRecord(providerExchanges)
+    ? providerExchanges
+    : { present: false, readable: true, records: [], parseErrors: 0, invalidRecords: 0, path: "runtime/provider-exchanges.jsonl" };
+  return finalizeDataQuality(buildMetrics({ trial, summary, trajectory: normalizedTrajectory, providerExchanges: normalizedProviderExchanges }), [...errors], normalizedTrajectory, trial, summary);
 }
 
 /**
  * Narrow reader for callers that keep Runtime artifacts directly in a Run
- * directory (for example the interactive TUI collector).  It deliberately
- * returns only parsed summary/trajectory data and the same redacted data
- * quality errors consumed by collectMetrics; it never reads provider files.
+ * directory (for example the interactive TUI or life-eval collectors). It
+ * reads summary/trajectory and the already-redacted per-call provider log;
+ * raw exchange payloads are never returned to callers.
  */
-export async function readMetricsArtifacts(runDirectory) {
+export async function readMetricsArtifacts(runDirectory, { includeSummary = true } = {}) {
   const directory = resolve(runDirectory);
   const errors = [];
-  const summaryValue = await readJsonFile(resolve(directory, "summary.json"), "summary.json", errors);
+  const summaryValue = includeSummary
+    ? await readJsonFile(resolve(directory, "summary.json"), "summary.json", errors)
+    : null;
   const trajectory = await readTrajectory(resolve(directory, "trajectory.jsonl"), errors, "trajectory.jsonl");
+  const providerExchanges = await readProviderExchanges(resolve(directory, "provider-exchanges.jsonl"), errors);
   return {
     summary: summaryValue === MISSING ? null : summaryValue,
     events: trajectory.events,
     trajectory,
+    providerExchanges,
     errors,
   };
 }
@@ -1164,10 +1325,12 @@ export async function collectTrial(trialDir, options = {}) {
   }
   const summary = await readJsonFile(resolve(runtimeDirectory, "summary.json"), "runtime/summary.json", errors);
   const trajectory = await readTrajectory(resolve(runtimeDirectory, "trajectory.jsonl"), errors);
+  const providerExchanges = await readProviderExchanges(resolve(runtimeDirectory, "provider-exchanges.jsonl"), errors);
   const metrics = buildMetrics({
     trial: trial === MISSING ? null : trial,
     summary: summary === MISSING ? null : summary,
     trajectory,
+    providerExchanges,
   });
   finalizeDataQuality(metrics, errors, trajectory, trial === MISSING ? null : trial, summary === MISSING ? null : summary);
   const outputPath = resolve(directory, "metrics.json");

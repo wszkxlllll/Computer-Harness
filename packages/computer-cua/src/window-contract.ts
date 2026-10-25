@@ -64,6 +64,8 @@ export interface CuaWindowCapture {
   readonly viewport: Viewport;
   readonly data: Uint8Array;
   readonly source: "verify_state" | "get_window_state_registered" | "get_window_state_fallback" | "windows_foreground_region";
+  /** Reliable native-window-to-desktop backing scale when the platform reports one. */
+  readonly nativeToDesktopScale?: number;
   /** CUA list_windows geometry sampled before a native visible-region capture. */
   readonly cuaBounds?: CuaWindowGeometry;
 }
@@ -359,7 +361,13 @@ async function captureRegisteredMacWindow(driver: CuaDriverLike, session: string
   // registered capture. It never captures a desktop or replays an action.
   const after = await discoverWindowChecked(driver, session, binding.target, signal);
   if (!sameWindowGeometry(after.bounds, binding.bounds)) throw new WindowContractError("WINDOW_GEOMETRY_CHANGED", "window geometry changed during registered capture");
-  return { binding, viewport: { ...parsed.dimensions, coordinateSpace: "physical" }, data: parsed.data, source: "get_window_state_registered" };
+  return {
+    binding,
+    viewport: { ...parsed.dimensions, coordinateSpace: "physical" },
+    data: parsed.data,
+    source: "get_window_state_registered",
+    nativeToDesktopScale: metadata.screenshot_scale,
+  };
 }
 
 /**
@@ -569,6 +577,7 @@ async function captureWindowFallbackAfterSchema(
   if (!isRecord(result)) throw new WindowContractError("WINDOW_CAPTURE_SCHEMA", "CUA get_window_state fallback returned an invalid result envelope");
   if (result.isError) throw captureRefusalError("get_window_state fallback", binding.target, result.errorCode, result.text);
   if (result.degraded) throw new WindowContractError("WINDOW_CAPTURE_UNKNOWN", "configured CUA window fallback capture is degraded");
+  const metadata = parseStructured(result.structuredJson);
   const { data, dimensions } = parseWindowCaptureImages(
     result.images,
     "CUA get_window_state fallback",
@@ -579,6 +588,9 @@ async function captureWindowFallbackAfterSchema(
     viewport: { ...dimensions, coordinateSpace: "physical" },
     data,
     source: "get_window_state_fallback",
+    ...(metadata?.screenshot_scale === 1 || metadata?.screenshot_scale === 2
+      ? { nativeToDesktopScale: metadata.screenshot_scale }
+      : {}),
   };
 }
 

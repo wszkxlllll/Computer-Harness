@@ -2,13 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ActionReceipt, ComputerSessionDescriptor, SurfaceId, Viewport } from "@computer-harness/protocol";
+import type { ActionReceipt, ComputerSessionDescriptor, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import type { Computer, ModelInput, ProviderAdapter } from "@computer-harness/runtime";
 import { DefaultContextCompiler } from "../../../packages/context/src/index.js";
 import { ApplicationSession } from "../../../packages/app-runtime/src/application-session.js";
 import type { ComputerBackendConfig } from "../../../packages/app-runtime/src/computers.js";
 import { InProcessEnvironmentOwner } from "../../../packages/app-runtime/src/environment-owner.js";
-import { createHostSessionConfig, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, resolveHostRunProfileSettings, type HostArguments } from "./session-config.js";
+import { createHostSessionConfig, parseHostRiskModel, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, resolveHostRunProfileSettings, type HostArguments } from "./session-config.js";
 
 const hostArguments: HostArguments = {
   envFile: "fixture.env",
@@ -24,11 +24,23 @@ const hostArguments: HostArguments = {
 };
 
 describe("Host-local Run profile configuration", () => {
+  it("keeps semantic review opt-in while preserving layered local checks", () => {
+    expect(parseHostRiskModel(undefined)).toBe("off");
+    expect(parseHostRiskModel("off")).toBe("off");
+    expect(parseHostRiskModel("same")).toBe("same");
+    expect(createHostSessionConfig({ ...hostArguments, riskModel: "same" }, "fixture-output", {
+      profileLabel: "fixture", profileRoot: "fixture-profile",
+    }, {})).toMatchObject({ riskGuard: "layered", riskModel: "same" });
+    for (const value of ["", "always", "secret-looking-invalid-value"]) {
+      expect(() => parseHostRiskModel(value)).toThrow("--risk-model must be off or same.");
+    }
+  });
+
   it("bounds an explicit risk deadline while preserving the default and layered fallback", () => {
     expect(parseHostRiskTimeoutMs(undefined)).toBe(15_000);
     for (const value of [1_000, 60_000, 240_000]) {
       expect(parseHostRiskTimeoutMs(String(value))).toBe(value);
-      const config = createHostSessionConfig({ ...hostArguments, riskTimeoutMs: value, riskMaxModelRequests: 8 }, "unused-output", {
+      const config = createHostSessionConfig({ ...hostArguments, riskModel: "same", riskTimeoutMs: value, riskMaxModelRequests: 8 }, "unused-output", {
         profileLabel: "risk-timeout-fixture", profileRoot: "risk-timeout-fixture-profile",
       }, {});
       expect(config).toMatchObject({ riskTimeoutMs: value, riskGuard: "layered", riskModel: "same", riskMaxModelRequests: 8 });
@@ -73,6 +85,116 @@ describe("Host-local Run profile configuration", () => {
     }, {});
     expect(config.riskMaxModelRequests).toBe(1);
     expect(config.riskGuard).toBe("layered");
+  });
+
+  it("keeps the layered local Guard on while disabling semantic risk review by default", () => {
+    const config = createHostSessionConfig(hostArguments, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {});
+
+    expect(config).toMatchObject({
+      riskProfile: "live-interactive",
+      riskGuard: "layered",
+      riskModel: "off",
+      riskMaxModelRequests: 1,
+    });
+  });
+
+  it("isolates DeepSeek settings from GLM thinking and budgets without exposing the private key", () => {
+    const config = createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {
+      DEEPSEEK_API_KEY: "private-fixture-key",
+      DEEPSEEK_BASE_URL: "https://api.deepseek.com/chat/completions",
+      DEEPSEEK_REQUEST_TIMEOUT_MS: "180000",
+      DEEPSEEK_MAX_OUTPUT_TOKENS: "8192",
+      GLM_THINKING: "invalid",
+      GLM_REQUEST_TIMEOUT_MS: "invalid",
+      GLM_MAX_INPUT_TOKENS: "invalid",
+    });
+    expect(config).toMatchObject({
+      model: "deepseek-flash",
+      deepseekEndpoint: "https://api.deepseek.com/chat/completions",
+      deepseekRequestTimeoutMs: 180000,
+      deepseekMaxOutputTokens: 8192,
+    });
+    expect(JSON.stringify(config)).not.toContain("private-fixture-key");
+  });
+
+  it.each([
+    { DEEPSEEK_REQUEST_TIMEOUT_MS: "241000" },
+    { DEEPSEEK_REQUEST_TIMEOUT_MS: "invalid" },
+    { DEEPSEEK_MAX_OUTPUT_TOKENS: "0" },
+    { DEEPSEEK_MAX_OUTPUT_TOKENS: "131073" },
+  ])("rejects invalid DeepSeek request limits", (env) => {
+    expect(() => createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, env)).toThrow();
+  });
+
+  it("isolates Ark Agent Plan from official DeepSeek and GLM configuration", () => {
+    const config = createHostSessionConfig({ ...hostArguments, model: "deepseek-v4.1-flash" }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {
+      ARK_API_KEY: "private-ark-fixture-key",
+      ARK_BASE_URL: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      ARK_REQUEST_TIMEOUT_MS: "180000",
+      ARK_MAX_OUTPUT_TOKENS: "8192",
+      DEEPSEEK_API_KEY: "private-official-fixture-key",
+      DEEPSEEK_BASE_URL: "https://api.deepseek.com",
+      DEEPSEEK_REQUEST_TIMEOUT_MS: "invalid",
+      DEEPSEEK_MAX_OUTPUT_TOKENS: "invalid",
+      GLM_THINKING: "invalid",
+      GLM_REQUEST_TIMEOUT_MS: "invalid",
+      GLM_MAX_INPUT_TOKENS: "invalid",
+      GLM_MAX_WIRE_INPUT_TOKENS: "invalid",
+    });
+    expect(config).toMatchObject({
+      model: "deepseek-v4.1-flash",
+      riskModel: "off",
+      arkEndpoint: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      arkRequestTimeoutMs: 180000,
+      arkMaxOutputTokens: 8192,
+      contextMaxInputTokens: 16_384,
+      contextMaxWireInputTokens: 24_576,
+    });
+    for (const field of ["arkApiKey", "deepseekApiKey", "deepseekEndpoint", "deepseekRequestTimeoutMs", "deepseekMaxOutputTokens", "glmThinking", "glmRequestTimeoutMs", "qwenCoordinateMode"]) {
+      expect(config).not.toHaveProperty(field);
+    }
+    expect(JSON.stringify(config)).not.toContain("private-ark-fixture-key");
+    expect(JSON.stringify(config)).not.toContain("private-official-fixture-key");
+  });
+
+  it.each([
+    { ARK_REQUEST_TIMEOUT_MS: "241000" },
+    { ARK_REQUEST_TIMEOUT_MS: "invalid" },
+    { ARK_MAX_OUTPUT_TOKENS: "0" },
+    { ARK_MAX_OUTPUT_TOKENS: "131073" },
+  ])("rejects invalid Ark request limits only for Ark", (env) => {
+    const profile = { profileLabel: "fixture", profileRoot: "fixture-profile" };
+    expect(() => createHostSessionConfig({ ...hostArguments, model: "deepseek-v4.1-flash" }, "fixture-output", profile, env)).toThrow();
+    const official = createHostSessionConfig({ ...hostArguments, model: "deepseek-flash" }, "fixture-output", profile, env);
+    expect(official).not.toHaveProperty("arkRequestTimeoutMs");
+    expect(official).not.toHaveProperty("arkMaxOutputTokens");
+  });
+
+  it.each(["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash"] as const)("does not forward Ark settings into a %s Host", (model) => {
+    const config = createHostSessionConfig({ ...hostArguments, model }, "fixture-output", {
+      profileLabel: "fixture",
+      profileRoot: "fixture-profile",
+    }, {
+      ARK_BASE_URL: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      ARK_REQUEST_TIMEOUT_MS: "invalid",
+      ARK_MAX_OUTPUT_TOKENS: "invalid",
+    });
+    expect(config.model).toBe(model);
+    expect(config).not.toHaveProperty("arkEndpoint");
+    expect(config).not.toHaveProperty("arkRequestTimeoutMs");
+    expect(config).not.toHaveProperty("arkMaxOutputTokens");
   });
 
   it("keeps both local profiles off by default and accepts only their enums", () => {
@@ -222,12 +344,106 @@ describe("Host-local Run profile configuration", () => {
       await rm(outputDir, { recursive: true, force: true });
     }
   });
-});
 
+  it("keeps semantic review disabled while the layered Guard still requires approval for unclear actions", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-host-risk-review-off-"));
+    const sessionConfig = createHostSessionConfig(hostArguments, outputDir, {
+      profileLabel: "host-risk-fixture",
+      profileRoot: join(outputDir, "profile"),
+    }, {});
+    const viewport: Viewport = { width: 1, height: 1, coordinateSpace: "physical" };
+    const surfaceRef = { surfaceId: "host-risk-desktop" as SurfaceId, generation: 1, kind: "desktop" as const };
+    const computerSession: ComputerSessionDescriptor = {
+      id: "host-risk-computer-session" as ComputerSessionDescriptor["id"],
+      backend: "fixture-cua",
+      viewport,
+      capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+      openedAt: "2026-10-07T00:00:00.000Z",
+    };
+    const computer: Computer = {
+      async open() { return computerSession; },
+      async observe() {
+        return {
+          capturedAt: "2026-10-07T00:00:01.000Z",
+          viewport,
+          surfaceRef,
+          screenshot: {
+            mediaType: "image/png",
+            data: new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jp6kAAAAASUVORK5CYII=", "base64")),
+          },
+        };
+      },
+      async execute(_session, action) { return { actionId: action.actionId, status: "completed" } satisfies ActionReceipt; },
+      async close() {},
+    };
+    const providerInputs: ModelInput[] = [];
+    let providerRequestCount = 0;
+    const provider: ProviderAdapter = {
+      id: "glm-5.3-flash",
+      async generate(input) {
+        providerRequestCount += 1;
+        providerInputs.push(input);
+        return {
+          type: "tool_calls",
+          calls: [{
+            id: "host-risk-unclear-action" as ToolCallId,
+            name: "click",
+            arguments: { x: 0, y: 0 },
+            declaredEffect: { effects: ["unknown"], target: "Fixture button", summary: "Click the fixture button" },
+          }],
+        };
+      },
+    };
+    const session = new ApplicationSession({
+      config: sessionConfig,
+      owner: new InProcessEnvironmentOwner(),
+      dependencies: {
+        createProvider: () => provider,
+        createComputer: async () => computer,
+      },
+    });
+    try {
+      const handle = await session.startRun("Check the Host default risk review boundary.");
+      await waitForRunApproval(handle);
+
+      const guardEvent = handle.controller.getEvents().find((event) => event.type === "action.guard.evaluated");
+      expect(sessionConfig).toMatchObject({ riskGuard: "layered", riskModel: "off" });
+      expect(providerInputs).toHaveLength(1);
+      expect(providerRequestCount).toBe(1);
+      expect(handle.controller.getSnapshot().riskModelRequestCount).toBe(0);
+      expect(guardEvent).toMatchObject({
+        type: "action.guard.evaluated",
+        decision: "require_approval",
+        path: "fallback",
+        reasonCode: "semantic_review_unavailable",
+        modelRequestCount: 0,
+      });
+      expect(handle.controller.getSnapshot().status).toBe("waiting_approval");
+      expect(handle.controller.getSnapshot().pendingApproval).toBeDefined();
+      expect(providerInputs[0]?.tools.find((tool) => tool.name === "click")?.inputSchema.required).toContain("_harnessEffect");
+    } finally {
+      session.activeRun?.controller.cancel("Host risk-review regression cleanup");
+      await session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+});
 async function waitForRunFinish(handle: Awaited<ReturnType<ApplicationSession["startRun"]>>): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (handle.controller.getSnapshot().status !== "finished") {
     if (Date.now() >= deadline) throw new Error("fixture ApplicationSession Run did not finish within five seconds");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForRunApproval(handle: Awaited<ReturnType<ApplicationSession["startRun"]>>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (handle.controller.getSnapshot().status !== "waiting_approval") {
+    if (Date.now() >= deadline) {
+      const snapshot = handle.controller.getSnapshot();
+      const eventTypes = handle.controller.getEvents().map((event) => event.type).join(", ");
+      throw new Error(`fixture ApplicationSession Run did not request approval within five seconds (status=${snapshot.status}; events=${eventTypes})`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

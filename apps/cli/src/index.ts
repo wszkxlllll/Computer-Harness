@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, parseProviderRecoverySettings, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
+import { ApplicationSession, ProcessSharedEnvironmentOwner, createWindowTargetDiscovery, environmentIdentityForConfig, formatManagedBrowserStartupDiagnostic, parseProviderRecoverySettings, prepareManagedBrowserProfile, recoverStaleManagedBrowserProfile, resolveManagedBrowserProfileConfig, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, writeRunReport, type AppRuntimeModel, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig } from "@computer-harness/app-runtime";
 import type { RunOutcome, SourceLinkedFinishContract } from "@computer-harness/protocol";
 import type { RunController } from "@computer-harness/runtime";
 import { parseSourceLinkedFinishContractJson } from "@computer-harness/app-runtime";
@@ -16,6 +16,8 @@ import { resolveCuaWindowTargetOptions } from "./window-target-options.js";
 import { defaultManagedBrowserProfileRoot } from "./managed-browser-profile.js";
 import { validateCliArguments } from "./argument-parser.js";
 import { createJevWindowSelector } from "./window-selection-jev.js";
+import { createRunCancellationControl, type RunCancellationControl, type RunCancellationControlSource } from "./run-cancellation-control.js";
+import { createRunSupervisionControl, type CliSupervisionMode, type RunSupervisionControl, type RunSupervisionControlSource } from "./run-supervision-control.js";
 
 type ModelName = AppRuntimeModel;
 type MemoryToolMode = "facts" | "entities";
@@ -23,12 +25,18 @@ type QwenCoordinateMode = "normalized_1000" | "actual_pixels";
 type Qwen38ThinkingMode = "disabled" | "low" | "medium" | "xhigh";
 type Qwen38OutputMode = "native_tools" | "strict_json";
 
+const runCancellationControl = process.argv.includes("--interactive") && !process.argv.includes("--tui")
+  ? createRunCancellationControl(process as unknown as RunCancellationControlSource)
+  : undefined;
+let runSupervisionControl: RunSupervisionControl | undefined;
+
 export interface CliOptions {
   doctor: boolean;
   prepareManagedBrowserProfile: boolean;
   goal?: string;
   model: ModelName;
   computer: "cua" | "osworld";
+  multilineTypeProfile: "off" | "foreground-caret-v1";
   cuaSocket?: string;
   cuaWindowTarget?: { pid: number; windowId: number };
   cuaRecoveryWindowTarget?: { pid: number; windowId: number };
@@ -100,6 +108,17 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     throw new Error("--grounding must be off, auto, uia-catalog-v1, dom-catalog-v1, or hybrid-catalog-v1");
   }
   const computer = (value("--computer") ?? "cua") as "cua" | "osworld";
+  const rawMultilineTypeProfile = value("--multiline-type-profile");
+  const multilineTypeProfile = rawMultilineTypeProfile ?? "off";
+  if (multilineTypeProfile !== "off" && multilineTypeProfile !== "foreground-caret-v1") {
+    throw new Error("--multiline-type-profile must be off or foreground-caret-v1");
+  }
+  if (rawMultilineTypeProfile !== undefined && computer !== "cua") {
+    throw new Error("--multiline-type-profile is available only with --computer cua");
+  }
+  if (rawMultilineTypeProfile !== undefined && (doctor || prepareManagedBrowserProfileValue)) {
+    throw new Error("--multiline-type-profile is available only for a Run or TUI session");
+  }
   if (windowSwitch && (doctor || prepareManagedBrowserProfileValue)) throw new Error("--window-switch is available only for a Run or TUI session");
   const windowSelectionValue = value("--window-selection") ?? "local";
   if (windowSelectionValue !== "local" && windowSelectionValue !== "jev") throw new Error("--window-selection must be local or jev");
@@ -234,7 +253,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     confirmRiskGuardOff: argv.includes("--confirm-risk-guard-off"),
   });
   const riskModelValue = value("--risk-model") ?? "off";
-  if (riskModelValue !== "off" && riskModelValue !== "same" && riskModelValue !== "glm-5.3-flash" && riskModelValue !== "qwen3.8-flash") throw new Error("--risk-model must be off, same, glm-5.3-flash, or qwen3.8-flash");
+  if (riskModelValue !== "off" && riskModelValue !== "same" && riskModelValue !== "glm-5.3-flash" && riskModelValue !== "qwen3.8-flash" && riskModelValue !== "deepseek-flash" && riskModelValue !== "deepseek-v4.1-flash") throw new Error("--risk-model must be off, same, glm-5.3-flash, qwen3.8-flash, deepseek-flash, or deepseek-v4.1-flash (Ark Agent Plan)");
   if (risk.riskGuard === "off" && riskModelValue !== "off") throw new Error("--risk-model requires --risk-guard layered");
   const riskMaxModelRequests = positiveInteger(value("--risk-max-model-requests"), 20, "--risk-max-model-requests");
   const riskTimeoutMs = positiveInteger(value("--risk-timeout-ms"), 30_000, "--risk-timeout-ms");
@@ -262,6 +281,7 @@ export function parseArgs(rawArgv: readonly string[]): CliOptions {
     ...(goal === undefined ? {} : { goal }),
     model,
     computer,
+    multilineTypeProfile,
     ...(cuaSocket === undefined ? {} : { cuaSocket }),
     ...(cuaWindowTarget === undefined ? {} : { cuaWindowTarget }),
     ...(cuaRecoveryWindowTarget === undefined ? {} : { cuaRecoveryWindowTarget }),
@@ -330,11 +350,31 @@ async function main(): Promise<void> {
     process.stdout.write("Run option: --window-switch opts into switching among listed opened windows in a CUA session, including the primary desktop. In TUI, choose features with F; app names and titles go to the main Provider.\n");
     process.stdout.write("Experimental direct Run only: --recover-bound-window-missing plus exact --cua-window-* and --cua-recovery-window-* targets can use --reopen-saved-document <absolute-path>; hybrid browser recovery additionally requires --grounding hybrid-catalog-v1, an explicit --managed-browser-url, and the ephemeral profile. Not available in TUI or the phone API.\n");
     process.stdout.write("Run option: --source-linked-finish-contract <json> explicitly requires a bounded source-linked-finish-v1 field contract for this Run.\n");
-    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
+    process.stdout.write("Run option: --multiline-type-profile off|foreground-caret-v1 (default off). The foreground-caret-v1 profile is a Windows-only opt-in for an independently validated CUA driver; it does not change Host defaults.\n");
+    process.stdout.write("Model selection: --model glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash is fixed for each Run and TUI session; restart with another model to switch. No automatic fallback or action replay. --risk-model also accepts deepseek-flash (DeepSeek official) and deepseek-v4.1-flash (Volcengine Ark Agent Plan).\n");
+    process.stdout.write("DeepSeek private env: DEEPSEEK_API_KEY; optional DEEPSEEK_BASE_URL, DEEPSEEK_REQUEST_TIMEOUT_MS (default 90000), DEEPSEEK_MAX_OUTPUT_TOKENS (default 4096). Native tools, thinking disabled, actual-pixel coordinates; no Qwen coordinate flag needed.\n");
+    process.stdout.write("Volcengine Ark Agent Plan private env: ARK_API_KEY; optional ARK_BASE_URL (default https://ark.cn-beijing.volces.com/api/plan/v3), ARK_REQUEST_TIMEOUT_MS (default 90000), ARK_MAX_OUTPUT_TOKENS (default 4096). Model deepseek-v4.1-flash; native tools, thinking disabled, actual-pixel coordinates.\n");
+    process.stdout.write("Usage: computer-harness --doctor --computer cua --cua-socket <socket> [--doctor-timeout-ms <n>]\n   or: computer-harness --prepare-managed-browser-profile --computer cua --cua-socket <socket> --managed-browser-url <http(s)-url> --managed-browser-profile-mode persistent --managed-browser-profile-label <label>\n   or: computer-harness [--goal <text>] --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash> --computer <cua|osworld> [--cua-socket <socket>|--osworld-bridge <url>] [--multiline-type-profile <off|foreground-caret-v1>] [--cua-window-pid <n> --cua-window-id <n>] [--window-switch] [--grounding <off|uia-catalog-v1|dom-catalog-v1|hybrid-catalog-v1>] [--managed-browser-url <http(s)-url>] [--managed-browser-profile-mode <ephemeral|persistent>] [--managed-browser-profile-label <label>] [--monitor <off|shadow|guidance>] [--output <dir>] [--env-file <path>] [--fixture-result <json>] [--planning] [--memory <off|facts|entities>] [--memory-retrieval <off|lexical|hybrid>] [--memory-embedding-endpoint <https-endpoint>] [--batching <off|same-control-input-v1>] [--context-mode <raw|recent>] [--context-max-events <n>] [--context-max-tokens <n>] [--profile <experiment|live-interactive>] [--risk-guard <off|layered>] [--confirm-risk-guard-off] [--risk-model <off|same|glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash>] [--risk-max-model-requests <n>] [--risk-timeout-ms <n>] [--cleanup-deadline-ms <n>] [--qwen-coordinate-mode <normalized_1000|actual_pixels>] [--qwen-thinking <disabled|low|medium|xhigh>] [--qwen-output-mode <native_tools|strict_json>] [--interactive|--tui]\n");
     process.stdout.write("Recovery only: --recover-environment --recovery-identity <cua-local-physical-desktop:platform> --recovery-run-id <exact-run-id> --recovery-lease-hash <64-hex> --recovery-state <active|pending_cleanup> --recovery-operator <name> --recovery-inspection-note <evidence> --external-state-inspected\n");
     return;
   }
   const options = parseArgs(process.argv.slice(2));
+  const supervisionModeValue = process.env.HARNESS_LIFE_EVAL_SUPERVISION_MODE;
+  if (supervisionModeValue !== undefined) {
+    if (supervisionModeValue !== "observe" && supervisionModeValue !== "dynamic") {
+      throw new Error("HARNESS_LIFE_EVAL_SUPERVISION_MODE must be observe or dynamic");
+    }
+    if (!options.interactive || options.tui) {
+      throw new Error("evaluation supervision IPC is available only for a direct interactive Run");
+    }
+    runSupervisionControl = createRunSupervisionControl(
+      process as unknown as RunSupervisionControlSource,
+      supervisionModeValue as CliSupervisionMode,
+    );
+    if (runSupervisionControl === undefined) {
+      throw new Error("evaluation supervision was requested without a Node.js IPC channel");
+    }
+  }
   if (options.doctor) {
     const report = await runCuaDoctor({ socketPath: options.cuaSocket!, timeoutMs: options.doctorTimeoutMs });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -424,7 +464,14 @@ async function main(): Promise<void> {
     const handle = await session.startRun(
       goal,
       {},
-      (controller, activeGoal, markControllerStarted) => runWithCliControls(controller, activeGoal, options.interactive, markControllerStarted),
+      (controller, activeGoal, markControllerStarted) => runWithCliControls(
+        controller,
+        activeGoal,
+        options.interactive,
+        markControllerStarted,
+        runCancellationControl,
+        runSupervisionControl,
+      ),
     );
     await session.waitForActiveRun();
     const report = await handle.report();
@@ -509,6 +556,20 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
   const glmRequestTimeoutMs = rawGlmRequestTimeoutMs === undefined ? undefined : Number(rawGlmRequestTimeoutMs.trim());
   validateGlmRequestTimeoutMs(glmRequestTimeoutMs);
   const providerRecovery = parseProviderRecoverySettings(process.env);
+  const deepseekSelected = options.model === "deepseek-flash" || options.riskModel === "deepseek-flash";
+  const rawDeepseekRequestTimeoutMs = deepseekSelected ? process.env.DEEPSEEK_REQUEST_TIMEOUT_MS : undefined;
+  const rawDeepseekMaxOutputTokens = deepseekSelected ? process.env.DEEPSEEK_MAX_OUTPUT_TOKENS : undefined;
+  const deepseekRequestTimeoutMs = rawDeepseekRequestTimeoutMs === undefined ? undefined : Number(rawDeepseekRequestTimeoutMs.trim());
+  const deepseekMaxOutputTokens = rawDeepseekMaxOutputTokens === undefined ? undefined : Number(rawDeepseekMaxOutputTokens.trim());
+  validateDeepseekRequestTimeoutMs(deepseekRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(deepseekMaxOutputTokens);
+  const arkSelected = options.model === "deepseek-v4.1-flash" || options.riskModel === "deepseek-v4.1-flash";
+  const rawArkRequestTimeoutMs = arkSelected ? process.env.ARK_REQUEST_TIMEOUT_MS : undefined;
+  const rawArkMaxOutputTokens = arkSelected ? process.env.ARK_MAX_OUTPUT_TOKENS : undefined;
+  const arkRequestTimeoutMs = rawArkRequestTimeoutMs === undefined ? undefined : Number(rawArkRequestTimeoutMs.trim());
+  const arkMaxOutputTokens = rawArkMaxOutputTokens === undefined ? undefined : Number(rawArkMaxOutputTokens.trim());
+  validateDeepseekRequestTimeoutMs(arkRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(arkMaxOutputTokens);
   const managedBrowserInitialTarget = options.grounding === "dom-catalog-v1" || options.grounding === "hybrid-catalog-v1";
   const hybridNativeWebDocument = options.recoverBoundWindowMissing
     && options.grounding === "hybrid-catalog-v1"
@@ -527,6 +588,7 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
           kind: "cua",
           socketPath: options.cuaSocket!,
           screenshotDir: options.screenshotDir ?? resolve(options.output, "driver-screenshots"),
+          ...(options.multilineTypeProfile === "foreground-caret-v1" ? { multilineTypeProfile: options.multilineTypeProfile } : {}),
           ...(options.cuaWindowTarget === undefined ? {} : { windowTarget: options.cuaWindowTarget }),
           ...(options.cuaRecoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: options.cuaRecoveryWindowTarget }),
           ...(options.recoverBoundWindowMissing && options.cuaWindowTarget !== undefined && options.cuaRecoveryWindowTarget !== undefined
@@ -591,6 +653,12 @@ export function toResolvedRunConfig(options: CliOptions, goal: string): Resolved
     ...(glmRequestTimeoutMs === undefined ? {} : { glmRequestTimeoutMs }),
     ...providerRecovery,
     ...(process.env.GLM_BASE_URL === undefined ? {} : { glmEndpoint: process.env.GLM_BASE_URL }),
+    ...(deepseekRequestTimeoutMs === undefined ? {} : { deepseekRequestTimeoutMs }),
+    ...(deepseekMaxOutputTokens === undefined ? {} : { deepseekMaxOutputTokens }),
+    ...(!deepseekSelected || process.env.DEEPSEEK_BASE_URL === undefined ? {} : { deepseekEndpoint: process.env.DEEPSEEK_BASE_URL }),
+    ...(arkRequestTimeoutMs === undefined ? {} : { arkRequestTimeoutMs }),
+    ...(arkMaxOutputTokens === undefined ? {} : { arkMaxOutputTokens }),
+    ...(!arkSelected || process.env.ARK_BASE_URL === undefined ? {} : { arkEndpoint: process.env.ARK_BASE_URL }),
     ...(options.fixtureResult === undefined ? {} : { fixtureResult: options.fixtureResult }),
   };
 }
@@ -613,11 +681,15 @@ function validateManagedBrowserUrl(value: string): string {
 function readProviderCredentials(): ProviderCredentials {
   const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   const qwenApiKey = process.env.DASHSCOPE_API_KEY;
+  const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
+  const arkApiKey = process.env.ARK_API_KEY;
   const memoryEmbeddingApiKey = process.env.MEMORY_EMBEDDING_API_KEY;
   const osworldBridgeToken = process.env.OSWORLD_BRIDGE_TOKEN;
   return {
     ...(glmApiKey === undefined ? {} : { glmApiKey }),
     ...(qwenApiKey === undefined ? {} : { qwenApiKey }),
+    ...(deepseekApiKey === undefined ? {} : { deepseekApiKey }),
+    ...(arkApiKey === undefined ? {} : { arkApiKey }),
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };
@@ -636,10 +708,18 @@ async function loadEnvFile(path: string): Promise<void> {
   }
 }
 
-async function runWithCliControls(controller: RunController, goal: string, interactive: boolean, markControllerStarted?: () => void): Promise<RunOutcome> {
+async function runWithCliControls(
+  controller: RunController,
+  goal: string,
+  interactive: boolean,
+  markControllerStarted?: () => void,
+  cancellationControl?: RunCancellationControl,
+  supervisionControl?: RunSupervisionControl,
+): Promise<RunOutcome> {
   let lastQuestion: string | undefined;
   let lastApprovalId: string | undefined;
   const monitor = setInterval(() => {
+    supervisionControl?.reportSnapshot();
     const snapshot = controller.getSnapshot();
     if (snapshot.status === "waiting_user" && snapshot.pendingUserQuestion !== lastQuestion) {
       lastQuestion = snapshot.pendingUserQuestion;
@@ -682,14 +762,20 @@ async function runWithCliControls(controller: RunController, goal: string, inter
       // Ignore a second Ctrl+C after the run has already finished.
     }
   };
-  process.once("SIGINT", onSigint);
+  if (cancellationControl === undefined) process.once("SIGINT", onSigint);
   try {
+    supervisionControl?.attachController(controller);
+    await supervisionControl?.waitForInitialization();
+    cancellationControl?.bindCancelController((reason) => controller.cancel(reason));
     markControllerStarted?.();
-    return await controller.start(goal);
+    const outcome = controller.start(goal);
+    cancellationControl?.markControllerStarted();
+    return await outcome;
   } finally {
+    supervisionControl?.reportSnapshot();
     clearInterval(monitor);
     readline?.close();
-    process.removeListener("SIGINT", onSigint);
+    if (cancellationControl === undefined) process.removeListener("SIGINT", onSigint);
   }
 }
 
@@ -697,5 +783,8 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(p
   main().catch((error: unknown) => {
     process.stderr.write(`${sanitizeTerminalText(error instanceof Error ? error.stack ?? error.message : String(error))}\n`);
     process.exitCode = 1;
+  }).finally(() => {
+    runSupervisionControl?.dispose();
+    runCancellationControl?.dispose();
   });
 }

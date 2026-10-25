@@ -52,7 +52,12 @@ describe("source-linked finish validation", () => {
     const defaultFinishes = defaultRegistry.list().filter((tool) => tool.control === "finish");
     expect(defaultFinishes).toHaveLength(1);
     expect(defaultFinishes[0]?.name).toBe("terminate");
-    expect(defaultFinishes[0]?.description).toBe("Call exactly once to finish, with both required arguments: status must be success or failure, and text must be the complete user-facing result. Use failure when requested deliverables are missing or unverified. A successful tool receipt is not proof of completion.");
+    expect(defaultFinishes[0]?.description).toMatch(/Call exactly once, as the only tool call in the ModelTurn/u);
+    expect(defaultFinishes[0]?.description).toContain("Both arguments are required");
+    expect(defaultFinishes[0]?.description).toContain("status is success or failure");
+    expect(defaultFinishes[0]?.description).toContain("text is the complete user-facing result");
+    expect(defaultFinishes[0]?.description).toContain("preserving verified partial results and each unknown with its reason");
+    expect(defaultFinishes[0]?.description).toContain("A successful tool receipt is not proof of completion");
     expect(JSON.stringify(defaultFinishes[0]?.inputSchema)).not.toContain("resultEvidence");
 
     const registry = createDefaultToolRegistry({ sourceLinkedFinish: contract });
@@ -62,9 +67,9 @@ describe("source-linked finish validation", () => {
     const schema = finishes[0]?.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
     expect(schema?.properties).toHaveProperty("resultEvidence");
     expect(schema?.required).toEqual(["status", "text", "resultEvidence"]);
-    expect(finishes[0]?.description).toContain("all three required arguments");
+    expect(finishes[0]?.description).toContain("All three arguments are required");
     expect(finishes[0]?.description).toContain("resultEvidence");
-    expect(finishes[0]?.description).toMatch(/do not semantically verify the reported claims/u);
+    expect(finishes[0]?.description).toContain("they do not semantically verify claims");
     expect(registry.modelTools().filter((tool) => tool.name === "terminate")).toHaveLength(1);
   });
 

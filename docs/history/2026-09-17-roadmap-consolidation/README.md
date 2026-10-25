@@ -12,7 +12,7 @@
 
 两份 V2 源文档直接修订后迁入当前 docs 根目录，分别为 `full-development-roadmap-v2.md`、`development-acceptance-v2.md`，仅保留这一份可执行版本。
 
-评测 G0 清单/状态与 OSWorld 操作说明仍在当前目录，避免中断未完成工作。`docs/verification/audit-39ff27f9-local-probes.mjs` 仍供 DEV-1 转化为正式反例回归，未归档停用。
+评测 G0 清单/状态与 OSWorld 操作说明仍在当前目录，避免中断未完成工作。`docs/history/2026-10-20-product-docs/verification/audit-39ff27f9-local-probes.mjs` 仍供 DEV-1 转化为正式反例回归，未归档停用。
 
 ## 查证入口
 

@@ -43,8 +43,8 @@ export interface ProviderSummaryOptions {
 }
 
 export interface ProviderUsageOptions {
-  /** Only this verified Provider owns prompt_tokens_details.cached_tokens. */
-  providerId?: "qwen3.8-flash";
+  /** Provider-specific cache usage fields; never infer them for another Provider. */
+  providerId?: "qwen3.8-flash" | "deepseek-flash" | "deepseek-v4.1-flash";
 }
 
 interface SafeIdentifier {
@@ -62,7 +62,12 @@ interface OpaqueIdentifier {
 
 const OPAQUE_ID_PREFIX = "sha256:";
 
-const TRUSTED_MODELS = new Set(["glm-5.3-flash", "qwen3.8-flash"]);
+const TRUSTED_MODELS: Readonly<Record<string, true>> = {
+  "glm-5.3-flash": true,
+  "qwen3.8-flash": true,
+  "deepseek-flash": true,
+  "deepseek-v4.1-flash": true,
+};
 const ALLOWED_TOOL_TYPES = new Set(["function"]);
 const ALLOWED_FINISH_REASONS = new Set(["stop", "tool_calls", "function_call", "length", "content_filter"]);
 const ALLOWED_ERROR_NAMES = new Set([
@@ -74,6 +79,8 @@ const ALLOWED_ERROR_NAMES = new Set([
   "DOMException",
   "GlmProviderError",
   "QwenProviderError",
+  "DeepseekProviderError",
+  "ArkProviderError",
 ]);
 const ALLOWED_ERROR_CODES = new Set([
   "1305",
@@ -104,8 +111,32 @@ const ALLOWED_ERROR_CODES = new Set([
   "QWEN_COORDINATE_OUT_OF_RANGE",
   "QWEN_MISSING_VIEWPORT",
   "QWEN_UNAVAILABLE_TOOL",
+  "DEEPSEEK_PROVIDER_ERROR",
+  "DEEPSEEK_INVALID_HISTORY",
+  "DEEPSEEK_INVALID_RESPONSE",
+  "DEEPSEEK_INVALID_PREPARED_REQUEST",
+  "DEEPSEEK_INPUT_TOO_LARGE",
+  "DEEPSEEK_DUPLICATE_TOOL_CALL",
+  "DEEPSEEK_UNAVAILABLE_TOOL",
+  "DEEPSEEK_INVALID_TOOL_CALL",
+  "DEEPSEEK_EMPTY_RESPONSE",
+  "DEEPSEEK_INCOMPLETE_RESPONSE",
+  "DEEPSEEK_REQUEST_TIMEOUT",
+  "DEEPSEEK_NETWORK_ERROR",
+  "ARK_PROVIDER_ERROR",
+  "ARK_INVALID_HISTORY",
+  "ARK_INVALID_RESPONSE",
+  "ARK_INVALID_PREPARED_REQUEST",
+  "ARK_INPUT_TOO_LARGE",
+  "ARK_DUPLICATE_TOOL_CALL",
+  "ARK_UNAVAILABLE_TOOL",
+  "ARK_INVALID_TOOL_CALL",
+  "ARK_EMPTY_RESPONSE",
+  "ARK_INCOMPLETE_RESPONSE",
+  "ARK_REQUEST_TIMEOUT",
+  "ARK_NETWORK_ERROR",
 ]);
-for (const prefix of ["GLM_HTTP_", "QWEN_HTTP_"]) {
+for (const prefix of ["GLM_HTTP_", "QWEN_HTTP_", "DEEPSEEK_HTTP_", "ARK_HTTP_"]) {
   for (let status = 400; status <= 599; status += 1) ALLOWED_ERROR_CODES.add(`${prefix}${status}`);
 }
 
@@ -139,7 +170,7 @@ export function providerRequestRequiresStructuredContent(body: Record<string, un
 }
 
 export function trustedProviderModel(value: unknown): string | null {
-  return typeof value === "string" && TRUSTED_MODELS.has(value) ? value : null;
+  return typeof value === "string" && Object.hasOwn(TRUSTED_MODELS, value) ? value : null;
 }
 
 export function summarizeProviderResponse(value: unknown, options: ProviderSummaryOptions = {}): Record<string, unknown> {
@@ -188,7 +219,7 @@ export function summarizeProviderResponse(value: unknown, options: ProviderSumma
     toolCalls: calls,
     toolCallCount: calls.length,
     structuredContent: structured,
-    usage: summarizeProviderUsage(value.usage, trustedModel === "qwen3.8-flash" ? { providerId: trustedModel } : {}),
+    usage: summarizeProviderUsage(value.usage, trustedModel === "qwen3.8-flash" || trustedModel === "deepseek-flash" || trustedModel === "deepseek-v4.1-flash" ? { providerId: trustedModel } : {}),
     diagnosticCodes: [...diagnostics].sort(),
   };
 }
@@ -275,7 +306,12 @@ export function summarizeProviderUsage(value: unknown, options: ProviderUsageOpt
   if (value === undefined) return null;
   if (!isPlainRecord(value)) return { shape: shapeOf(value), diagnosticCodes: ["usage_not_object"] };
   const qwenCacheUsage = options.providerId === "qwen3.8-flash";
-  const knownKeys = new Set(["prompt_tokens", "completion_tokens", "total_tokens", ...(qwenCacheUsage ? ["prompt_tokens_details"] : [])]);
+  const arkCacheUsage = options.providerId === "deepseek-v4.1-flash";
+  const deepseekCacheUsage = options.providerId === "deepseek-flash";
+  const knownKeys = new Set(["prompt_tokens", "completion_tokens", "total_tokens",
+    ...(qwenCacheUsage || arkCacheUsage ? ["prompt_tokens_details"] : []),
+    ...(deepseekCacheUsage ? ["prompt_cache_hit_tokens", "prompt_cache_miss_tokens"] : []),
+  ]);
   const sourceKeys = Object.keys(value);
   const result: Record<string, unknown> = {
     shape: "object",
@@ -287,14 +323,22 @@ export function summarizeProviderUsage(value: unknown, options: ProviderUsageOpt
     if (typeof item === "number" && Number.isInteger(item) && item >= 0) result[target] = item;
   }
   const diagnosticCodes = new Set<string>();
-  const promptDetails = qwenCacheUsage ? value.prompt_tokens_details : undefined;
-  if (qwenCacheUsage && promptDetails !== undefined) {
+  const nestedCacheUsage = qwenCacheUsage || arkCacheUsage;
+  const promptDetails = nestedCacheUsage ? value.prompt_tokens_details : undefined;
+  if (nestedCacheUsage && promptDetails !== undefined) {
     if (isPlainRecord(promptDetails)) {
       const cachedTokens = promptDetails.cached_tokens;
       if (typeof cachedTokens === "number" && Number.isInteger(cachedTokens) && cachedTokens >= 0) result.cachedReadTokens = cachedTokens;
       else if (cachedTokens !== undefined) diagnosticCodes.add("usage_invalid_fields_omitted");
     } else {
       diagnosticCodes.add("usage_invalid_fields_omitted");
+    }
+  }
+  if (deepseekCacheUsage) {
+    for (const [source, target] of [["prompt_cache_hit_tokens", "cachedReadTokens"], ["prompt_cache_miss_tokens", "cacheMissTokens"]] as const) {
+      const item = value[source];
+      if (typeof item === "number" && Number.isSafeInteger(item) && item >= 0) result[target] = item;
+      else if (item !== undefined) diagnosticCodes.add("usage_invalid_fields_omitted");
     }
   }
   if (sourceKeys.some((key) => !knownKeys.has(key))) diagnosticCodes.add("usage_unknown_fields_omitted");

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ActionId, ActionIntent, ComputerSessionId, EventId, ObservationId, RunId, RuntimeEvent, SurfaceRef, ToolCallId } from "@computer-harness/protocol";
-import { createProgressMonitorState, reduceProgressMonitor, shouldRejectRepeatedNoChange } from "./progress-monitor.js";
+import type { ActionId, ActionIntent, ComputerSessionId, DeclaredActionEffect, EventId, ObservationId, RunId, RuntimeEvent, SurfaceRef, ToolCallId } from "@computer-harness/protocol";
+import { createProgressMonitorState, reduceProgressMonitor } from "./progress-monitor.js";
 
 let sequence = 0;
 const defaultSurfaceRef: SurfaceRef = { surfaceId: "monitor-desktop" as SurfaceRef["surfaceId"], generation: 1, kind: "desktop" };
@@ -43,6 +43,25 @@ function observation(
 function click(runId: RunId, id: string, basedOn: string, x = 10, y = 20): RuntimeEvent {
   const action: ActionIntent = { actionId: id as ActionId, kind: "click", basedOn: basedOn as ObservationId, point: { x, y } };
   return eventForRun(runId, { type: "action.proposed", callId: `call-${id}` as ToolCallId, action });
+}
+
+function declaredEffectCall(
+  runId: RunId,
+  id: string,
+  target: string,
+  summary: string,
+  effects: DeclaredActionEffect[] = ["navigate"],
+  name = "click",
+): RuntimeEvent {
+  return eventForRun(runId, {
+    type: "tool.call.received",
+    call: {
+      id: `call-${id}` as ToolCallId,
+      name,
+      arguments: { x: 10, y: 20 },
+      declaredEffect: { effects, target, summary },
+    },
+  });
 }
 
 function typed(runId: RunId, id: string, basedOn: string, text: string): RuntimeEvent {
@@ -207,6 +226,123 @@ describe("progress monitor foundation", () => {
     expect(executedRepeat.output.reasons.map((reason) => reason.code)).toContain("repeated_action");
   });
 
+  it("detects repeated declared intent across changing click coordinates without treating other click targets as repeats", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 3 });
+    state = reduceProgressMonitor(state, observation(runId, "declared-effect-observation")).state;
+    let lastReceipt: ReturnType<typeof reduceProgressMonitor> | undefined;
+    for (let index = 1; index <= 3; index += 1) {
+      const id = `search-attempt-${index}`;
+      const summary = index === 1 ? "Focus the search field" : index === 2 ? "Open search controls" : "Check the search results";
+      state = reduceProgressMonitor(state, declaredEffectCall(runId, id, "Official site search field", summary)).state;
+      const proposal = reduceProgressMonitor(state, click(runId, id, "declared-effect-observation", 10 + index * 13, 20 + index));
+      lastReceipt = reduceProgressMonitor(proposal.state, receipt(runId, id, "completed"));
+      state = lastReceipt.state;
+    }
+
+    expect(lastReceipt?.output.reasons.map((reason) => reason.code)).toContain("repeated_declared_effect");
+    expect(lastReceipt?.output.reasons.map((reason) => reason.code)).not.toContain("repeated_action");
+    expect(lastReceipt?.output.reasons.find((reason) => reason.code === "repeated_declared_effect")?.eventIds).toHaveLength(3);
+    expect(JSON.stringify(state)).not.toContain("Official site search field");
+    expect(JSON.stringify(state)).not.toContain("Focus the search field");
+
+    let differentTargets = createProgressMonitorState(runId, { repeatThreshold: 3 });
+    differentTargets = reduceProgressMonitor(differentTargets, observation(runId, "different-target-observation")).state;
+    for (let index = 1; index <= 3; index += 1) {
+      const id = `different-target-${index}`;
+      differentTargets = reduceProgressMonitor(differentTargets, declaredEffectCall(runId, id, `Control ${index}`, `Open control ${index}`)).state;
+      const proposal = reduceProgressMonitor(differentTargets, click(runId, id, "different-target-observation", 10 + index * 17, 20));
+      const completed = reduceProgressMonitor(proposal.state, receipt(runId, id, "completed"));
+      expect(completed.output.reasons.map((reason) => reason.code)).not.toContain("repeated_declared_effect");
+      differentTargets = completed.state;
+    }
+  });
+
+  it("does not flag repeated scrolling as semantic repetition when the screenshot changes", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 3 });
+    state = reduceProgressMonitor(state, observation(runId, "scroll-before")).state;
+    for (let index = 1; index <= 3; index += 1) {
+      const id = `scroll-${index}`;
+      state = reduceProgressMonitor(state, declaredEffectCall(runId, id, "Document content", "Continue reading", ["navigate"], "scroll")).state;
+      const action: ActionIntent = {
+        actionId: id as ActionId,
+        kind: "scroll",
+        basedOn: "scroll-before" as ObservationId,
+        point: { x: 400 + index, y: 300 },
+        direction: "down",
+        ticks: index,
+      };
+      state = reduceProgressMonitor(state, eventForRun(runId, { type: "action.proposed", callId: `call-${id}` as ToolCallId, action })).state;
+      const completed = reduceProgressMonitor(state, receipt(runId, id, "completed"));
+      expect(completed.output.reasons.map((reason) => reason.code)).not.toContain("repeated_declared_effect");
+      state = completed.state;
+      const postId = `scroll-after-${index}`;
+      state = reduceProgressMonitor(state, observation(runId, postId)).state;
+      const changed = reduceProgressMonitor(state, transition(runId, id, postId, "changed", "scroll-before"));
+      expect(changed.output.candidate).toBe(false);
+      expect(changed.output.reasons.map((reason) => reason.code)).not.toContain("repeated_action");
+      state = changed.state;
+    }
+    expect(state.recentActions).toHaveLength(3);
+    expect(state.recentActions.every((action) => action.kind === "scroll")).toBe(true);
+    expect(state.recentActions.every((action) => action.status === "completed")).toBe(true);
+  });
+
+  it("keeps legitimate focus and typing on one control as distinct declared effects", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 2 });
+    state = reduceProgressMonitor(state, observation(runId, "focus-type-observation")).state;
+    state = reduceProgressMonitor(state, declaredEffectCall(runId, "focus-search", "Search field", "Focus the search field", ["observe"], "click")).state;
+    state = reduceProgressMonitor(state, click(runId, "focus-search", "focus-type-observation")).state;
+    state = reduceProgressMonitor(state, receipt(runId, "focus-search", "completed")).state;
+    state = reduceProgressMonitor(state, declaredEffectCall(runId, "type-search", "Search field", "Enter the requested query", ["local_edit"], "type")).state;
+    const typing = reduceProgressMonitor(state, typed(runId, "type-search", "focus-type-observation", "synthetic query"));
+    const completed = reduceProgressMonitor(typing.state, receipt(runId, "type-search", "completed"));
+
+    expect(completed.output.reasons.map((reason) => reason.code)).not.toContain("repeated_declared_effect");
+  });
+
+  it("does not group successful text segments on the same declared target as repeated effects", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 3 });
+    state = reduceProgressMonitor(state, observation(runId, "segmented-type-observation")).state;
+    for (let index = 1; index <= 3; index += 1) {
+      const id = `type-segment-${index}`;
+      state = reduceProgressMonitor(state, declaredEffectCall(runId, id, "Search field", "Enter the next query segment", ["local_edit"], "type")).state;
+      state = reduceProgressMonitor(state, typed(runId, id, "segmented-type-observation", `segment ${index}`)).state;
+      const completed = reduceProgressMonitor(state, receipt(runId, id, "completed"));
+
+      expect(completed.output.reasons.map((reason) => reason.code)).not.toContain("repeated_declared_effect");
+      expect(completed.output.reasons.map((reason) => reason.code)).not.toContain("repeated_action");
+      state = completed.state;
+    }
+  });
+
+  it("starts a fresh repeated-effect tail after user correction", () => {
+    let state = createProgressMonitorState(runId, { repeatThreshold: 3 });
+    state = reduceProgressMonitor(state, observation(runId, "correction-boundary-observation")).state;
+    for (let index = 1; index <= 2; index += 1) {
+      const id = `before-correction-${index}`;
+      state = reduceProgressMonitor(state, declaredEffectCall(runId, id, "Search field", "Check the search field")).state;
+      state = reduceProgressMonitor(state, click(runId, id, "correction-boundary-observation", 10 + index, 20)).state;
+      state = reduceProgressMonitor(state, receipt(runId, id, "completed")).state;
+    }
+
+    state = reduceProgressMonitor(state, eventForRun(runId, { type: "user.input.received", text: "Try a different approach." })).state;
+    const firstId = "after-correction-1";
+    state = reduceProgressMonitor(state, declaredEffectCall(runId, firstId, "Search field", "Check the search field")).state;
+    state = reduceProgressMonitor(state, click(runId, firstId, "correction-boundary-observation", 40, 20)).state;
+    const firstReceipt = reduceProgressMonitor(state, receipt(runId, firstId, "completed"));
+    expect(firstReceipt.output.reasons.map((reason) => reason.code)).not.toContain("repeated_declared_effect");
+    state = firstReceipt.state;
+
+    for (let index = 2; index <= 3; index += 1) {
+      const id = `after-correction-${index}`;
+      state = reduceProgressMonitor(state, declaredEffectCall(runId, id, "Search field", "Check the search field")).state;
+      state = reduceProgressMonitor(state, click(runId, id, "correction-boundary-observation", 40 + index, 20)).state;
+      const completed = reduceProgressMonitor(state, receipt(runId, id, "completed"));
+      if (index === 3) expect(completed.output.reasons.map((reason) => reason.code)).toContain("repeated_declared_effect");
+      state = completed.state;
+    }
+  });
+
   it("isolates repeated-action history across three Surfaces in one session and viewport", () => {
     const surface = (id: string, kind: SurfaceRef["kind"]): SurfaceRef => ({
       surfaceId: id as SurfaceRef["surfaceId"],
@@ -264,7 +400,7 @@ describe("progress monitor foundation", () => {
     expect(result.output.reasons).toHaveLength(0);
   });
 
-  it("emits post-action transition evidence and exposes the deterministic repeat guard", () => {
+  it("emits post-action transition evidence as a candidate only", () => {
     let state = createProgressMonitorState(runId);
     state = reduceProgressMonitor(state, observation(runId, "observation-1")).state;
     state = reduceProgressMonitor(state, click(runId, "same-1", "observation-1", 10, 20)).state;
@@ -274,27 +410,6 @@ describe("progress monitor foundation", () => {
     expect(first.output.candidate).toBe(true);
     expect(first.output.reasons.map((reason) => reason.code)).toEqual(["no_observed_change"]);
     expect(first.output.evidence.map((item) => item.kind)).toContain("visual_transition_unchanged");
-
-    const current = first.state;
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(true);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "rounded" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10.866, y: 20.122 } })).toBe(true);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 11, y: 20 } })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "relocated" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, groundingRef: "uia-current", point: { x: 11, y: 20 } })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-scroll" as ActionId, kind: "scroll", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 }, direction: "down", ticks: 1 })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-type" as ActionId, kind: "type", basedOn: "observation-2" as ObservationId, text: "same input" })).toBe(false);
-    expect(shouldRejectRepeatedNoChange(current, { actionId: "repeat-key" as ActionId, kind: "keypress", basedOn: "observation-2" as ObservationId, keys: ["ARROWDOWN"] })).toBe(false);
-  });
-
-  it("blocks an ungrounded same-coordinate click after a fresh unchanged-page observation", () => {
-    let state = createProgressMonitorState(runId);
-    state = reduceProgressMonitor(state, observation(runId, "same-page-1")).state;
-    state = reduceProgressMonitor(state, click(runId, "same-page-click", "same-page-1", 100, 200)).state;
-    state = reduceProgressMonitor(state, receipt(runId, "same-page-click", "completed")).state;
-    state = reduceProgressMonitor(state, observation(runId, "same-page-2")).state;
-    // Production commits the post-action observation before its transition;
-    // only then can the monitor verify that both frames share one Surface.
-    state = reduceProgressMonitor(state, transition(runId, "same-page-click", "same-page-2", "unchanged", "same-page-1")).state;
-    expect(shouldRejectRepeatedNoChange(state, { actionId: "same-page-repeat" as ActionId, kind: "click", basedOn: "same-page-2" as ObservationId, point: { x: 100, y: 200 } })).toBe(true);
   });
 
   it("does not treat changed or unknown transition evidence as a no-change candidate", () => {
@@ -326,7 +441,6 @@ describe("progress monitor foundation", () => {
     expect(forged.output.candidate).toBe(false);
     expect(forged.output.evidence.map((item) => item.kind)).toContain("visual_transition_unknown");
     expect(forged.output.evidence.map((item) => item.kind)).toContain("action_binding_unavailable");
-    expect(shouldRejectRepeatedNoChange(forged.state, { actionId: "next" as ActionId, kind: "click", basedOn: "observation-2" as ObservationId, point: { x: 10, y: 20 } })).toBe(false);
   });
 
   it("reconciles assessments with the exact action, latest observation, receipt, and visual transition", () => {

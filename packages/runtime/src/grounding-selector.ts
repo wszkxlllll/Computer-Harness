@@ -152,6 +152,8 @@ export class DeterministicGroundingSelector implements GroundingSelector {
       ...(recovery === undefined ? {} : { recovery }),
     };
     return {
+      // Preserve independently bounded read-only visibleText; the hot limit and
+      // interactive deduplication below apply exclusively to catalog.elements.
       ...catalog,
       maxElements: Math.min(this.options.hotLimit, catalog.maxElements),
       elements: selected.map(({ element }) => element),

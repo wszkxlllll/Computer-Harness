@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ActionIntent, EventId, ObservationActionOutcome, ObservationTransition, RunId, RuntimeEvent, SurfaceRef, Viewport } from "@computer-harness/protocol";
+import type { ActionEffectDeclaration, ActionIntent, EventId, ObservationActionOutcome, ObservationTransition, RunId, RuntimeEvent, SurfaceRef, Viewport } from "@computer-harness/protocol";
 
 const DEFAULT_LIMITS = {
   maxObservations: 32,
@@ -26,6 +26,7 @@ type MonitorLimits = Readonly<Required<ProgressMonitorOptions>>;
 export type ProgressMonitorReasonCode =
   | "repeated_proposal"
   | "repeated_action"
+  | "repeated_declared_effect"
   | "action_cycle"
   | "no_observed_change"
   | "repeated_refusal"
@@ -83,8 +84,10 @@ type ActionStatus = "proposed" | "completed" | "refused" | "failed" | "cancelled
 
 interface ActionRecord {
   actionKey: string;
+  kind: ActionIntent["kind"];
   partitionKey?: string;
   signature?: string;
+  declaredEffectSignature?: string;
   observationId?: string;
   eventId: EventId;
   status: ActionStatus;
@@ -103,10 +106,12 @@ interface TransitionRecord {
  * State is intentionally in-memory and bounded.  It is not a persistence or
  * shareable diagnostic format; opaque keys are local hashes and no action
  * payload, typed text, URL, screenshot bytes, or model text is retained.
+ * Declared action effects are retained only as opaque signatures.
  */
 export interface ProgressMonitorState {
   readonly runId?: RunId;
   readonly observations: ReadonlyMap<string, ObservationBinding>;
+  readonly callEffectSignatures: ReadonlyMap<string, string>;
   readonly actionRecords: ReadonlyMap<string, ActionRecord>;
   readonly recentActions: readonly ActionRecord[];
   /** The latest post-action transition; retained only for the next decision. */
@@ -126,6 +131,7 @@ export function createProgressMonitorState(runId?: RunId, options?: ProgressMoni
   return {
     ...(runId === undefined ? {} : { runId }),
     observations: new Map(),
+    callEffectSignatures: new Map(),
     actionRecords: new Map(),
     recentActions: [],
     lastTransition: undefined,
@@ -146,6 +152,8 @@ export function reduceProgressMonitor(state: ProgressMonitorState, event: Runtim
   switch (event.type) {
     case "observation.created":
       return onObservation(current, event);
+    case "tool.call.received":
+      return onToolCallReceived(current, event);
     case "action.proposed":
       return onActionProposed(current, event);
     case "action.execution.completed":
@@ -159,11 +167,52 @@ export function reduceProgressMonitor(state: ProgressMonitorState, event: Runtim
       return onProgressUpdate(current, event.eventId, "planning_update");
     case "memory.updated":
       return onProgressUpdate(current, event.eventId, "memory_update");
+    case "user.input.received":
+    case "computer.window.handoff.requested":
+    case "computer.window.handoff.completed":
+    case "computer.window.handoff.ignored":
+      return onAttemptBoundary(current, event);
     case "run.finished":
       return onRunFinished(current, event);
     default:
       return { state: current, output: makeOutput(current.limits, false, [], [], [event.eventId]) };
   }
+}
+
+function onAttemptBoundary(state: ProgressMonitorState, event: RuntimeEvent): ProgressMonitorUpdate {
+  return {
+    state: resetRecentActionEpisode(state),
+    output: makeOutput(state.limits, false, [], [], [event.eventId]),
+  };
+}
+
+function resetRecentActionEpisode(state: ProgressMonitorState): ProgressMonitorState {
+  return {
+    ...state,
+    callEffectSignatures: new Map(),
+    recentActions: [],
+    lastTransition: undefined,
+  };
+}
+
+function onToolCallReceived(
+  state: ProgressMonitorState,
+  event: Extract<RuntimeEvent, { type: "tool.call.received" }>,
+): ProgressMonitorUpdate {
+  const signature = event.call.declaredEffect === undefined
+    ? undefined
+    : declaredEffectSignature(event.call.declaredEffect);
+  if (signature === undefined) {
+    return { state, output: makeOutput(state.limits, false, [], [], [event.eventId]) };
+  }
+  const callKey = opaqueHash(`call:${String(event.call.id)}`);
+  return {
+    state: {
+      ...state,
+      callEffectSignatures: boundedMap(state.callEffectSignatures, callKey, signature, state.limits.maxActionHistory),
+    },
+    output: makeOutput(state.limits, false, [], [], [event.eventId]),
+  };
 }
 
 function onObservation(
@@ -179,15 +228,15 @@ function onObservation(
     state.limits.maxObservations,
   );
   const partitionChanged = previousPartition !== undefined && previousPartition !== partitionKey;
+  const current = partitionChanged ? resetRecentActionEpisode(state) : state;
   const evidence: ProgressMonitorEvidence[] = [
     { kind: "visual_feature_unavailable", eventIds: [event.eventId] },
   ];
   if (partitionChanged) evidence.push({ kind: "partition_changed", eventIds: [event.eventId] });
   return {
     state: {
-      ...state,
+      ...current,
       observations,
-      ...(partitionChanged ? { lastTransition: undefined } : {}),
       lastObservationId: String(event.observation.id),
       lastObservationPartition: partitionKey,
       updateEventIds: partitionChanged ? [] : state.updateEventIds,
@@ -203,11 +252,20 @@ function onActionProposed(
   const partitionKey = actionPartition(state, event.action);
   const actionKey = opaqueHash(`action:${String(event.action.actionId)}`);
   const signature = partitionKey === undefined ? undefined : actionSignature(event.action, partitionKey);
+  const callKey = opaqueHash(`call:${String(event.callId)}`);
+  const declaredEffectBaseSignature = state.callEffectSignatures.get(callKey);
+  const declaredEffectSignature = declaredEffectBaseSignature === undefined
+    ? undefined
+    : bindDeclaredEffectSignature(declaredEffectBaseSignature, event.action.kind);
+  const callEffectSignatures = new Map(state.callEffectSignatures);
+  callEffectSignatures.delete(callKey);
   const observationId = actionObservationId(state, event.action);
   const record: ActionRecord = {
     actionKey,
+    kind: event.action.kind,
     ...(partitionKey === undefined ? {} : { partitionKey }),
     ...(signature === undefined ? {} : { signature }),
+    ...(declaredEffectSignature === undefined ? {} : { declaredEffectSignature }),
     ...(observationId === undefined ? {} : { observationId }),
     eventId: event.eventId,
     status: "proposed",
@@ -240,7 +298,7 @@ function onActionProposed(
   }
 
   return {
-    state: { ...state, actionRecords, recentActions },
+    state: { ...state, callEffectSignatures, actionRecords, recentActions },
     output: makeOutput(state.limits, reasons.length > 0, reasons, evidence, [event.eventId]),
   };
 }
@@ -302,8 +360,9 @@ function onTransition(
   state: ProgressMonitorState,
   event: Extract<RuntimeEvent, { type: "monitor.transition" }>,
 ): ProgressMonitorUpdate {
+  const current = event.transition === "unknown" ? resetRecentActionEpisode(state) : state;
   const actionKey = opaqueHash(`action:${String(event.actionId)}`);
-  const action = state.actionRecords.get(actionKey);
+  const action = current.actionRecords.get(actionKey);
   const evidenceKind: ProgressMonitorEvidenceKind = event.transition === "changed"
     ? "visual_transition_changed"
     : event.transition === "unchanged"
@@ -314,7 +373,7 @@ function onTransition(
   if (action === undefined) {
     evidence.push({ kind: "receipt_unbound", eventIds: [event.eventId] });
     return {
-      state: { ...state, lastTransition: undefined },
+      state: { ...current, lastTransition: undefined },
       output: makeOutput(state.limits, false, [], evidence, evidenceEventIds),
     };
   }
@@ -322,7 +381,7 @@ function onTransition(
   if (action.observationId !== String(event.preObservationId ?? "")) {
     evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
     return {
-      state: { ...state, lastTransition: undefined },
+      state: { ...current, lastTransition: undefined },
       output: makeOutput(
         state.limits,
         false,
@@ -335,13 +394,13 @@ function onTransition(
 
   const preObservation = event.preObservationId === undefined
     ? undefined
-    : state.observations.get(opaqueHash(`observation:${String(event.preObservationId)}`));
-  const postObservation = state.observations.get(opaqueHash(`observation:${String(event.postObservationId)}`));
+    : current.observations.get(opaqueHash(`observation:${String(event.preObservationId)}`));
+  const postObservation = current.observations.get(opaqueHash(`observation:${String(event.postObservationId)}`));
   if (preObservation === undefined || postObservation === undefined || preObservation.partitionKey !== postObservation.partitionKey ||
       action.partitionKey !== preObservation.partitionKey) {
     evidence.push({ kind: "action_binding_unavailable", eventIds: [event.eventId] });
     return {
-      state: { ...state, lastTransition: undefined },
+      state: { ...current, lastTransition: undefined },
       output: makeOutput(
         state.limits,
         false,
@@ -367,7 +426,7 @@ function onTransition(
       }]
     : [];
   return {
-    state: { ...state, lastTransition: transition },
+    state: { ...current, lastTransition: transition },
     output: makeOutput(state.limits, reasons.length > 0, reasons, evidence, evidenceEventIds),
   };
 }
@@ -527,6 +586,31 @@ function trailingStatus(records: readonly ActionRecord[], signature: string, ...
   return result;
 }
 
+function trailingDeclaredEffect(records: readonly ActionRecord[], signature: string | undefined): readonly ActionRecord[] {
+  if (signature === undefined) return [];
+  const result: ActionRecord[] = [];
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const item = records[index];
+    if (item?.declaredEffectSignature !== signature) break;
+    result.unshift(item);
+  }
+  return result;
+}
+
+/** Opaque identity for the existing model-declared target and effect categories. */
+export function declaredEffectSignature(effect: ActionEffectDeclaration, kind?: ActionIntent["kind"]): string | undefined {
+  const normalize = (value: string): string => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+  const target = normalize(effect.target);
+  if (target.length === 0 || effect.effects.length === 0) return undefined;
+  const effects = [...new Set(effect.effects)].sort();
+  const targetEffectSignature = opaqueHash(JSON.stringify({ target, effects }));
+  return kind === undefined ? targetEffectSignature : bindDeclaredEffectSignature(targetEffectSignature, kind);
+}
+
+export function bindDeclaredEffectSignature(signature: string, kind: ActionIntent["kind"]): string {
+  return opaqueHash(JSON.stringify({ signature, kind }));
+}
+
 function completedActionReasons(
   records: readonly ActionRecord[],
   updated: ActionRecord,
@@ -538,6 +622,12 @@ function completedActionReasons(
   const repeated = trailingSignature(comparable, updated.signature);
   if (repeated.length >= limits.repeatThreshold && repeated.every((item) => item.status === "completed")) {
     reasons.push({ code: "repeated_action", eventIds: repeated.map((item) => item.eventId) });
+  }
+  if (updated.kind === "click") {
+    const repeatedDeclaredEffect = trailingDeclaredEffect(comparable, updated.declaredEffectSignature);
+    if (repeatedDeclaredEffect.length >= limits.repeatThreshold && repeatedDeclaredEffect.every((item) => item.status === "completed")) {
+      reasons.push({ code: "repeated_declared_effect", eventIds: repeatedDeclaredEffect.map((item) => item.eventId) });
+    }
   }
   const lastThree = comparable.slice(-3);
   if (
@@ -568,33 +658,6 @@ function makeOutput(
     evidence: evidence.map((item) => ({ ...item, eventIds: limitEventIds(item.eventIds, limits.maxOutputEventIds) })),
     eventIds: limitEventIds(eventIds, limits.maxOutputEventIds),
   };
-}
-
-/**
- * Guidance-mode-only deterministic guard. While the latest bound transition
- * remains an unchanged observation, it rejects every repeat on that
- * same session/viewport partition until the model chooses a different action
- * or a changed/unknown transition replaces the evidence. It deliberately
- * does not require the next action to reuse the newest observation id: a
- * model can otherwise evade the guard by taking the same coordinate from a
- * fresh screenshot whose pixels have not changed. It never inspects or returns the action
- * payload, and unknown/changed evidence never blocks.
- */
-export function shouldRejectRepeatedNoChange(state: ProgressMonitorState, action: ActionIntent): boolean {
-  // An unchanged screenshot is strong evidence that an exact click target did
-  // not take effect, but it is not proof that keyboard input or scrolling was
-  // invalid.  Repeated type/keypress/scroll actions are often intentional
-  // (for example, entering repeated characters or paging through a long list),
-  // so the deterministic execution guard is limited to discrete click-like
-  // targets.  The Monitor may still report a candidate for other repeated
-  // actions; it must not turn that diagnostic into an automatic rejection.
-  if (action.kind !== "click" && action.kind !== "double_click" && action.kind !== "right_click") return false;
-  if (state.lastTransition?.transition !== "unchanged") return false;
-  const partitionKey = actionPartition(state, action);
-  if (partitionKey === undefined) return false;
-  const signature = actionSignature(action, partitionKey);
-  return state.lastTransition.signature === signature
-    && state.lastTransition.partitionKey === partitionKey;
 }
 
 function limitEventIds(eventIds: readonly EventId[], limit: number): readonly EventId[] {

@@ -1,6 +1,6 @@
 # Harness Relay
 
-当前交付包含 Relay 服务、Host 出站 WSS 连接器和 Web 前端静态托管入口。团队隔离 Preview 已完成 HTTPS 公网部署、配对及部分手机真实任务验证，见[部署与验证记录](../../docs/voice-preview-deploy-phone-test-2026-09-29.md)；这不是面向所有人的无人值守公共 Demo，也不表示跨平台或所有任务已经验收。以下解释通信边界，当前请求合同以源码校验器及[Host 合同](../host/CONTRACT.md)为准。
+当前交付包含 Relay 服务、Host 出站 WSS 连接器和 Web 前端静态托管入口。团队隔离 Preview 已完成 HTTPS 公网部署、配对及部分手机真实任务验证，见[部署与验证记录](../../docs/history/2026-10-20-product-docs/voice-preview-deploy-phone-test-2026-09-29.md)；这不是面向所有人的无人值守公共 Demo，也不表示跨平台或所有任务已经验收。以下解释通信边界，当前请求合同以源码校验器及[Host 合同](../host/CONTRACT.md)为准。
 
 ## 数据路径与边界
 
@@ -47,7 +47,7 @@ pnpm --filter @computer-harness/relay start
 
 ## Windows 电脑本机启动
 
-在已配置的 Computer-Harness-Pi 仓库根目录打开 PowerShell。若本机配置文件尚不存在，先从示例创建它并按隔离仓库实际位置填写 Node、CUA 和输出路径；Provider API key 和 Relay 连接凭据放在 EnvFile 指向的私有 env 文件，不要写入配置示例或命令行：
+在已配置的仓库根目录打开PowerShell。若本机配置文件尚不存在，先从示例创建它并按实际位置填写Node、CUA和输出路径；Provider API key和Relay连接凭据放在EnvFile指向的私有env文件，不要写入配置示例或命令行。此启动器仅供Windows使用；macOS使用[公共Host入口与平台准备](../../docs/getting-started.md#手机连接与平台交付状态)，还需Mac成员补齐完整手机冷启动验收。
 
 若此隔离仓库尚未安装 workspace 依赖，先在仓库根目录执行 `pnpm install --frozen-lockfile`。启动器可在 Host/Web 构建目录缺失时自动构建，但不会替用户安装依赖。
 
@@ -71,15 +71,16 @@ check 验证 Node/env/model 配置并报告 Host/Web 构建文件状态，不启
 
 本轮 Relay/Connector 集成测试使用 Node.js `24.19.0`；可将其作为可复现的 staging 基线。面向公网前，应从 [Node.js 官方发布页](https://nodejs.org/en/about/previous-releases)选择当前仍受维护且获运维批准的 Node 24 补丁版本、校验发行文件，并在升级后重跑构建与测试。项目声明最低版本为 `22.13.0`；仓库的 `package.json` 将 pnpm 锁为 `11.19.0`。
 
-GitHub 协作者使用独立交接分支，不使用尚未合并这些改动的默认分支。先克隆到新的目录并记录部署 SHA：
+新部署使用经审查的发行版本，而不是固定到历史交接分支。先克隆到新的目录，再检出本次实际批准的tag或完整commit SHA并记录；下方占位值须替换，不要直接部署未经核验的最新分支：
 
 ```sh
-git clone --branch codex/mobile-control-handoff-20260926 --single-branch https://github.com/wszkxlllll/Computer-Harness.git computer-harness-mobile
+git clone https://github.com/wszkxlllll/Computer-Harness.git computer-harness-mobile
 cd computer-harness-mobile
+git checkout --detach <approved-tag-or-commit>
 git rev-parse HEAD
 ```
 
-然后执行下方从 `node --version` 开始的安装、构建和测试命令。部署到 systemd 时，将已验证源码放入新的 versioned release 目录，并记录上述 SHA。
+使用Git来源时，在该checkout执行下方从`node --version`开始的安装、构建和测试命令，不执行ZIP的解压/校验步骤。部署到systemd时，将已验证源码放入新的versioned release目录，并记录上述SHA。
 
 可选的离线来源是已交付的 `computer-harness-mobile-source-20260926-r2.zip`，它是归档前的冻结检查点，不包含本次文档迁移与 CI 修正，不随分支更新。该 ZIP 不保存在 Git 仓库；仅持有 ZIP 及配套校验文件时才使用以下解压步骤：
 
@@ -113,7 +114,7 @@ Relay 配置和 Host env 文件必须分别由受控的密钥管理或配置管�
 
 ### Linux systemd：非 root 运行、检查、重启与回滚
 
-Relay 是 VPS 上唯一需要常驻的服务；Host/CUA 仍运行在用户自己的 Windows 电脑上。先创建专用无登录服务账号 computer-harness-relay，将私有配置安全写入 /etc/computer-harness/relay-config.json，文件归该账号所有且权限为 0600。Relay 会拒绝权限过宽的配置。配置的 webRoot 应为 /opt/computer-harness/current/apps/web/dist，监听地址保持 127.0.0.1:8787；密钥不得写进 unit、命令行或日志。
+Relay是VPS上唯一需要常驻的服务；Host/CUA仍运行在用户自己的Windows或macOS电脑上，平台准备状态见前述指南。先创建专用无登录服务账号computer-harness-relay，将私有配置安全写入/etc/computer-harness/relay-config.json，文件归该账号所有且权限为0600。Relay会拒绝权限过宽的配置。配置的webRoot应为/opt/computer-harness/current/apps/web/dist，监听地址保持127.0.0.1:8787；密钥不得写进unit、命令行或日志。
 
 以下账号和目录命令只在首次配置时执行；由受控密钥管理写入 Relay 配置后，再确保它由服务账号读取且仅 owner 可读：
 

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS, DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs } from "@computer-harness/app-runtime";
 import type { ApplicationSessionConfig, RunModel } from "@computer-harness/app-runtime";
 import { parseProviderRecoverySettings } from "@computer-harness/app-runtime";
 import { parseGlmInputBudgets, parseGlmRequestTimeoutMs, readGlmThinking } from "./glm-output-budget.js";
@@ -6,15 +7,23 @@ import { parseGlmInputBudgets, parseGlmRequestTimeoutMs, readGlmThinking } from 
 export interface HostArguments {
   envFile: string;
   socket: string;
-  model: "glm-5.3-flash" | "qwen3.8-flash";
+  model: RunModel;
   output: string;
   port: number;
   origins: string[];
   maxSteps: number;
   maxModelRequests: number;
+  riskModel?: "off" | "same";
   riskMaxModelRequests?: number;
   riskTimeoutMs?: number;
   glmMaxOutputTokens: number;
+}
+
+/** Semantic risk review is an explicit Host opt-in; local layered checks stay on. */
+export function parseHostRiskModel(raw: string | undefined): "off" | "same" {
+  if (raw === undefined || raw === "off") return "off";
+  if (raw === "same") return "same";
+  throw new Error("--risk-model must be off or same.");
 }
 
 export const DEFAULT_HOST_RISK_MAX_MODEL_REQUESTS = 1;
@@ -94,6 +103,20 @@ export function createHostSessionConfig(
   const qwenModel = args.model === "qwen3.8-flash";
   const baseUrl = env.DASHSCOPE_BASE_URL ?? env.DASHSCOPE_ENDPOINT;
   const glmEndpoint = env.GLM_BASE_URL;
+  const deepseekModel = args.model === "deepseek-flash";
+  const arkModel = args.model === "deepseek-v4.1-flash";
+  const deepseekRequestTimeoutMs = deepseekModel && env.DEEPSEEK_REQUEST_TIMEOUT_MS !== undefined
+    ? Number(env.DEEPSEEK_REQUEST_TIMEOUT_MS.trim()) : DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS;
+  const deepseekMaxOutputTokens = deepseekModel && env.DEEPSEEK_MAX_OUTPUT_TOKENS !== undefined
+    ? Number(env.DEEPSEEK_MAX_OUTPUT_TOKENS.trim()) : DEFAULT_DEEPSEEK_MAX_OUTPUT_TOKENS;
+  validateDeepseekRequestTimeoutMs(deepseekRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(deepseekMaxOutputTokens);
+  const arkRequestTimeoutMs = arkModel && env.ARK_REQUEST_TIMEOUT_MS !== undefined
+    ? Number(env.ARK_REQUEST_TIMEOUT_MS.trim()) : undefined;
+  const arkMaxOutputTokens = arkModel && env.ARK_MAX_OUTPUT_TOKENS !== undefined
+    ? Number(env.ARK_MAX_OUTPUT_TOKENS.trim()) : undefined;
+  validateDeepseekRequestTimeoutMs(arkRequestTimeoutMs);
+  validateDeepseekMaxOutputTokens(arkMaxOutputTokens);
   const profileSettings = resolveHostRunProfileSettings(env);
   return {
     model,
@@ -116,24 +139,36 @@ export function createHostSessionConfig(
     batching: "same-control-input-v1",
     contextMode: "recent",
     contextMaxHistoryEvents: 32,
-    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
+    ...(qwenModel ? { contextMaxInputTokens: 8_000 } : deepseekModel || arkModel ? { contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
     ...(profileSettings.operationGuidance === undefined ? {} : { operationGuidance: profileSettings.operationGuidance }),
     riskProfile: "live-interactive",
     riskGuard: "layered",
-    riskModel: "same",
-    riskMaxModelRequests: args.riskMaxModelRequests ?? DEFAULT_HOST_RISK_MAX_MODEL_REQUESTS,
+    riskModel: parseHostRiskModel(args.riskModel),
+    riskMaxModelRequests: parseHostRiskMaxModelRequests(args.riskMaxModelRequests === undefined ? undefined : String(args.riskMaxModelRequests)),
     riskTimeoutMs: parseHostRiskTimeoutMs(args.riskTimeoutMs === undefined ? undefined : String(args.riskTimeoutMs)),
     cleanupDeadlineMs: 5_000,
-    // Keep no-progress evidence in the model context without automatically
-    // blocking a phone-driven action while the interaction path is under test.
+    // Record no-progress evidence without injecting it into the model context
+    // or automatically blocking phone-driven actions while the path is under test.
     monitor: "shadow",
     windowHandoff: "confirm-v1",
-    glmThinking: readGlmThinking(env.GLM_THINKING),
-    glmMaxOutputTokens: args.glmMaxOutputTokens,
-    glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
+    ...(!deepseekModel && !arkModel ? {
+      glmThinking: readGlmThinking(env.GLM_THINKING),
+      glmMaxOutputTokens: args.glmMaxOutputTokens,
+      glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
+      ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
+    } : {}),
+    ...(deepseekModel ? {
+      deepseekRequestTimeoutMs,
+      deepseekMaxOutputTokens,
+      ...(env.DEEPSEEK_BASE_URL === undefined ? {} : { deepseekEndpoint: env.DEEPSEEK_BASE_URL }),
+    } : {}),
+    ...(arkModel ? {
+      ...(arkRequestTimeoutMs === undefined ? {} : { arkRequestTimeoutMs }),
+      ...(arkMaxOutputTokens === undefined ? {} : { arkMaxOutputTokens }),
+      ...(env.ARK_BASE_URL === undefined ? {} : { arkEndpoint: env.ARK_BASE_URL }),
+    } : {}),
     providerRecovery: profileSettings.providerRecovery,
     providerRecoveryRunWindowMs: profileSettings.providerRecoveryRunWindowMs,
-    ...(glmEndpoint === undefined ? {} : { glmEndpoint }),
     ...(baseUrl === undefined ? {} : { qwenEndpoint: baseUrl }),
     ...(env.DASHSCOPE_WORKSPACE_ID === undefined ? {} : { qwenWorkspaceId: env.DASHSCOPE_WORKSPACE_ID }),
     ...(qwenModel ? {

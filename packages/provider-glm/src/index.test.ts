@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
-import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile, type GlmTransportEvidence } from "./index.js";
+import { FetchArkHttpClient, FetchDeepseekHttpClient, FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile, type GlmTransportEvidence } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
@@ -641,6 +641,28 @@ describe("GLM provider adapter", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 
+  it.each([
+    ["DeepSeek", () => new FetchDeepseekHttpClient({ requestTimeoutMs: 10 })],
+    ["Ark", () => new FetchArkHttpClient({ requestTimeoutMs: 10 })],
+  ] as const)("keeps GLM ambiguous-header recovery hints out of the shared %s boundary", async (_label, createClient) => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn(async () => {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ETIMEDOUT" } });
+      }) as unknown as typeof fetch;
+      const networkError = await createClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(networkError).toMatchObject({ retryable: true, retryMode: "same_input" });
+      expect((networkError as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+      globalThis.fetch = vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      })) as unknown as typeof fetch;
+      const deadlineError = await createClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(deadlineError).toMatchObject({ retryable: false });
+      expect((deadlineError as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   it("does not type body timeouts, external aborts, or non-ETIMEDOUT causes as header transport ambiguity", async () => {
     const originalFetch = globalThis.fetch;
     try {
@@ -849,7 +871,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   const flush = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
   it.each(["headers", "body"] as const)("settles the total deadline when %s never cooperates", async (phase) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const evidence: GlmTransportEvidence[] = [];
     const fetchMock = vi.fn(async () => phase === "headers" ? new Promise<never>(() => {})
       : { ok: true, status: 200, json: () => new Promise<never>(() => {}) });
@@ -865,7 +887,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   });
 
   it.each(["headers", "body"] as const)("rejects delayed %s success after expiry and consumes late rejection", async (phase) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const evidence: GlmTransportEvidence[] = [];
     let resolveLate: (value: unknown) => void = () => {};
     let rejectLate: (reason: unknown) => void = () => {};
@@ -886,7 +908,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   });
 
   it("preserves the exact first Run reason while a body ignores Abort forever", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] });
     const controller = new AbortController();
     const reason = { type: "user_cancelled_fixture" };
     const evidence: GlmTransportEvidence[] = [];
@@ -935,7 +957,7 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
   });
 
   it("consumes a promise that rejects only after the request has timed out", async () => {
-    vi.useFakeTimers(); let rejectLate: (reason: unknown) => void = () => {};
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date", "performance"] }); let rejectLate: (reason: unknown) => void = () => {};
     vi.stubGlobal("fetch", vi.fn(() => new Promise((_resolve, reject) => { rejectLate = reject; })));
     try {
       const result = new FetchGlmHttpClient({ requestTimeoutMs: 5 }).post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((error: unknown) => error);

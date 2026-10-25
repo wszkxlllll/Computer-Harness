@@ -1,217 +1,104 @@
-# Computer Harness
+<div align="center">
 
-**让会操作电脑的模型，真正能够在真实桌面环境中持续完成任务。**
+# Lightspeaker
 
-今天的 Computer-Use 模型已经能看懂界面、决定下一步，CUA 等工具也已经能完成点击、输入和观察；但一个真实桌面任务远不止“看一张截图、点一次鼠标”。窗口会切换，弹窗会出现，操作引用会失效，输入可能只完成一半，用户会临时纠正目标，高风险操作还需要确认。
+### 把复杂操作交给 Agent，把决定权留给你。
 
-**Computer Harness 补的是 Model 与 Computer-Use Backend 之间缺失的 Runtime 层。**
+在手机上说出想做的事，让电脑帮你完成网页和桌面操作。你可以随时查看进度、补充要求，需要确认的重要操作仍由自己决定。
 
-模型负责决定下一步，CUA 负责执行动作；Harness 负责让整个任务在变化的真实环境中持续成立：知道当前在操作什么、过去发生了什么、动作是否真的产生了预期结果，以及失败、不确定或用户介入之后应该如何继续。
+[开始使用](#开始使用) · [工作原理](#可靠执行源自-computer-harness) · [文档](./docs/DOCS-INDEX.md) · [参与贡献](#开放共建)
 
-> **我们不是让 Agent 更会点鼠标，而是让已经会操作电脑的模型，能够在复杂、变化、会出错的真实环境里可靠、可控地完成任务。**
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
 
-| 没有 Harness | 有 Computer Harness |
-| --- | --- |
-| 弹窗、新窗口或跨应用后，模型需要重新猜当前目标 | Surface Registry 持续维护任务中的可操作 Surface |
-| 界面变化后仍可能使用旧坐标、旧元素或旧状态 | Surface identity / generation 失效旧引用并触发重新观察 |
-| 工具返回成功后容易直接认为任务完成 | Receipt 之后继续 Re-observe / Verify，区分“动作已执行”和“结果已确认” |
-| 部分执行或副作用不明时容易重复操作 | Unknown side effect 不自动重放，先验证、恢复或请求用户判断 |
-| 用户纠正、审批和暂停只是额外 Prompt | Correction、Approval、Pause / Resume 属于同一个 Run 的正式状态 |
+**让 Agent 适应不同使用者，而不是要求使用者适应 Agent。**
 
-> [主 Demo：手机发起任务 → 电脑跨应用执行 → 手机查看进度、审批与纠正]
+</div>
 
----
+<!-- 主 Demo：手机提出目标 → 电脑查询并跨应用执行 → 手机确认发送 → 实际交付。正式重录完成后嵌入视频，不发布开发剪辑作成品。 -->
 
-## 核心设计
+## 手机说一句，电脑来完成
 
-### Surface-aware：让任务跨越真实桌面
+“帮我比较明天上午的两班直达车，把乘车信息整理好发到文件传输助手。”
 
-真实桌面不是一个固定页面。一个任务可能从浏览器进入文件管理器，再打开编辑器，中途经过菜单、模态框、新窗口和浏览器 Tab。
+完成这样的任务，需要查询车次、核对时间和票价、整理信息，最后打开微信发送。Lightspeaker 尝试把这些步骤交给电脑执行，你可以在手机上查看过程，在发送前确认内容。
 
-Computer Harness 的 **Surface Registry** 将这些界面组织成任务内部可追踪的操作空间：维护 peer Surface、child/modal Surface、浏览器层级以及引用的新鲜度，使 `ComputerSession` 对应完整任务，而不是绑定某一个瞬时窗口。
+我们希望让更多人方便地使用电脑上的服务。为此，Lightspeaker 加入了语音输入、进度播报、较大字号、回答偏好和远程确认等功能，也为老年用户及不熟悉复杂电脑操作的用户提供更容易上手的交互方式。
 
-这让跨窗口和跨应用不再是异常恢复，而成为 Runtime 的正常状态变化。
+## 使用 Lightspeaker，你可以做什么
 
-> [Surface Registry 示意图：Browser / Editor / Dialog / Tab、peer switch、child push/pop、generation invalidation]
+| 功能             | 使用方式                                                     |
+| ---------------- | ------------------------------------------------------------ |
+| **交代任务**     | 用文字或语音描述需求，电脑执行具体操作                       |
+| **查看进度**     | 在手机上查看截图、任务状态，也可以听取进度播报               |
+| **随时调整**     | 发现理解有误时补充要求、纠正方向，也可以暂停任务             |
+| **确认重要操作** | 发送、提交等需要审批的操作，由系统检测发现，请求用户查看并决定是否继续 |
+| **调整使用习惯** | 设置字体大小、回答详略、步骤说明和语言偏好                   |
 
-### Reliable execution：不仅执行，还确认发生了什么
+## 可靠执行，源自 Computer Harness
 
-Computer Harness 将一次操作组织为持续闭环：
+Lightspeaker 的技术内核 **Computer Harness**，承接模型决策与真实桌面执行之间的状态、控制和恢复。
 
-**Observe → Decide → Admit → Act → Receipt → Re-observe → Verify**
+### 跨应用，任务不断线
 
-工具回执只说明动作被执行或派发，不等于用户目标已经完成。界面变化、引用失效、部分成功或结果未知时，Runtime 可以重新观察、重新规划、恢复执行或请求人工判断，而不是默认重试。
+完成一项任务，可能需要在多个网站和桌面应用之间切换。Lightspeaker 会跟踪当前操作的窗口和页面，在界面变化后重新确认操作目标，避免使用已经失效的控件信息。
 
-Planning、Context、Run Memory、Monitor 和 Risk Guard 都服务于同一件事：**让一个长任务在真实环境中的每一步都有状态、有依据、有后续。**
+任务进度会在切换应用时保留，Agent 可以继续完成后续步骤。
 
-> [Runtime 执行闭环图]
+### 有回执，也有再观察
 
-### Human-in-the-loop：让 Agent 适应人
+**观察 → 决策 → 准入 → 执行 → 回执 → 再观察 → 结果核对**
 
-用户不应该为了使用 Agent 先学习坐标、窗口结构或复杂 Prompt。
+统一工具注册、动作预算、失败传播与运行轨迹，让系统区分“请求了什么”“执行了什么”和“观察到什么”。结果未知时不自动重放可能已发生的操作，纠正与审批始终属于同一个 Run。
 
-手机端、语音、自然语言纠正、审批、暂停/恢复和个性化偏好都接入同一个 Run。用户可以在任务执行过程中随时补充条件、纠正方向、处理风险步骤或接管任务，而无需重新开始。
+<!-- Runtime执行闭环图。结果核对不表示具有通用自动业务验证器。 -->
 
-这套交互也为老年人、数字工具使用门槛较高的用户以及无障碍场景提供了进一步扩展空间：**让 Agent 适应不同使用者，而不是要求所有人适应 Agent。**
+### 一套内核，多种选择
 
----
+Provider、Computer、Context、Planning 与 Run Memory 通过组件装配协作。Windows与macOS复用公共合同，平台输入和窗口机制分别适配；视觉操作与可选UIA、受管浏览器DOM相辅相成。
 
-## 架构
+模型负责理解和决策，CUA提供底层观察、输入及窗口能力；Computer Harness实现其上的任务运行、执行控制、状态管理与人机协作。[了解系统设计](./docs/technical-guide.md)。
 
-```text
-                    Phone / Voice / TUI
-                           │
-                    goal / correction
-                    approval / control
-                           │
-                           ▼
-                    Computer Harness
-              ┌─────────────────────────┐
-              │          Runtime        │
-              │                         │
-              │ Task / Planning         │
-              │ Context / Run Memory    │
-              │ Risk Guard / Monitor    │
-              │ Verification / Recovery │
-              │                         │
-              │     Surface Registry    │
-              └────────────┬────────────┘
-                           │
-               Computer Adapter Contract
-                           │
-                           ▼
-                          CUA
-                           │
-                  UIA / Vision / DOM
-                           │
-                           ▼
-                      Real Desktop
-```
+<!-- 系统架构图：手机/Web—Relay—Host—Runtime—Provider/Computer Adapter—真实桌面，标明自研与上游。 -->
 
-Model Provider 负责理解目标并提出下一步动作；Computer Adapter 负责将 Runtime 的动作落实到具体环境。
+## 开始使用
 
-CUA 是独立的上游 Computer-Use Driver，并不是 Computer Harness 的自研组件。本项目主要实现其上的 **Runtime、Surface 生命周期、执行控制、Context / Planning / Run Memory、风险与用户控制、Host 和多入口接入层**。
+**电脑执行，手机掌握。** 手机使用Web界面，无需安装原生App。
 
-Windows 和 macOS 共用公共协议与 Runtime；输入、窗口证据等平台机制分别实现，Session、Surface 与执行生命周期统一管理。
-
-> [系统架构图]
-
----
-
-## Demo 与评测
-
-主演示将围绕一个完整的跨应用长程任务展开，而不是展示单个 click / type：
-
-**手机提出目标 → Agent 在电脑执行 → 跨窗口 / 跨应用 → 处理动态 Surface → 手机查看过程 → 风险审批或中途纠正 → 完成并验证最终结果**
-
-> [Demo 视频 / GIF 占位]
-
-除主演示外，项目将用统一任务协议覆盖六类真实使用场景：
-
-- 政务与公共服务
-- 就医与健康服务
-- 购物与售后
-- 出行与票务
-- 生活缴费与社区服务
-- 通信、日程与个人事务
-
-评测不仅记录最终是否完成，还将记录失败位置、恢复情况、人工纠正与接管次数以及最终可观察证据。
-
-> [六类真实任务评测结果图]
-
----
-
-## 手机端 Quick Start
-
-手机端是当前主要体验入口：在手机发起目标、查看进度和截图，并完成纠正、审批、暂停或停止；模型推理和桌面执行仍运行在电脑 Host。
-
-当前需要：
-
-- Node.js `>=22.13.0`
-- pnpm `11.19.0`
-- 与平台配对的 CUA SDK / daemon：Windows、macOS `0.22.2`
-- GLM 或 Qwen Provider Key
-
-复制本机配置：
+1. **下载。** 从 [v0.1.0-rc.2 版本页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)下载 **Source code (zip)** 并全部解压。Windows 电脑准备好 Node.js 和 Edge，进入含有 `package.json` 的文件夹，在地址栏输入 `powershell`。
+2. **准备并启动。** 按顺序运行下面两行，填写连接资料和模型密钥；准备程序自动配置路径、下载校验官方驱动并安装依赖。
+3. **交代任务。** 准备所需应用或网站登录状态，输入目标；在手机查看过程、补充条件并处理审批。
 
 ```powershell
-Copy-Item .harness.local.example.psd1 .harness.local.psd1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mobile.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
-按照[开发者上手](./docs/getting-started.md)配置本机 Node、CUA、Provider 和输出路径后启动：
+启动后在电脑打开 [连接手机](http://localhost:4317/connect)，生成二维码，手机扫码后在电脑确认。完整的[开始使用](./docs/getting-started.md)集中说明 Node.js 安装、Relay 连接资料、语音和排错。当前源码预发布的用户安装流程覆盖 Windows，macOS 安装流程由平台成员补齐。
 
-```powershell
-.\scripts\mobile.ps1 start
-```
+## 在真实生活中持续打磨
 
-本地 Host 会启动电脑端连接页面。跨设备手机访问需要 HTTPS Relay；公共 Demo Relay 正在准备中，开放后可直接通过二维码完成配对体验。
+我们围绕六类生活场景构建真实任务，用实际网站、应用和独立可核验的交付结果推进开发。任务中暴露的输入异常、重复操作、切窗问题、审批负担和交互困难，持续转化为功能完善、回归测试与体验优化。
 
-更多配置与故障排查见[文档索引](./docs/DOCS-INDEX.md)、[手机控制指南](./docs/mobile-control-guide-2026-09-26.md)和 [Relay 部署说明](./apps/relay/README.md)。
+演示用于呈现完整使用流程；研发记录用于追踪问题与迭代，不用零散样本替代产品整体表现。
 
----
+[了解真实生活任务案例](./docs/submission/real-task-cases.md)。
 
-## Open-source ecosystem
+<!-- 正式Demo及后续有统一口径的场景成果图；没有成稿不填占位数字、虚构评价或客户Logo。 -->
 
-Computer Harness 建立在开源 Computer-Use 生态之上，同时也将真实使用中发现的问题反馈回上游。
+## 开放共建
 
-### CUA
+Lightspeaker建立在开源Computer-Use生态之上，也将真实使用中的问题反馈给上游：
 
-在 Harness 的 Windows 实机开发中，我们发现并隔离了 foreground 多行输入异常，最终形成：
+- [CUA PR #4500](https://github.com/trycua/cua/pull/4500)：与 CUA 维护者共同排查 Windows 多行文本输入异常，贡献复现用例、测试夹具和回归验证，协助完成输入队列修复，已合并。
+- [CUA PR #5587](https://github.com/trycua/cua/pull/5587)：针对前台文稿输入提供带能力检查与读回验证的改进方案，上游维护者保留团队原始提交并推动合并，已合并。
+- OpenClaw [#126399](https://github.com/openclaw/openclaw/pull/126399)、[#127177](https://github.com/openclaw/openclaw/pull/127177)：修复任务结束后的资源复用问题与 Windows 设备重复审批问题，均已合并。
 
-- [Issue #4477](https://github.com/trycua/cua/issues/4477)：将问题从模型和 Harness 中剥离，提供独立 CUA reproduction；
-- [PR #4500](https://github.com/trycua/cua/pull/4500)：加入 WPF / WinUI3 multiline fixtures、app-owned state oracle 和回归测试，并与 maintainer 一起定位 foreground input queue drain 问题；该修复现已合并；
-- [PR #3450](https://github.com/trycua/cua/pull/3450)：针对 Windows embedded SDK 下 DPI virtualization 与物理像素捕获问题进行修复与回归验证；当前仍为 Open / Changes Requested。
+我们欢迎开发者通过代码、任务案例、问题反馈和无障碍体验建议参与改进。准备开发环境和提交修改请看[参与贡献](./CONTRIBUTING.md)。
 
-这些工作来自真实 GUI Agent 开发过程中暴露出的底层边界：
+## 使用与数据边界
 
-**使用开源 → 发现真实问题 → 最小复现 → 测试与源码定位 → 向上游提交修复。**
+窗口范围与全桌面模式具有不同采集范围；全桌面执行共享前台输入，运行期间不要同时操作鼠标键盘。窗口范围不等同于操作系统沙箱。
 
-### OpenClaw
+任务文本、截图及必要上下文可能发送给所配置的模型，语音识别使用第三方服务；受管浏览器DOM不等于访问任意个人浏览器。Guard与审批不能撤销已经发生的操作，请仅在有权操作的账户和资料上使用。
 
-在更早的 Agent Host 实践中，我们也向 OpenClaw 提交并合入了与 Computer-Use 生命周期和 Windows 设备控制相关的修复：
-
-- [#126399](https://github.com/openclaw/openclaw/pull/126399)：修复 Computer Run 完成后的资源清理，使同一 Computer Node 能被后续 Run 正常复用；
-- [#127177](https://github.com/openclaw/openclaw/pull/127177)：修复 Windows CLI / TUI / Node Host 之间等价设备 metadata 导致的重复审批问题。
-
-OpenClaw 不是 Computer Harness 的运行依赖，但这些真实系统问题推动了 Harness 对 **Run 生命周期、资源清理、审批状态和可恢复执行** 的设计。
-
----
-
-## 状态与限制
-
-| 平台 | 当前状态 |
-| --- | --- |
-| **Windows** | 当前验证最深入，主要 Runtime、CUA Adapter 和本地 Host 路径围绕 Windows 开发与测试 |
-| **macOS** | 窗口、sheet 与受限文稿恢复已集成，平台机制与共享 Runtime 分离；完整真实桌面链路仍需独立验收 |
-
-最新集成已通过完整离线回归与 CI，保留 Windows 输入及手机无障碍改动；当前运行的 Preview 未随源码切版。具体版本与验收边界见[集成记录](./docs/pr26-integration-audit-2026-10-11.md)。
-
-当前 Demo 和统一跨应用评测仍在整理，因此暂不发布整体成功率。
-
-手机跨设备访问需要 HTTPS Relay；公共 Relay 尚未开放。语音输入使用所配置的实时 ASR 服务，语音数据会发送到相应 Provider。
-
-模型请求可能包含任务文本、截图和必要运行上下文。Risk Guard、审批、暂停和停止可以限制后续动作，但不能撤销已经发生的系统操作；当前窗口执行环境也不等同于操作系统级沙箱。
-
----
-
-## 参与与贡献
-
-欢迎提交 Issue 和 Pull Request。
-
-如果改动涉及真实桌面、模型 API 或外部服务，请同时说明测试环境、验证方式和仍未覆盖的边界。
-
-项目后续重点包括：
-
-- 跨应用长程任务与统一评测；
-- Surface / grounding freshness 和失败恢复；
-- 手机端与语音交互；
-- 无障碍与适老化体验；
-- 更多平台的 Computer Adapter 验证。
-
----
-
-## License
-
-Computer Harness 原创代码采用 [Apache License 2.0](./LICENSE)。
-
-CUA、第三方依赖、模型 Provider、评测环境和用户素材仍分别受各自许可证或服务条款约束。具体依赖、版本和 notice 信息见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
+安装、平台与部署边界见[使用文档](./docs/DOCS-INDEX.md)。原创代码采用[Apache-2.0](./LICENSE)，第三方组件及服务分别遵守其[许可与条款](./THIRD_PARTY_NOTICES.md)。产品名Lightspeaker、内核名Computer Harness；仓库地址及`@computer-harness/*`接口保持不变。

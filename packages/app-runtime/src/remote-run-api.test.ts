@@ -500,7 +500,8 @@ describe("ApplicationRemoteRunApi", () => {
         target: { mode, switchWindows: switchWindows === true },
         effective: {
           windowSwitch: switchWindows === true ? "opened-windows-v1" : "off",
-          grounding: mode === "browser" || switchWindows === true ? "hybrid-catalog-v1" : "off",
+          // Companion/window switching does not implicitly authorize DOM; browser targets opt in explicitly.
+          grounding: mode === "browser" ? "hybrid-catalog-v1" : "off",
           windowHandoff: mode === "browser" || switchWindows === true ? "off" : "confirm-v1",
         },
       }]);
@@ -560,13 +561,13 @@ describe("ApplicationRemoteRunApi", () => {
   it("rejects missing credentials before auto discovery and leaves a window token reusable", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-window-token-"));
     const outputDir = join(root, "runs");
-    const credentials: { glmApiKey?: string } = {};
+    const credentials: { deepseekApiKey?: string } = {};
     const targetWindow = { pid: 72, windowId: 901, appName: "Fixture app", title: "Fixture window" };
     const listWindows = vi.fn(async () => [targetWindow]);
     const listAllWindows = vi.fn(async () => [targetWindow]);
     const activateWindow = vi.fn(async () => undefined);
     const session = new ApplicationSession({
-      config: config(outputDir), owner: new InProcessEnvironmentOwner(), dependencies: { credentials },
+      config: { ...config(outputDir), model: "deepseek-flash" }, owner: new InProcessEnvironmentOwner(), dependencies: { credentials },
       windowDiscovery: { listWindows, listAllWindows, activateWindow },
     });
     const api = new ApplicationRemoteRunApi({
@@ -588,7 +589,7 @@ describe("ApplicationRemoteRunApi", () => {
       expect(session.lastRun).toBeUndefined();
       await expect(readdir(outputDir)).rejects.toMatchObject({ code: "ENOENT" });
 
-      credentials.glmApiKey = "fixture-provider-key";
+      credentials.deepseekApiKey = "fixture-provider-key";
       vi.spyOn(session, "startRun").mockRejectedValue(new Error("fixture stop after token validation"));
       await expect(api.startRun("device-window-token", "window-token-no-key", "Read the fixture", { mode: "window", targetToken: token }))
         .rejects.toThrow("fixture stop after token validation");
@@ -2157,6 +2158,7 @@ describe("ApplicationRemoteRunApi", () => {
       await waitFor(() => api.getRun("device-one", started.runId)?.status === "waiting_approval", "Run did not request approval");
       const pending = api.getRun("device-one", started.runId)?.pendingRequest;
       if (pending?.kind !== "approval") throw new Error("expected an approval request");
+      expect(pending.preview?.modelDeclaredEffect).toEqual({ target: "查询", summary: "点击查询按钮", verified: false });
 
       const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
       const subscription = api.subscribe("device-one", started.runId, 0, (event) => {
@@ -2423,7 +2425,7 @@ describe("ApplicationRemoteRunApi", () => {
         managedBrowserProfileLabel: "mobile",
         managedBrowserProfileRoot: profileRoot,
         windowSwitch: "opened-windows-v1",
-        grounding: "hybrid-catalog-v1",
+        grounding: "off",
       });
       expect(createdComputerConfigs[0]).not.toHaveProperty("windowTarget");
       expect(session.activeRun?.config).toMatchObject({ windowSwitch: "opened-windows-v1", windowHandoff: "off" });

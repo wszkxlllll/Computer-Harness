@@ -1,181 +1,283 @@
-# Developer getting started
+# 用手机控制电脑
 
-本页承接根目录 README 的通用安装步骤，集中放置平台准备和排查；它不把真实桌面、模型或 OSWorld VM 当作安装后的默认依赖。
+手机用浏览器打开控制页面，电脑负责执行任务。电脑需要保持开机、联网，并停留在已登录的桌面；手机不用安装 App。
 
-## 1. 选择代码版本并安装
+本教程对应 [Lightspeaker v0.1.0-rc.2 源码预发布](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)。电脑端和 Relay 使用这一版本，按下面步骤安装即可。当前安装步骤覆盖 Windows；macOS 安装流程由平台成员后续补齐。
 
-本文描述开发预览能力。先确认目标功能所在的开发分支或待审 PR，再执行：
+两端通过一个 **Relay（中继服务）** 连接：电脑上的 Host 主动连到 Relay，手机也访问同一个 Relay。Host 运行在你要控制的电脑上；Relay 由团队管理员运行在有 HTTPS 地址的服务器上，可以供多台电脑使用。你的电脑不需要开放公网端口。
 
-```text
-node --version
-pnpm --version
-corepack enable
-corepack install --global pnpm@11.19.0
-pnpm install --frozen-lockfile
-pnpm run build
-pnpm --filter @computer-harness/web build
-pnpm test
-```
+先向提供服务的人领取三项连接资料：**Relay 的 HTTPS 地址、这台电脑的 Host ID、连接凭据**。这些资料由管理员准备，不需要使用者研究服务器配置。本项目目前没有向所有人开放的公共 Relay；团队自己的服务器也不是公共入口。如果你是第一次搭建服务的人，先完成本文末尾的[自行部署 Relay](#自行部署-relay)，然后回到下面的步骤。
 
-Node 应为 `22.13.0+`，pnpm 应为 `11.19.0`。根 `pnpm run build` 会构建 workspace references 和类型检查，不要只构建 `apps/cli` 来判断仓库是否完整。
+## 1. 在 Windows 电脑上准备并启动
 
-普通 CLI 的直接入口是：
+### 第一次使用：准备一次即可
 
-```text
-node apps/cli/dist/index.js --help
-```
+电脑需已安装 [Node.js 24 LTS](https://nodejs.org/en/download) 和 Microsoft Edge。已有 Node.js 22.13.0 或更高版本可以继续使用。使用下面的 ZIP 下载方式无需安装 Git。
 
-依赖安装在本仓库 workspace 内；不要把全局 Node、其他项目的 OpenClaw/LightSpeaker 环境或本机密钥复制进仓库。
-
-## 2. Windows PowerShell 排查
-
-pnpm 在 Windows 下可能同时生成 `.cmd` 和 `.ps1` wrapper。先确认当前终端不是 WSL/Git Bash 混用：
+1. 打开[版本下载页](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)，在 **Assets** 中下载 **Source code (zip)**。
+2. 将 ZIP **全部解压**到自己容易找到的位置，例如 `C:\Lightspeaker`。不要直接在压缩包里运行。
+3. 进入同时包含 `package.json` 和 `scripts` 文件夹的那一层，在资源管理器地址栏输入 `powershell` 并回车。
+4. 复制运行以下准备命令：
 
 ```powershell
-$IsWindows
-where.exe node
-where.exe pnpm.*
-pnpm --version
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mobile.ps1
 ```
 
-原生 PowerShell 中 `$IsWindows` 应为 `True`。若 wrapper 内出现 `/mnt/` 等 Unix 路径，通常是依赖在另一种 shell 中生成或 PATH 混用。只清理本仓库的 `node_modules`，再用 `pnpm.cmd` 重装；保留 lockfile：
+准备程序会自动找到 Node、创建电脑配置、下载并校验与项目匹配的官方 CUA 驱动、安装锁定的依赖。它不会启动电脑控制任务。已有这一版本的文件夹时直接运行准备命令；中文路径可以使用。其他版本先与 Relay 维护者确认统一更新。
 
-```powershell
-Remove-Item -LiteralPath .\node_modules -Recurse -Force
-pnpm.cmd install --frozen-lockfile
-pnpm.cmd run build
-pnpm.cmd test
-```
+首次准备时，按顺序填写四项：
 
-如果执行策略阻止 `.ps1`，持续使用 `pnpm.cmd` 即可；这与路径转换问题是独立问题。
-
-## 3. CUA SDK 按平台路由
-
-当前上手范围为 Windows/macOS，使用 SDK 与 daemon `0.22.2` 配对。computer-cua 按运行平台懒加载对应客户端和原生 binding，不会自动安装或启动 daemon。SDK 与 daemon 必须同版本且 contract 版本匹配；跨版本组合会由 doctor 标记为 `unknown`，不能作为受支持组合。仓库保留的其他兼容依赖以锁文件和第三方声明为准，不作为本指南的安装目标：
-
-- [官方 0.22.2 release](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)
-- [官方 daemon 生命周期文档（main 分支可变参考；固定版本以 release 为准）](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/keep-running.mdx)
-
-选择当前平台对应的 daemon release，并按该 release 提供的 checksum 校验下载物。不要用另一平台的 SDK alias 或把不同版本的 SDK 与 daemon 混用。
-
-平台准备要点：
-
-- Windows：使用登录用户的真实桌面会话；服务会话、Session 0 或 RDP 切换可能改变屏幕/焦点权限。
-- macOS：按系统提示授予 Accessibility 和 Screen Recording；窗口可见不等于这些权限已生效。
-
-本项目 Windows/CUA 0.22.2 窄路径实测的 daemon 入口形态是 `cua-driver serve --socket "<private-socket>"`；其他平台按对应 release 的安装/权限说明准备 daemon。release 页用于固定资产和 checksum，不把 main 文档或 release 描述当作本项目所有平台的 flag 证据：
-
-```text
-cua-driver serve --socket "<private-socket>"
-```
-
-再用完全相同的 socket 值运行 Harness。Windows named pipe 与 Unix socket 的写法由 daemon 和当前 shell 决定，README 示例中的 `<private-socket>` 不是本机路径。
-
-无模型、无截图/输入窗口动作的诊断：
-
-```text
-node apps/cli/dist/index.js --doctor --computer cua --cua-socket "<private-socket>"
-```
-
-诊断可能返回 `unknown` 并以非零码结束；这表示字段、权限、session 或 cleanup 无法确认，不是可以忽略的“全通过”。`--doctor` 不读取 `--env-file`，不截图、不输入窗口、不调用模型，但会建立、检查并结束临时诊断 session；也不支持 TUI、interactive 或 window target。
-
-### CUA 探针
-
-`spikes/cua-driver` 的直接 SDK 依赖固定为 `0.22.2`，下列旧探针不会采用 computer-cua 的平台 alias 路由。先使用上方 Harness `--doctor` 核对平台配对，再按专用桌面授权执行当前 adapter 的集成验证。
-
-默认探针只做只读能力检查；输出目录可能包含当前桌面截图，只能在专用桌面运行并保持本地。输入探针不是任务执行器，也不会判断点击是否符合目标：
-
-```text
-pnpm probe:cua
-pnpm --filter @computer-harness/cua-driver-spike probe -- --allow-input --click-x <x> --click-y <y>
-```
-
-输入探针需要额外的专用桌面授权；完整参数见[`spikes/cua-driver/README.md`](../spikes/cua-driver/README.md)。不要把 probe、fixture 或 screenshot 结果写成模型成功率。
-
-## 4. Provider 与本地 secrets
-
-只在本机创建 `.env` 或使用其他未跟踪 secrets 文件，不要把它加入 Git。`--env-file` 读取普通 `KEY=VALUE` 行；已有进程环境变量优先。CLI 当前实际读取：
-
-| Provider/用途 | Key | 备注 |
-| --- | --- | --- |
-| GLM key | `ZHIPUAI_API_KEY` | 兼容别名：`ZHIPU_API_KEY`、`GLM_API_KEY` |
-| GLM endpoint | `GLM_BASE_URL` | 可选，自定义 OpenAI-compatible endpoint |
-| GLM thinking | `GLM_THINKING` | GLM-5.3-Flash 强制思考；使用 `low`、`high` 或 `max` 控制强度。`low` 延迟较低，`max` 为最深档。旧 `enabled` 仍表示由 Provider 使用默认强度；`disabled` 会被当前 GLM-5.3-Flash API 拒绝。 |
-| Qwen key | `DASHSCOPE_API_KEY` | Qwen3.8-Flash |
-| Qwen endpoint | `DASHSCOPE_BASE_URL` | 别名：`DASHSCOPE_ENDPOINT` |
-| Qwen workspace | `DASHSCOPE_WORKSPACE_ID` | 可选；用于生成 workspace endpoint |
-| Memory embedding key | `MEMORY_EMBEDDING_API_KEY` | Hybrid Memory 专用 key；不要复用聊天模型 key |
-| Jev window selector | `TYPESAFE_API_KEY` | 仅显式启用 CUA TUI Jev 选窗时需要；还需允许分享窗口标题，见[配置步骤](./local-launcher.md#jev-辅助选窗可选) |
-| OSWorld Bridge | `OSWORLD_BRIDGE_TOKEN` | 可选 loopback Bridge token，不进轨迹 |
-
-普通运行示例：
-
-```text
-node apps/cli/dist/index.js --goal "describe the current screen" --model glm-5.3-flash --computer cua --cua-socket "<private-socket>" --output "runs/live-glm" --env-file ".env"
-```
-
-Provider 请求、截图和运行轨迹可能包含敏感内容；截图会随选定的 GLM/Qwen 请求发送。检查结果时只分享脱敏 summary；不要上传 `runs/`、screenshots、`.env` 或真实窗口截图。`runs/` 不公开上传不等于没有网络传输。
-
-路径提示：直接从仓库根目录执行 `node apps/cli/dist/index.js` 时，`--env-file ".env"` 指向根目录；通过 `pnpm --filter @computer-harness/cli start` 启动时，工作目录是 `apps/cli`，请传根目录 `.env` 的绝对路径或 `..\..\.env`。
-
-启用 Memory `hybrid` 时还要把完整 Qwen embeddings URL 传给 `--memory-embedding-endpoint`，形如 `https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings`。只设置 `MEMORY_EMBEDDING_API_KEY` 而不提供 endpoint，或只提供 endpoint 而没有 key，都不能启动 Hybrid；`lexical` 模式不需要这两个配置。
-
-## 5. OSWorld
-
-OSWorld Python、VM、磁盘和快照在仓库外维护。先阅读：
-
-- [OSWorld upstream](https://github.com/xlang-ai/OSWorld)
-- [本仓库 Bridge 指南](../integrations/osworld/README.md)
-- [固定环境和 Gate 2 说明](./stage-5-osworld-reproducibility.md)
-
-在 Bridge 前准备与团队约定一致的 OSWorld checkout、Python 环境和 VM artifact；使用无模型 Gate 2 验证 `DesktopEnv`、loopback RPC、显示尺寸和快照，再启动模型。不要复制别人的绝对路径、VMX、快照名或 `vmrun.exe` 路径。
-
-仓库内 Python contract 测试不需要 VM：
-
-```text
-python -m unittest integrations.osworld.test_bridge -v
-```
-
-Gate 2 和模型 runner 的完整参数以上述 Bridge/Stage 5 文档为准；README 不为不存在的本地 VM 写快捷命令。
-
-## 6. 常见边界
-
-| 现象 | 先检查 |
+| 提示 | 填什么 |
 | --- | --- |
-| `--tui requires an interactive terminal` | stdin/stdout 是否真实 TTY；PowerShell 重定向、CI 和普通管道不能启动 TUI |
-| 普通 Run 报 `--model is required` | Run 必须显式 `--model`；只有 doctor 使用内部占位值 |
-| Qwen 参数报 coordinate 错误 | 加 `--qwen-coordinate-mode normalized_1000` 或 `actual_pixels`，并按需选择 thinking/output mode |
-| CUA socket 连接失败 | Windows/macOS 的 SDK/daemon 是否均为 0.22.2、socket 是否相同、桌面会话和平台权限是否有效 |
-| doctor 输出 `unknown` | 把它当作未确认边界；不要以 npm 版本、RPC envelope 或静态 tool 名单推断实际 daemon 能力 |
-| window action 被拒绝 | window PID/ID、observation 和 geometry 是否仍有效；当前不支持 keyboard、自动发现或 desktop fallback |
-| 运行后找不到“回复” | 查看 TUI 的 waiting/failure/final reply 区块与 `runs/<output>`；没有终稿时 UI 会明确显示 unknown/failure，不生成虚构答案 |
+| Relay 地址（HTTPS） | 管理员提供的地址，例如 `https://relay.example.com` |
+| 电脑编号（Host ID） | 管理员为这台电脑分配的编号 |
+| 连接凭据 | 与这个编号配套的连接凭据 |
+| 模型密钥（GLM） | 你的 GLM API 密钥；用于调用任务模型，会按提供方规则计费 |
 
-TUI 必须将焦点放在当前终端，不注册全局热键；visible input 可能留在 terminal scrollback/recording，这不是隐私保证。`--interactive` 行式模式与 `--tui` 快捷键不同；P/R/I 只属于 TUI 控制面。
+两项密钥输入时不会显示。它们只保存在这台电脑的私有 `.env` 文件中；不要把这个文件发给别人。连接资料不等于模型密钥，Relay 管理员也不需要你的模型密钥。
 
-### 受管浏览器窗口身份
+准备程序不覆盖已有配置、密钥或驱动。若它提示已保留旧配置，请[展开“需要时再设置”](#需要时再设置)，查看“已有配置怎么填写”。下载或安装因网络失败时，解决网络问题后重跑同一条准备命令即可。
 
-受管 Edge／Chromium 启动必须同时满足进程归属、CDP 选定窗口和唯一原生窗口证据。几何核对对位置与尺寸逐项限制边框差异（最多 16 DIP），不从候选宽高比例推断缩放，不选最大或最接近的窗口。Windows 使用选定目标的两次原生 `Page.getLayoutMetrics`：物理 viewport 与 CSS viewport 的比值除以 page zoom，得到 CDP 外窗 DIP 到 CUA 原生像素的尺度，并验证横纵及前后读数一致。macOS 两边均为屏幕点，按 1:1 比较。窗口身份不使用页面脚本可改写的 `window.devicePixelRatio`；DOM 内容坐标转换仍保留其独立合同。
+### 启动电脑端
 
-缺失、异常或变化中的尺度证据只允许 1:1 的有界帧差；多个合法候选仍拒绝 `multiple_candidates`。当前合同针对本机受管浏览器及已选定的本机 CUA 后端，不代表 Wayland 原生、混合 DPI 或任意多屏原点已经实机验收。拒绝时保留 CDP／CUA 几何诊断，不扩大容差或改用整屏冒充受管 DOM 成功。
+在同一个项目文件夹执行：
 
-### 受管 DOM 点击与新标签页
-
-受管 DOM 点击使用观察绑定的控件中心点；候选收集和点击派发共用视口、裁剪、遮挡及开放 shadow root 命中检查。不可见或中心被遮挡的控件不列入 DOM 候选；控件在观察后被遮挡时，点击明确拒绝并保证未发送输入，应重新观察，不自动重放。
-
-只有实际 DOM 点击的 CDP `Runtime.evaluate` 设置 `userGesture: true`，以支持页面正常的 `target="_blank"` 链接；只读候选收集、点击验证和输入焦点验证不授予用户手势。后续观察仍只接纳已绑定受管窗口内的唯一活动标签页，新窗口不自动接管。`completed` 表示点击已派发，不表示导航或业务任务成功，须从新观察确认预期页面。
-
-混合观察中，Windows UIA 的 `Hyperlink` 与 DOM `link` 使用同一角色。只有已确定属于网页内容区、且本次 DOM 覆盖完整的 UIA 超链接，才要求存在唯一、可见且几何对应的 DOM 项；这类轮播裁剪、遮挡或非活动标签页残留链接不能走原生点击兜底。浏览器工具栏和区域不明的 UIA 控件保留原有受控原生路径，不因网页 DOM 缺少对应项被删除。当前视口有可见但未遍历的 iframe 时，DOM 覆盖标记为不完整；不把“未列出”当作不可见证明，既有 UIA 回退保留。原生窗口、截图点路径和旧引用/禁用控件约束不变。
-
-无可访问名称的轮播箭头仍可按当前观察中的元素引用操作；名称两侧使用相同规范化规则，不能把未命名控件误拒绝为边界变化。控件的指纹、几何、唯一性和中心命中约束保持不变。
-
-## 7. 贡献前检查
-
-默认贡献路径不需要 API、桌面或 VM：
-
-```text
-pnpm run build
-pnpm --filter @computer-harness/web build
-pnpm test
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
-提交文档或代码时同时说明：实际运行的命令、Node/pnpm、是否读取 secrets、是否触碰桌面/VM、测试范围和未验证限制。保持包边界，不从生产代码跨包导入私有 `src`；不要提交真实 runs、截图、VM、token 或本机绝对路径。
+首次启动会构建页面和电脑端程序，等终端显示启动信息后，在**这台电脑**的浏览器打开 [连接手机](http://localhost:4317/connect)。保留 PowerShell 窗口；它关闭后手机就不能继续控制电脑。
+
+以后使用，在项目文件夹运行下面这一行即可。更新过源码时用上面的 `-Build` 命令重新构建。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start
+```
+
+## 2. 手机扫码，电脑确认
+
+1. 在电脑的“连接手机”页面点“生成配对二维码”。
+2. 用手机相机扫码，在浏览器打开链接。
+3. 回到电脑，确认待处理请求来自自己的手机，点“允许这台手机”。
+4. 手机显示连接成功后，点“打开任务列表”。
+
+二维码有效期为 90 秒，过期后重新生成。手机打开的是 Relay 的 HTTPS 地址；`localhost:4317` 只供电脑本机使用，不要在手机里输入它。
+
+## 3. 发起第一个任务
+
+在手机“新任务”页选择“打开网站（推荐）”，填写网站地址和目标，再点“开始任务”。例如，网址填 `https://example.com`，目标填“阅读这个页面，用中文告诉我它的标题和用途”。这个例子不需要登录或发送信息。
+
+电脑会打开 Harness 专用的 Edge 窗口。手机可以查看进度和结果，遇到确认请求时按页面提示处理。首次使用先从简单的网页任务开始；长篇中文输入、复杂文稿编辑和整个桌面任务仍有已知限制。
+
+用完后，回到电脑的 PowerShell 窗口按 `Ctrl+C`。它会停止电脑端，以及本次启动的 CUA 驱动；原本已运行的驱动会保留。
+
+<a id="需要时再设置"></a>
+<details>
+<summary>需要时再设置：登录状态、语音、旧配置与排错</summary>
+
+**开发者通过 Git 下载。** 安装 Git 后可用以下命令取得同一版本，再按前文运行准备程序：
+
+```powershell
+git clone --branch v0.1.0-rc.2 --depth 1 https://github.com/wszkxlllll/Computer-Harness.git
+Set-Location .\Computer-Harness
+```
+
+版本标签检出后提示 detached HEAD 属于正常现象，不影响使用。开发修改时自行创建分支；普通使用者直接下载 ZIP 即可。
+
+**使用网站登录状态。** 手机打开“设置 → 浏览器与登录状态”，选择“本机已准备的登录状态”，点“准备登录状态”；在电脑出现的 Harness Edge 窗口中自行登录，再回手机点“我已在电脑完成登录”。后续任务可复用这份专用登录状态；它不会复制个人浏览器或手机里的登录信息。
+
+**语音输入。** 在电脑的 `.env` 追加以下两项，填入自己的 DashScope 资料，然后重启电脑端：
+
+```dotenv
+DASHSCOPE_API_KEY=填入你的DashScope密钥
+DASHSCOPE_WORKSPACE_ID=填入你的语音服务workspace_ID
+```
+
+如果服务方提供的是实时识别 WSS 地址，可用 `DASHSCOPE_REALTIME_ASR_ENDPOINT` 替代 workspace ID。手机进入“设置 → 语音功能”测试麦克风。语音会发送给所配置的识别服务；不配置也可以正常输入文字。
+
+**朗读通知。** 在手机同一设置页开启“朗读任务关键通知”，使用手机浏览器的语音合成，无需语音识别密钥。
+
+**更换模型。** 默认使用 GLM。需要 Qwen 时，把 `.harness.local.psd1` 中的 `Model` 改为 `qwen3.8-flash`，并在 `.env` 填写 `DASHSCOPE_API_KEY`，然后重启。
+
+### 已有配置怎么填写
+
+源码内提供 [.env.example](../.env.example) 和 [.harness.local.example.psd1](../.harness.local.example.psd1)。准备程序会自动生成实际文件；只有手动配置时才需要复制模板并填写。模板不包含任何人的密钥或本机路径。
+
+准备程序首次运行时自动生成 `.harness.local.psd1` 中的 Node 路径；已有配置时优先使用其中的有效 `NodePath`，无需再次把 Node 加入 PATH。驱动位于 `.tools\cua-driver\0.22.2\bin\cua-driver.exe`。通常不用编辑这个文件。已有配置指向别处时，程序会保留原值；如果那个文件已不存在，按报错修正路径后再运行。
+
+已有 `.env` 不会被覆盖。需要补 Relay 连接资料时，在文件中填写下面四项；两个地址通常相同，ID 和凭据必须与管理员登记的完全一致：
+
+```dotenv
+HARNESS_RELAY_URL=https://relay.example.com
+HARNESS_HOST_ID=管理员分配的ID
+HARNESS_RELAY_CREDENTIAL=管理员提供的连接凭据
+HARNESS_RELAY_PUBLIC_ORIGIN=https://relay.example.com
+```
+
+同时保留所选模型的密钥：默认 GLM 使用 `ZHIPUAI_API_KEY`。把示例文字替换成实际值，以 UTF-8 保存，不要将占位文字原样使用。改完后重启电脑端。
+
+### 遇到问题
+
+| 现象 | 怎么处理 |
+| --- | --- |
+| 找不到 `node` 或 `npx` | 安装或修复 Node.js，关闭并重新打开 PowerShell。 |
+| 准备时下载或依赖安装失败 | 检查网络能否访问 GitHub 和 npm，再运行准备命令；它会保留已填写的资料。 |
+| 配置检查通过，但启动仍失败 | 检查仅确认本机基本配置，不代表 Relay 在线或驱动已就绪。查看启动窗口中最后一条错误。 |
+| CUA 驱动未就绪 | 查看项目 `runs\local\mobile` 下的 `cua-daemon` 日志；旧配置还需确认 `CuaBinary` 文件真实存在且与 SDK 同为 0.22.2。 |
+| 电脑不能生成二维码，或手机打不开链接 | 确认 Relay 服务在线、两端都能访问它；核对 `.env` 的四项连接资料。手机地址应以 `https://` 开头且没有证书警告。 |
+| 配对失效 | Relay 重启后需要重新扫码、由电脑再次允许。 |
+| 4317 端口已被占用 | 先确认是否已经启动过 Harness；如果是，使用原来的窗口和连接页面。 |
+| 输入后的文字与目标不符 | 停止并检查实际内容，避免重复发送或覆盖；当前版本不能保证复杂中文编辑任务可靠。 |
+
+### 驱动和平台范围
+
+准备程序使用[官方 CUA Driver 0.22.2](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.22.2)，固定校验该发布页给出的 SHA-256，与仓库锁定的 SDK 0.22.2 配套。驱动用于操作电脑，依赖安装不会自动提供这个独立程序。
+
+这个旧版不含后续的 Windows 输入修复。[官方 0.38.0](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.38.0) 已经合入相关修复，但当前项目尚未完成配套 SDK 升级验证，不能只把驱动替换为最新版。普通用户无需自行选择驱动或寻找团队私有构建。本文先引导简单网页任务，不把首次配对成功当成所有电脑操作都可靠的证明。
+
+macOS 的启动与权限准备由 Mac 成员补充、实机核对；上面的 `.ps1` 准备和启动命令只适用于 Windows。
+
+</details>
+
+<a id="自行部署-relay"></a>
+<details>
+<summary>自行部署 Relay（仅服务维护者需要）</summary>
+
+这一节由**服务维护者**完成一次。服务上线后，每位使用者只需领取连接资料，按前面的 Windows 步骤操作。Relay 负责连接和转发，不运行模型；Host 和 CUA 仍在使用者的电脑上。Relay 运营方能接触经它转发的任务和截图，应由使用者信任的人维护。
+
+服务器需有 Git、[Node.js 24 LTS](https://nodejs.org/en/download)（最低 22.13.0）和 systemd。新服务器使用域名和 Caddy；已有 Nginx、有效 HTTPS 证书的服务器可以复用，D 步选择对应方式即可，无需另买域名。下方使用独立的 `lightspeaker-rc2` 目录与服务，以及本机端口 8789。
+
+Node 应安装在服务账号能执行的系统共享位置，如 `/usr/local/bin` 或 `/opt`；下方服务隔离配置不能访问个人 home 目录里的 Node。
+
+### A. 下载并构建
+
+在服务器终端执行。这里已固定为前文电脑端使用的同一版本，维护者无需另外选择提交。后续升级时统一更新电脑端和 Relay：
+
+```sh
+test ! -e /opt/lightspeaker-rc2 || exit 1
+sudo install -d -o "$(id -un)" -g "$(id -gn)" /opt/lightspeaker-rc2
+git clone https://github.com/wszkxlllll/Computer-Harness.git /opt/lightspeaker-rc2
+cd /opt/lightspeaker-rc2
+git checkout --detach v0.1.0-rc.2
+node --version
+npm install --global pnpm@11.19.0
+pnpm install --frozen-lockfile
+pnpm exec tsc --build packages/relay-connector/tsconfig.json apps/relay/tsconfig.json --pretty false
+pnpm --filter @computer-harness/web build
+```
+
+第一行在目录已存在时停止，避免改动已有服务；已有部署由维护者按原来的更新方式处理。若 npm 全局安装需要系统权限，由维护者按本机 Node 安装方式处理。
+
+### B. 为第一台电脑生成连接资料
+
+先创建专用服务账号和配置目录：
+
+```sh
+sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin lightspeaker-relay-rc2
+sudo install -d -o lightspeaker-relay-rc2 -g lightspeaker-relay-rc2 -m 0700 /etc/lightspeaker-rc2
+```
+
+将下面的地址替换为手机实际访问的 HTTPS 地址。若在已有 Nginx 上使用独立的 8444 端口，就填写 `https://你的域名或IP:8444`，证书必须覆盖这个域名或 IP。命令会生成独立的 Host ID 和连接凭据；已有配置时拒绝覆盖：
+
+```sh
+relay_node="$(command -v node)"
+sudo -u lightspeaker-relay-rc2 env RELAY_PUBLIC_ORIGIN=https://relay.example.com "$relay_node" --input-type=module -e '
+import { randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
+const config = {
+  publicOrigin: process.env.RELAY_PUBLIC_ORIGIN,
+  listen: { host: "127.0.0.1", port: 8789 },
+  webRoot: "/opt/lightspeaker-rc2/apps/web/dist",
+  hostCredentials: [{ hostId: randomBytes(12).toString("hex"), credential: randomBytes(32).toString("base64url") }]
+};
+writeFileSync("/etc/lightspeaker-rc2/relay-config.json", JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
+'
+```
+
+维护者通过私密配置查看工具读取该文件，把 `publicOrigin`、对应条目的 `hostId` 和 `credential` 安全交给该电脑的使用者，分别填入准备程序的三个连接提示。每增加一台电脑，在 `hostCredentials` 中增加一组独立随机 ID/凭据；不能把同一组分给多台电脑。不要把这个配置放进 Git，或把凭据粘贴到公开聊天中。
+
+### C. 让 Relay 常驻运行
+
+先运行 `command -v node` 找到 Node 的绝对路径。将以下内容保存为 `/etc/systemd/system/lightspeaker-relay-rc2.service`，把 `ExecStart` 中的 `/usr/bin/node` 换成刚查到的路径；该路径及源码目录需允许专用服务账号读取和执行。
+
+```ini
+[Unit]
+Description=Computer Harness Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lightspeaker-relay-rc2
+Group=lightspeaker-relay-rc2
+WorkingDirectory=/opt/lightspeaker-rc2
+Environment=RELAY_CONFIG_FILE=/etc/lightspeaker-rc2/relay-config.json
+ExecStart=/usr/bin/node /opt/lightspeaker-rc2/apps/relay/dist/index.js
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动服务：
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now lightspeaker-relay-rc2
+sudo systemctl status --no-pager lightspeaker-relay-rc2
+```
+
+### D. 开通手机使用的 HTTPS 地址
+
+**新服务器使用 Caddy。** 按[官方说明](https://caddyserver.com/docs/install)安装 Caddy，域名解析指向服务器并放行 80/443。将以下站点加入 `/etc/caddy/Caddyfile`，域名与 B 步一致：
+
+```caddyfile
+relay.example.com {
+    reverse_proxy 127.0.0.1:8789 {
+        flush_interval -1
+    }
+}
+```
+
+Caddy 会为满足 DNS/端口条件的公开域名申请并续期 HTTPS 证书，并代理 WebSocket 与实时响应；不需要手动给电脑开放端口。这里不启用访问日志，避免保存配对链接的查询参数。规则依据：[自动 HTTPS](https://caddyserver.com/docs/automatic-https)、[反向代理与流式传输](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)。
+
+```sh
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+curl --fail --show-error https://relay.example.com/healthz
+```
+
+**已有 Nginx 和证书。** 无需安装 Caddy。将下面配置保存为独立的 `/etc/nginx/conf.d/lightspeaker-rc2.conf`，替换域名或 IP、证书和私钥路径，并放行外部端口 8444：
+
+```nginx
+server {
+    listen 8444 ssl;
+    server_name relay.example.com;
+    ssl_certificate /已有证书路径/fullchain.pem;
+    ssl_certificate_key /已有证书路径/privkey.pem;
+    access_log off;
+    location / {
+        proxy_pass http://127.0.0.1:8789;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+运行 `sudo nginx -t && sudo systemctl reload nginx`。检查配置中没有覆盖原站点，B 步的公开地址包含相同端口。用 `curl --fail --show-error https://你的域名或IP:8444/healthz` 检查连接。
+
+8789 保持仅本机监听。手机打开配置的 HTTPS 地址应能看到页面且没有证书警告；再按前文扫码、经电脑确认并发起简单任务，完成连接验证。
+
+维护时使用 `sudo systemctl restart lightspeaker-relay-rc2` 重启，使用 `sudo journalctl -u lightspeaker-relay-rc2 -n 50 --no-pager` 查看近期错误。Relay 重启会清空配对会话，手机需要重新扫码。
+
+</details>

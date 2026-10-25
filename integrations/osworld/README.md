@@ -1,6 +1,6 @@
 # OSWorld Bridge
 
-> 可复现实验入口见[`docs/stage-5-osworld-reproducibility.md`](../../docs/stage-5-osworld-reproducibility.md)。特别注意：VMware 快照不在 Git 仓库中，队友必须获取完整 VM artifact 或自行创建等价快照；只拿到 `.vmx` 或快照名称是不够的。
+> 可复现实验入口见[`docs/stage-5-osworld-reproducibility.md`](../../docs/history/2026-10-20-release-convergence/stage-5-osworld-reproducibility.md)。特别注意：VMware 快照不在 Git 仓库中，队友必须获取完整 VM artifact 或自行创建等价快照；只拿到 `.vmx` 或快照名称是不够的。
 
 当前真实 VM 路径已在 Windows 11 + VMware Workstation 上验证。macOS/Linux 可以运行 Harness 代码和测试；要运行同一 OSWorld VM 实验，还必须先用本机 VMware/`vmrun` 通过无模型 Gate 2，不能把 Windows 的绝对路径或 `vmrun.exe` 路径直接照搬。
 
@@ -37,7 +37,7 @@ After the workspace has been built, the no-model Gate 2 entrypoint is below. Com
 pasted into PowerShell, bash, or zsh without shell-specific continuation characters:
 
 ```text
-node scripts/stage5-osworld/gate2-computer.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --action wait --duration-ms 100 --output "<run output>"
+node scripts/history/2026-10-24/stage5-osworld/gate2-computer.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --action wait --duration-ms 100 --output "<run output>"
 ```
 
 Use `--action click --x <pixel-x> --y <pixel-y>` only after selecting a
@@ -84,7 +84,7 @@ For a model-backed task, use the runner so reset/evaluate remain outside the
 Harness Run:
 
 ```text
-node scripts/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model glm-5.3-flash --env-file "<local secrets file>" --output "<run output>"
+node scripts/history/2026-10-24/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model glm-5.3-flash --env-file "<local secrets file>" --output "<run output>"
 ```
 
 Add `--planning` for the Planning/Plan Context arm. Without it, the same
@@ -92,11 +92,11 @@ runner uses the Computer + Control baseline; both arms share the same
 infrastructure, budgets and Control definitions.
 
 ```text
-node scripts/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model glm-5.3-flash --planning --env-file "<local secrets file>" --output "<run output>"
+node scripts/history/2026-10-24/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model glm-5.3-flash --planning --env-file "<local secrets file>" --output "<run output>"
 ```
 
 Qwen 任务需要显式坐标和输出协议；建议在完成 no-model Gate 2 后再运行：
 
 ```text
-node scripts/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model qwen3.8-flash --qwen-coordinate-mode normalized_1000 --qwen-thinking disabled --qwen-output-mode strict_json --env-file "<local secrets file>" --output "<run output>"
+node scripts/history/2026-10-24/stage5-osworld/run-task.mjs --osworld-root "<OSWorld checkout>" --path-to-vm "<VMX path>" --python "<OSWorld Python executable>" --vmrun-path "<vmrun executable>" --snapshot-name "<verified VMware snapshot>" --task-id "<frozen task id>" --model qwen3.8-flash --qwen-coordinate-mode normalized_1000 --qwen-thinking disabled --qwen-output-mode strict_json --env-file "<local secrets file>" --output "<run output>"
 ```

@@ -33,7 +33,15 @@ docs/history/*
 !docs/history/2026-09-26-handoff-convergence/
 !docs/history/2026-09-26-handoff-convergence/**
 !docs/history/2026-09-26-readme-before-refresh.md
-scripts/history/
+!docs/history/2026-10-20-release-convergence/
+!docs/history/2026-10-20-release-convergence/**
+!docs/history/2026-10-20-product-docs/
+!docs/history/2026-10-20-product-docs/**
+!docs/history/README.md
+/output/pdf/
+scripts/history/*
+!scripts/history/2026-10-24/
+!scripts/history/2026-10-24/**
 
 .stage4-qwen38-fixture-alpha
 .vmware_vms

@@ -33,9 +33,15 @@ import { assertBuiltInProviderCredentials, createProvider } from "./providers.js
 import { buildRunReport } from "./reporting.js";
 import { createRunEventFeed, type CommittedEventFeed } from "./event-feed.js";
 import { selectOperationGuidance } from "./operation-guidance.js";
-import { DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
+import { DEFAULT_ARK_REQUEST_TIMEOUT_MS, DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS, DEFAULT_GLM_REQUEST_TIMEOUT_MS, validateDeepseekMaxOutputTokens, validateDeepseekRequestTimeoutMs, validateGlmRequestTimeoutMs, type MemoryRetrievalMode, type ProviderCredentials, type ResolvedRunConfig, type RunCloseConfirmation, type RunDependencies, type RunHandle } from "./config.js";
 
 export async function createRun(input: ResolvedRunConfig, dependencies: RunDependencies = {}): Promise<RunHandle> {
+  if (typeof input.model === "string" && !["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash", "deepseek-v4.1-flash"].includes(input.model)) {
+    throw new Error(`unsupported Provider model '${input.model}'`);
+  }
+  if (!["off", "same", "glm-5.3-flash", "qwen3.8-flash", "deepseek-flash", "deepseek-v4.1-flash"].includes(input.riskModel)) {
+    throw new Error(`unsupported risk Provider model '${input.riskModel}'`);
+  }
   const sourceLinkedFinish = validateSourceLinkedFinishContract(input.sourceLinkedFinish);
   const computerRecoveryOptIn = input.computer.kind === "cua" && input.computer.recoverBoundWindowMissing === true;
   if (input.recoverBoundWindowMissing === true !== computerRecoveryOptIn) {
@@ -82,6 +88,9 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 131072)) throw new Error("Context input budgets must be integers from 1 to 131072");
   }
   if (input.contextMaxInputTokens !== undefined && input.contextMaxWireInputTokens !== undefined && input.contextMaxInputTokens > input.contextMaxWireInputTokens) throw new Error("Context text budget must not exceed wire budget");
+  if (input.runTimeoutMs !== undefined && (!Number.isSafeInteger(input.runTimeoutMs) || input.runTimeoutMs <= 0)) {
+    throw new Error("runTimeoutMs must be a positive safe integer");
+  }
   if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
   const providerRecovery = input.providerRecovery ?? "off";
   const providerRecoveryRunWindowMs = input.providerRecoveryRunWindowMs ?? 900_000;
@@ -89,8 +98,15 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
   if (!Number.isSafeInteger(providerRecoveryRunWindowMs) || providerRecoveryRunWindowMs <= 0 || providerRecoveryRunWindowMs > 900_000) {
     throw new Error("providerRecoveryRunWindowMs must be a positive safe integer no greater than 900000");
   }
+  if (input.model === "deepseek-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-flash")) {
+    validateDeepseekRequestTimeoutMs(input.deepseekRequestTimeoutMs);
+    validateDeepseekMaxOutputTokens(input.deepseekMaxOutputTokens);
+  }
+  if (input.model === "deepseek-v4.1-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-v4.1-flash")) {
+    validateDeepseekRequestTimeoutMs(input.arkRequestTimeoutMs);
+    validateDeepseekMaxOutputTokens(input.arkMaxOutputTokens);
+  }
   const runId = input.runId ?? generatedRunId();
-  const browserInitialGrounding = input.grounding === "dom-catalog-v1" || input.grounding === "hybrid-catalog-v1";
   const companionRequested = input.computer.kind === "cua" && input.computer.managedBrowserCompanion === true;
   if (companionRequested && input.windowSwitch !== "opened-windows-v1") {
     throw new Error("managed browser companion requires the opened-windows-v1 Run opt-in");
@@ -108,11 +124,10 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       input.computer.hybridNativeWebDocumentTargets.recoveryTarget.windowId !== input.computer.recoveryWindowTarget.windowId)) {
     throw new Error("hybrid native-web recovery requires an ephemeral managed Browser, an explicit URL, and exact Host-authorized window targets");
   }
-  if (companionRequested && browserInitialGrounding && !hybridNativeWebDocumentRequested) {
-    throw new Error("managed browser companion cannot also be the initial browser target");
-  }
   const prepareManagedBrowserCompanion = companionRequested && input.windowSwitch === "opened-windows-v1";
-  const grounding = prepareManagedBrowserCompanion ? "hybrid-catalog-v1" : input.grounding ?? "off";
+  // The companion controls Host-owned Browser lifecycle and window scope; it
+  // must not silently opt a visual Run into UIA/DOM grounding.
+  const grounding = input.grounding ?? "off";
   const inputComputer = prepareManagedBrowserCompanion && input.computer.kind === "cua"
     ? {
       ...input.computer,
@@ -306,9 +321,16 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
       contextCompiler,
       toolRegistry: tools,
       policy: dependencies.createPolicy?.(factoryConfig) ?? new DefaultRuntimePolicy(config.maxSteps, config.maxModelRequests),
-      ...(dependencies.createProvider === undefined && config.model === "glm-5.3-flash" ? {
-        providerAttemptReserveMs: config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS,
-      } : {}),
+      // An injected factory receives the same HTTP deadline configuration as
+      // the built-in factory; neither path gets an unrelated Runtime reserve.
+      providerAttemptReserveMs: config.model === "glm-5.3-flash"
+        ? config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS
+        : config.model === "deepseek-flash"
+          ? config.deepseekRequestTimeoutMs ?? DEFAULT_DEEPSEEK_REQUEST_TIMEOUT_MS
+          : config.model === "deepseek-v4.1-flash"
+            ? config.arkRequestTimeoutMs ?? DEFAULT_ARK_REQUEST_TIMEOUT_MS
+            : config.model === "qwen3.8-flash" ? 240_000 : DEFAULT_GLM_REQUEST_TIMEOUT_MS,
+      ...(config.runTimeoutMs === undefined ? {} : { runTimeoutMs: config.runTimeoutMs }),
       providerRecovery,
       providerRecoveryRunWindowMs,
       ...(actionPolicy === undefined ? {} : { actionPolicy }),

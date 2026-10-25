@@ -71,7 +71,7 @@ interface FixtureOptions {
   readonly companion?: boolean;
   readonly initialTarget?: CuaWindowTarget;
   readonly allowedTargets?: readonly CuaWindowTarget[];
-  readonly initialGrounding?: "hybrid-catalog-v1";
+  readonly initialGrounding?: "uia-catalog-v1" | "hybrid-catalog-v1";
   readonly managedBrowserUrl?: string;
   readonly profileMode?: "ephemeral" | "persistent";
   readonly profileLabel?: string;
@@ -621,6 +621,7 @@ describe("managed browser companion through ApplicationSession and the real tool
       companion: true,
       initialTarget: NATIVE_TARGET,
       allowedTargets: [NATIVE_TARGET],
+      initialGrounding: "hybrid-catalog-v1",
       failDomCapture,
       steps: [
         { kind: "click", callId: "desktop-click", expectedEnabled: true },
@@ -682,7 +683,7 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(outcome, JSON.stringify(failures)).toBe("succeeded");
       expect(handle.config.computer).toMatchObject({
         managedBrowserCompanion: true,
-        grounding: "hybrid-catalog-v1",
+        grounding: "off",
         windowSwitch: "opened-windows-v1",
         windowDeliveryMode: "foreground",
       });
@@ -713,6 +714,8 @@ describe("managed browser companion through ApplicationSession and the real tool
       ]);
       expect(fixture.metrics.domTargets).toEqual([]);
       expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_window_state")).toBe(false);
+      expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "list_windows")).toHaveLength(fixture.metrics.provider.listedWindows.length * 2);
+      expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "verifyState")).toHaveLength(0);
       const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
       expect(observations.length).toBeGreaterThan(0);
       expect(observations.every((event) => event.observation.surfaceRef.kind === "desktop")).toBe(true);
@@ -729,6 +732,7 @@ describe("managed browser companion through ApplicationSession and the real tool
       companion: true,
       failDomCapture,
       initialTarget: NATIVE_TARGET,
+      initialGrounding: "hybrid-catalog-v1",
       allowedTargets: [NATIVE_TARGET, NATIVE_TARGET],
       managedBrowserUrl: "https://fixture.example/path?private=query",
       profileMode: "persistent",
@@ -820,7 +824,7 @@ describe("managed browser companion through ApplicationSession and the real tool
       const report = await handle.report();
       expect(outcome).toBe("succeeded");
       expect(fixture.metrics.delegateOptions[0]).not.toHaveProperty("windowTarget");
-      expect(fixture.metrics.delegateOptions[0]).toMatchObject({ grounding: "hybrid-catalog-v1", windowSwitch: "opened-windows-v1" });
+      expect(fixture.metrics.delegateOptions[0]).toMatchObject({ grounding: "off", windowSwitch: "opened-windows-v1" });
       expect(fixture.metrics.hostOptions[0]).toMatchObject({ profileMode: "ephemeral" });
       expect(fixture.metrics.hostOptions[0]).not.toHaveProperty("persistentProfileRoot");
       expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "get_desktop_state")).toBe(true);
@@ -838,6 +842,128 @@ describe("managed browser companion through ApplicationSession and the real tool
       expect(observations.every((event) => event.observation.surfaceRef.kind === "desktop")).toBe(true);
       expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
       await fixture.session.close();
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the persistent browser companion and cross-window tools in visual mode without grounding collection", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-visual-only-"));
+    const fixture = await createFixture(outputDir, {
+      companion: true,
+      managedBrowserUrl: "https://fixture.example/entry",
+      profileMode: "persistent",
+      profileLabel: "fixture.profile",
+      profileRoot: "C:\\HarnessOwned\\managed-profiles",
+      steps: [{ kind: "finish" }],
+    });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
+      const report = await handle.report();
+      expect(outcome).toBe("succeeded");
+      expect(handle.config.grounding).toBe("off");
+      expect(handle.config.computer).toMatchObject({
+        managedBrowserCompanion: true,
+        managedBrowserUrl: "https://fixture.example/entry",
+        managedBrowserProfileMode: "persistent",
+        managedBrowserProfileLabel: "fixture.profile",
+        managedBrowserProfileRoot: "C:\\HarnessOwned\\managed-profiles",
+        windowSwitch: "opened-windows-v1",
+      });
+      expect(handle.controller.getEffectiveToolNames()).toEqual(expect.arrayContaining(["list_windows", "switch_window"]));
+      expect(fixture.metrics.hostOptions[0]).toMatchObject({
+        url: "https://fixture.example/entry",
+        profileMode: "persistent",
+        profileLabel: "fixture.profile",
+        persistentProfileRoot: "C:\\HarnessOwned\\managed-profiles",
+      });
+      expect(fixture.metrics.host.starts).toBe(1);
+      expect(fixture.metrics.host.transports).toBe(0);
+      expect(fixture.metrics.delegateOptions[0]).toMatchObject({
+        grounding: "off",
+        windowSwitch: "opened-windows-v1",
+        browserTarget: { windowTarget: BROWSER_TARGET },
+      });
+      expect(fixture.metrics.delegateOptions[0]).not.toHaveProperty("domGroundingTransport");
+      expect(fixture.metrics.delegateOptions[0]).not.toHaveProperty("desktopGroundingRelationshipProbe");
+      expect(fixture.metrics.delegateDriver.calls.filter((call) => call.name === "get_desktop_state")).toHaveLength(1);
+      expect(fixture.metrics.delegateDriver.calls.some((call) => call.name === "list_windows" || call.name === "verifyState" || call.name === "get_window_state")).toBe(false);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      const observations = handle.controller.getEvents().filter((event) => event.type === "observation.created");
+      expect(observations).toHaveLength(1);
+      expect(observations[0]?.observation.surfaceRef.kind).toBe("desktop");
+      expect(report.summary.grounding).toBe("off");
+      expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
+    } finally {
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["off", undefined, "off"],
+    ["UIA-only", "uia-catalog-v1", "uia-catalog-v1"],
+  ] as const)("keeps ordinary visual click, type, and Ctrl+L URL typing available after switching to the managed browser with grounding %s", async (_mode, initialGrounding, expectedGrounding) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-companion-native-to-browser-visual-input-"));
+    const fixture = await createFixture(outputDir, {
+      companion: true,
+      initialTarget: NATIVE_TARGET,
+      allowedTargets: [NATIVE_TARGET, BROWSER_TARGET],
+      ...(initialGrounding === undefined ? {} : { initialGrounding }),
+      managedBrowserUrl: "https://fixture.example/visual-only",
+      steps: [
+        { kind: "list", callId: "visual-switch-list" },
+        { kind: "switch", callId: "visual-switch-to-browser", listCallId: "visual-switch-list", targetTitle: "Managed Edge" },
+        { kind: "click", callId: "visual-browser-click", expectedEnabled: true },
+        { kind: "action", callId: "visual-browser-type", name: "type", arguments: { text: "visual input" } },
+        { kind: "action", callId: "visual-browser-address-shortcut", name: "hotkey", arguments: { keys: ["CTRL", "L"] } },
+        { kind: "action", callId: "visual-browser-address-type", name: "type", arguments: { text: "https://example.test/" } },
+        { kind: "finish" },
+      ],
+    });
+    try {
+      const { handle, outcome } = await runFixture(fixture.session, "opened-windows-v1");
+      const report = await handle.report();
+      const events = handle.controller.getEvents();
+      expect(outcome).toBe("succeeded");
+      expect(fixture.metrics.delegateOptions[0]).toMatchObject({
+        windowTarget: NATIVE_TARGET,
+        browserTarget: { windowTarget: BROWSER_TARGET },
+        grounding: expectedGrounding,
+        windowSwitch: "opened-windows-v1",
+      });
+      expect(fixture.metrics.host.transports).toBe(0);
+      expect(fixture.metrics.domTargets).toEqual([]);
+      expect(fixture.metrics.delegateCalls.filter((call) => call.name === "click")).toMatchObject([
+        { input: { target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId }, x: 20, y: 20 } },
+      ]);
+
+      const typeProposal = events.find((event) => event.type === "action.proposed" && event.callId === "visual-browser-type");
+      const typeTerminal = events.find((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") &&
+        typeProposal?.type === "action.proposed" && event.receipt.actionId === typeProposal.action.actionId);
+      expect(typeTerminal).toMatchObject({ type: "action.execution.completed", receipt: { status: "completed" } });
+      const addressTypeProposal = events.find((event) => event.type === "action.proposed" && event.callId === "visual-browser-address-type");
+      const addressTypeTerminal = events.find((event) => (event.type === "action.execution.completed" || event.type === "action.execution.failed") &&
+        addressTypeProposal?.type === "action.proposed" && event.receipt.actionId === addressTypeProposal.action.actionId);
+      expect(addressTypeTerminal).toMatchObject({ type: "action.execution.completed", receipt: { status: "completed" } });
+      expect(fixture.metrics.delegateCalls.filter((call) => call.name === "type_text")).toMatchObject([
+        { input: { target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId }, text: "visual input" } },
+        { input: { target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId }, text: "https://example.test/" } },
+      ]);
+      const addressShortcuts = fixture.metrics.delegateCalls.filter((call) => call.name === "press_key" || call.name === "hotkey");
+      expect(addressShortcuts).toHaveLength(1);
+      const addressShortcut = addressShortcuts[0];
+      expect(addressShortcut?.input).toMatchObject({
+        target: { kind: "window", pid: BROWSER_TARGET.pid, window_id: BROWSER_TARGET.windowId },
+        delivery_mode: "foreground",
+      });
+      if (addressShortcut?.name === "press_key") {
+        expect(addressShortcut.input).toMatchObject({ key: "L", modifiers: ["ctrl"] });
+      } else {
+        expect(addressShortcut?.input).toMatchObject({ keys: ["CTRL", "L"] });
+      }
+      expect(report.summary.grounding).toBe(expectedGrounding);
     } finally {
       await fixture.session.close();
       await rm(outputDir, { recursive: true, force: true });

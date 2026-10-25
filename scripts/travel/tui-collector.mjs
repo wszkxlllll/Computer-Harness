@@ -396,6 +396,7 @@ export async function collectRun(runDirectory, { root = TRAVEL_RUN_ROOT, session
     summary,
     events,
     trajectory: artifacts.trajectory,
+    providerExchanges: artifacts.providerExchanges,
     errors: artifacts.errors,
   });
   const runId = metrics.runId;

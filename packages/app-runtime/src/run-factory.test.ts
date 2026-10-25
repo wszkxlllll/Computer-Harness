@@ -162,7 +162,9 @@ describe("app-runtime RunHandle", () => {
   it("rejects missing main or active layered risk credentials before Run allocation", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-provider-preflight-"));
     const mainOutput = join(root, "main-run");
+    const deepseekMainOutput = join(root, "deepseek-main-run");
     const riskOutput = join(root, "risk-run");
+    const deepseekRiskOutput = join(root, "deepseek-risk-run");
     const createComputer = vi.fn(() => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })));
     const createEventWriter = vi.fn();
     const createAssetStore = vi.fn();
@@ -174,6 +176,13 @@ describe("app-runtime RunHandle", () => {
       expect(createEventWriter).not.toHaveBeenCalled();
       expect(createAssetStore).not.toHaveBeenCalled();
 
+      await expect(createRun({ ...config(deepseekMainOutput), model: "deepseek-flash" }, { createComputer, createEventWriter, createAssetStore }))
+        .rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      await expect(readdir(deepseekMainOutput)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(createEventWriter).not.toHaveBeenCalled();
+      expect(createAssetStore).not.toHaveBeenCalled();
+
       await expect(createRun({ ...config(riskOutput), riskGuard: "layered", riskModel: "qwen3.8-flash" }, {
         credentials: { glmApiKey: "fixture-main-key" }, createComputer, createEventWriter, createAssetStore,
       })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
@@ -181,6 +190,28 @@ describe("app-runtime RunHandle", () => {
       expect(createComputer).not.toHaveBeenCalled();
       expect(createEventWriter).not.toHaveBeenCalled();
       expect(createAssetStore).not.toHaveBeenCalled();
+
+      await expect(createRun({ ...config(deepseekRiskOutput), riskGuard: "layered", riskModel: "deepseek-flash" }, {
+        credentials: { glmApiKey: "fixture-main-key" }, createComputer, createEventWriter, createAssetStore,
+      })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+      await expect(readdir(deepseekRiskOutput)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(createComputer).not.toHaveBeenCalled();
+      expect(createEventWriter).not.toHaveBeenCalled();
+      expect(createAssetStore).not.toHaveBeenCalled();
+      for (const risk of [false, true]) {
+        const outputDir = join(root, risk ? "ark-risk-run" : "ark-main-run");
+        await expect(createRun({
+          ...config(outputDir),
+          ...(risk ? { riskGuard: "layered" as const, riskModel: "deepseek-v4.1-flash" as const } : { model: "deepseek-v4.1-flash" as const }),
+        }, {
+          credentials: { glmApiKey: "fixture-main-key", deepseekApiKey: "fixture-official-key" },
+          createComputer, createEventWriter, createAssetStore,
+        })).rejects.toMatchObject({ name: "ProviderConfigurationError", code: "PROVIDER_CREDENTIALS_MISSING" });
+        await expect(readdir(outputDir)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(createComputer).not.toHaveBeenCalled();
+        expect(createEventWriter).not.toHaveBeenCalled();
+        expect(createAssetStore).not.toHaveBeenCalled();
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -192,6 +223,8 @@ describe("app-runtime RunHandle", () => {
     try {
       for (const [name, riskGuard, riskModel] of [
         ["guard-off", "off", "qwen3.8-flash"],
+        ["guard-off-deepseek", "off", "deepseek-flash"],
+        ["guard-off-ark", "off", "deepseek-v4.1-flash"],
         ["same-model", "layered", "same"],
       ] as const) {
         const handle = await createRun({ ...config(join(root, name)), riskGuard, riskModel }, {
@@ -214,6 +247,29 @@ describe("app-runtime RunHandle", () => {
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
       expect(createProvider).toHaveBeenCalledOnce();
+      await handle.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves DeepSeek main and active distinct risk credentials to an injected factory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-provider-deepseek-injection-preflight-"));
+    const createProvider = vi.fn(({ model }: { model: ResolvedRunConfig["model"] }) => ({
+      id: String(model),
+      async generate() { return { type: "finish" as const, summary: "unused" }; },
+    }));
+    try {
+      const handle = await createRun({
+        ...config(join(root, "run")),
+        model: "glm-5.3-flash",
+        riskGuard: "layered",
+        riskModel: "deepseek-flash",
+      }, {
+        credentials: {}, createProvider,
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      expect(createProvider.mock.calls.map(([options]) => options.model)).toEqual(["glm-5.3-flash", "deepseek-flash"]);
       await handle.close();
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -516,10 +572,84 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
+  it.each([
+    ["deepseek-flash", "deepseek", "https://api.deepseek.com/chat/completions"],
+    ["deepseek-v4.1-flash", "ark", "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"],
+  ] as const)("runs %s with only its own credential and reports native multimodal usage privately", async (model, channel, endpoint) => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-deepseek-exchange-"));
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as Record<string, unknown>;
+      expect(_url).toBe(endpoint);
+      expect(init.headers).toMatchObject({ Authorization: "Bearer synthetic-provider-secret" });
+      expect(body).toMatchObject({ model, thinking: { type: "disabled" }, max_tokens: 4096 });
+      return { ok: true, status: 200, json: async () => ({
+        model,
+        choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{
+          id: "deepseek-terminate", type: "function",
+          function: { name: "terminate", arguments: JSON.stringify({ status: "failure", text: "The requested result could not be verified." }) },
+        }] } }],
+        usage: channel === "ark"
+          ? { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_tokens_details: { cached_tokens: 15 } }
+          : { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, prompt_cache_hit_tokens: 15, prompt_cache_miss_tokens: 5 },
+      }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const handle = await createRun({ ...config(outputDir), model }, {
+        credentials: channel === "ark" ? { arkApiKey: "synthetic-provider-secret" } : { deepseekApiKey: "synthetic-provider-secret" },
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+      });
+      await expect(handle.start()).resolves.toBe("failed");
+      const report = await handle.report();
+      expect(report.summary).toMatchObject({
+        model, thinkingMode: "disabled", outputMode: "native_tools", coordinateMode: "actual_pixels",
+        glmThinking: null, glmMaxOutputTokens: null,
+        ...(channel === "ark" ? { arkMaxOutputTokens: 4096, arkRequestTimeoutMs: 90000 } : { deepseekMaxOutputTokens: 4096, deepseekRequestTimeoutMs: 90000 }),
+        modelReportedStatus: "failure", modelSummary: "The requested result could not be verified.",
+      });
+      const completed = report.events.find((event) => event.type === "model.response.received");
+      expect(completed).toMatchObject({ turn: { usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30, cacheReadTokens: 15 } } });
+      const record = JSON.parse((await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+      expect(record).toMatchObject({
+        provider: channel, requestedModel: model,
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", deadlineMs: 90000, requestConfiguration: { thinking: "disabled", maxTokens: 4096, imageCount: 1 } },
+          { stage: "headers_received" }, { stage: "body_received", outcome: "success" },
+        ] },
+        response: { usage: channel === "ark" ? { cachedReadTokens: 15 } : { cachedReadTokens: 15, cacheMissTokens: 5 } },
+      });
+      if (channel === "ark") expect((record.response as Record<string, unknown>).usage).not.toHaveProperty("cacheMissTokens");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(record)).not.toContain("synthetic-provider-secret");
+      expect(JSON.stringify(record)).not.toContain("The requested result could not be verified.");
+      expect(JSON.stringify(report.summary)).not.toContain("synthetic-provider-secret");
+      await handle.close();
+    } finally {
+      vi.unstubAllGlobals();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unknown model selections before acquiring Run resources", async () => {
+    const createComputer = vi.fn();
+    await expect(createRun({ ...config("unused"), model: "unknown" as ResolvedRunConfig["model"] }, { createComputer })).rejects.toThrow(/unsupported Provider model/u);
+    expect(createComputer).not.toHaveBeenCalled();
+  });
+
   it("uses one explicit GLM timeout for Fetch evidence and Runtime retry reserve", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-runtime-glm-explicit-timeout-"));
     const runId = "runtime-glm-explicit-timeout" as RunId;
-    const fetchMock = vi.fn(async () => { throw new Error("synthetic network failure"); });
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("synthetic network failure");
+      return { ok: true, status: 200, json: async () => ({
+        choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: [{
+          id: "recovered-terminate", type: "function",
+          function: { name: "terminate", arguments: JSON.stringify({ status: "success", text: "The fixture recovered within its configured HTTP budget." }) },
+        }] } }],
+      }) };
+    });
     vi.stubGlobal("fetch", fetchMock);
     try {
       const handle = await createRun({
@@ -531,16 +661,32 @@ describe("app-runtime RunHandle", () => {
         credentials: { glmApiKey: "synthetic-secret-token" },
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
-      await expect(handle.start()).resolves.toBe("failed");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const events = (await handle.report()).events;
+      const started = events.filter((event) => event.type === "model.request.started");
+      expect(started).toHaveLength(2);
+      expect(started.map((event) => event.attempt)).toEqual([1, 2]);
+      expect(started[0]?.decisionId).toBe(started[1]?.decisionId);
+      expect(events.filter((event) => event.type === "model.response.received" && event.turn.type === "finish")).toHaveLength(1);
+      expect(events.some((event) => event.type === "action.execution.started")).toBe(false);
       const records = (await readFile(join(outputDir, "provider-exchanges.jsonl"), "utf8")).trim().split(/\r?\n/u).map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(records).toHaveLength(1);
+      expect(records).toHaveLength(2);
       expect(records[0]).toMatchObject({
         runId,
         correlation: "complete",
         httpEvidence: { source: "fetch", stages: [
           { stage: "fetch_invoked", deadlineMs: 120_000, serializedBodyBytes: expect.any(Number) },
           { stage: "fetch_failed", outcome: "network_error", phase: "awaiting_headers" },
+        ] },
+      });
+      expect(records[1]).toMatchObject({
+        runId,
+        correlation: "complete",
+        httpEvidence: { source: "fetch", stages: [
+          { stage: "fetch_invoked", deadlineMs: 120_000 },
+          { stage: "headers_received" },
+          { stage: "body_received", outcome: "success" },
         ] },
       });
       await handle.close();
@@ -550,26 +696,39 @@ describe("app-runtime RunHandle", () => {
     }
   });
 
-  it.each(["glm-5.3-flash", "qwen3.8-flash"] as const)("does not apply the default GLM retry reserve to injected %s providers", async (model) => {
+  it.each(["glm-5.3-flash", "qwen3.8-flash", "deepseek-flash", "deepseek-v4.1-flash"] as const)("recovers a 38.271-second protocol rejection with the configured injected %s HTTP budget", async (model) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-injected-provider-timeout-"));
     let calls = 0;
+    const realNow = Date.now.bind(Date);
+    let elapsedMs = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => realNow() + elapsedMs);
     const injectedProvider: ProviderAdapter = {
       id: `injected-${model}`,
       async generate() {
         calls += 1;
-        if (calls === 1) throw Object.assign(new Error("synthetic retryable provider error"), { retryable: true, retryMode: "same_input" });
+        if (calls === 1) {
+          elapsedMs += 38_271;
+          throw Object.assign(new Error("synthetic complete protocol rejection"), { retryable: true, retryMode: "feedback" });
+        }
         return { type: "finish", summary: "The injected fixture completed successfully." };
       },
     };
     try {
-      const handle = await createRun({ ...config(outputDir), model, glmRequestTimeoutMs: 120_000, maxModelRequests: 3 }, {
+      const handle = await createRun({ ...config(outputDir), model, glmRequestTimeoutMs: 180_000, deepseekRequestTimeoutMs: 180_000, arkRequestTimeoutMs: 180_000, maxModelRequests: 3 }, {
         createProvider: () => injectedProvider,
         createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
       });
       await expect(handle.start()).resolves.toBe("succeeded");
       expect(calls).toBe(2);
+      const events = (await handle.report()).events;
+      const started = events.filter((event) => event.type === "model.request.started");
+      expect(started.map((event) => event.attempt)).toEqual([1, 2]);
+      expect(started[0]?.decisionId).toBe(started[1]?.decisionId);
+      expect(events.filter((event) => event.type === "model.response.received" && event.turn.type === "finish")).toHaveLength(1);
+      expect(events.some((event) => event.type === "action.execution.started")).toBe(false);
       await handle.close();
     } finally {
+      now.mockRestore();
       await rm(outputDir, { recursive: true, force: true });
     }
   });
@@ -1655,7 +1814,7 @@ describe("app-runtime RunHandle", () => {
         },
       });
 
-      expect(handle.config.grounding).toBe("hybrid-catalog-v1");
+      expect(handle.config.grounding).toBe("off");
       expect(handle.config.computer).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
       expect(computerConfig).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank", managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles" });
       expect(providerConfig?.computer).not.toHaveProperty("managedBrowserCompanion");
@@ -1667,6 +1826,39 @@ describe("app-runtime RunHandle", () => {
       expect(report.summary.computerTarget).toMatchObject({ mode: "desktop" });
       expect(JSON.stringify(report.summary)).not.toContain("managedBrowserCompanion");
       expect(JSON.stringify(report.summary)).not.toContain("HarnessOwned");
+      await handle.close();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps explicit grounding opt-in independent from managed-browser companion lifecycle", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-app-runtime-browser-companion-grounding-on-"));
+    let computerConfig: ResolvedRunConfig["computer"] | undefined;
+    try {
+      const handle = await createRun({
+        ...config(outputDir),
+        grounding: "hybrid-catalog-v1",
+        windowSwitch: "opened-windows-v1",
+        computer: {
+          kind: "cua",
+          socketPath: "fixture.sock",
+          screenshotDir: "screenshots",
+          managedBrowserCompanion: true,
+        },
+      }, {
+        createProvider: () => ({ id: "fixture-provider", async generate() { return { type: "finish", summary: "explicit hybrid" }; } }),
+        createComputer: (options) => {
+          computerConfig = options.config;
+          const calls = { open: 0, observe: 0, close: 0 };
+          return Promise.resolve({ ...fakeComputer(calls), async listWindows() { return []; } });
+        },
+      });
+
+      expect(handle.config.grounding).toBe("hybrid-catalog-v1");
+      expect(handle.config.computer).toMatchObject({ managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
+      await expect(handle.start()).resolves.toBe("succeeded");
+      expect(computerConfig).toMatchObject({ grounding: "hybrid-catalog-v1", managedBrowserCompanion: true, managedBrowserUrl: "about:blank" });
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });

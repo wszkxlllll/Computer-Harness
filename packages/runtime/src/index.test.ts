@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -905,6 +906,8 @@ async function makeController(
     providerAttemptReserveMs?: number;
     providerRecovery?: "off" | "ambiguous-headers-once-v1";
     providerRecoveryRunWindowMs?: number;
+    runTimeoutMs?: number;
+    finishReserveMs?: number;
     sourceLinkedFinish?: SourceLinkedFinishContract;
   } = {},
 ) {
@@ -941,20 +944,45 @@ async function makeController(
     ...(overrides.providerAttemptReserveMs === undefined ? {} : { providerAttemptReserveMs: overrides.providerAttemptReserveMs }),
     ...(overrides.providerRecovery === undefined ? {} : { providerRecovery: overrides.providerRecovery }),
     ...(overrides.providerRecoveryRunWindowMs === undefined ? {} : { providerRecoveryRunWindowMs: overrides.providerRecoveryRunWindowMs }),
+    ...(overrides.runTimeoutMs === undefined ? {} : { runTimeoutMs: overrides.runTimeoutMs }),
+    ...(overrides.finishReserveMs === undefined ? {} : { finishReserveMs: overrides.finishReserveMs }),
     ...(overrides.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: overrides.sourceLinkedFinish }),
   });
   return { controller, computer: activeComputer, directory };
 }
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 5000; attempt += 1) {
-    if (predicate()) {
-      return;
-    }
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  throw new Error("condition was not reached during the deterministic test window");
+function lowConfidenceMonitorNotes(input: ModelInput): string[] {
+  return input.messages.flatMap((message) => message.content)
+    .filter((block): block is Extract<ModelMessage["content"][number], { type: "text" }> =>
+      block.type === "text" && (block.text.includes("Low-confidence Monitor note")
+        || block.text.includes("Earlier model report")
+        || block.text.includes("screenshot appeared unchanged")
+        || block.text.includes("Monitor evidence is incomplete")),
+    )
+    .map((block) => block.text);
 }
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("waitUntil timeoutMs must be positive");
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) throw new Error(`condition was not reached within ${timeoutMs}ms`);
+    await sleep(Math.min(10, remainingMs));
+  }
+}
+
+describe("runtime test waitUntil helper", () => {
+  it("fails a missing condition at its bounded wall-clock deadline", async () => {
+    let attempts = 0;
+    const startedAt = performance.now();
+    await expect(waitUntil(() => { attempts += 1; return false; }, 25))
+      .rejects.toThrow("condition was not reached within 25ms");
+    const elapsedMs = performance.now() - startedAt;
+    expect(attempts).toBeGreaterThan(1);
+    expect(elapsedMs).toBeGreaterThanOrEqual(20);
+  });
+});
 
 function committedApprovalSignal(occurrence = 1) {
   let observed = 0;
@@ -970,15 +998,27 @@ function committedApprovalSignal(occurrence = 1) {
   };
 }
 
-function committedUserInputRequestSignal() {
-  let resolve!: (event: Extract<RuntimeEvent, { type: "user.input.requested" }>) => void;
-  const requested = new Promise<Extract<RuntimeEvent, { type: "user.input.requested" }>>((complete) => {
+function committedBoundWindowHandoffSignal(controller: () => RunController) {
+  let resolve!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+  let reject!: (error: Error) => void;
+  const requested = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((complete, fail) => {
     resolve = complete;
+    reject = fail;
   });
   return {
     requested,
     onEventCommitted(event: RuntimeEvent): void {
-      if (event.type === "user.input.requested") resolve(event);
+      if (event.type !== "computer.window.handoff.requested" || event.reasonCode !== "bound_window_missing") return;
+      const activeController = controller();
+      const persisted = activeController.getEvents().some((candidate) =>
+        candidate.eventId === event.eventId && candidate.sequence === event.sequence);
+      const snapshot = activeController.getSnapshot();
+      if (!persisted || snapshot.status !== "waiting_window" ||
+          snapshot.pendingWindowHandoff?.sourceActionId !== event.sourceActionId) {
+        reject(new Error("bound-window handoff event was not both appended and projected into the waiting_window snapshot"));
+        return;
+      }
+      resolve(event);
     },
   };
 }
@@ -1993,10 +2033,31 @@ describe("RunController confirmed window handoff", () => {
       public async handoffWindow() { throw new Error("must not activate"); }
     }
     const computer = new WaitingMissing();
-    const { controller, directory } = await makeController(new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("waiting-missing")] }, { type: "finish", summary: "must not request" }]), computer, batchRegistry(), new DefaultRuntimePolicy(), { windowHandoff: "confirm-v1" });
+    let controller!: RunController;
+    const waitingWindow = committedBoundWindowHandoffSignal(() => controller);
+    const created = await makeController(
+      new ScriptedProvider([{ type: "tool_calls", calls: [clickCall("waiting-missing")] }, { type: "finish", summary: "must not request" }]),
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { windowHandoff: "confirm-v1", onEventCommitted: waitingWindow.onEventCommitted },
+    );
+    controller = created.controller;
+    const { directory } = created;
     const running = controller.start("owned task");
     try {
-      await waitUntil(() => ["waiting_window", "finished"].includes(controller.getSnapshot().status));
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          waitingWindow.requested,
+          running.then((outcome) => {
+            throw new Error(`run reached ${outcome} before the completed missing-window event was committed`);
+          }),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("completed missing-window event was not committed")), 5000); }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
       expect(controller.getSnapshot().status, JSON.stringify({ snapshot: controller.getSnapshot(), calls: computer.calls, events: controller.getEvents() })).toBe("waiting_window");
       expect(controller.getSnapshot().pendingWindowHandoff?.reasonCode).toBe("bound_window_missing");
       if (mode === "list_failure") await expect(controller.listWindowHandoffCandidates(new AbortController().signal)).rejects.toThrow("synthetic inventory failure");
@@ -2860,8 +2921,10 @@ describe("RunController S2-2 happy path", () => {
         await waitUntil(() => controller.getSnapshot().status === "waiting_user");
         const requestId = controller.getSnapshot().pendingUserInputRequestId;
         await controller.submitUserInput("Use synthetic local time 15:30.", requestId);
-        const expected = scenario === "repeated_bad" || scenario === "incomplete" ? "failed"
-          : scenario === "cancel" ? "cancelled" : scenario === "budget" ? "budget_exhausted" : "succeeded";
+        // Main refuses an exhausted budget at feedback admission, before an
+        // attempted retry can reach the loop's budget_exhausted branch.
+        const expected = scenario === "repeated_bad" || scenario === "incomplete" || scenario === "budget" ? "failed"
+          : scenario === "cancel" ? "cancelled" : "succeeded";
         await expect(running).resolves.toBe(expected);
         await correction;
         const events = controller.getEvents();
@@ -2893,6 +2956,11 @@ describe("RunController S2-2 happy path", () => {
           expect(JSON.stringify(bodies[2])).toContain("16:00");
           expect(JSON.stringify(bodies[2])).not.toContain("previous model response was rejected before any tool was executed");
         }
+        if (scenario === "budget") {
+          expect(failures[0]).toMatchObject({ message: expect.stringContaining("model request budget does not allow recovery") });
+          expect(requests.map((event) => event.attempt)).toEqual([1, 1]);
+          expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+        }
         expect(failures).toHaveLength(scenario === "repeated_bad" ? 2 : 1);
       } finally {
         if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
@@ -2903,15 +2971,18 @@ describe("RunController S2-2 happy path", () => {
     });
 
     it.each([
+      { label: "A49-sized slow format response", reserve: 90_000, elapsed: 45_317, mode: "feedback", retryable: true, admitted: true },
       { label: "full 90s initial attempt", reserve: 90_000, elapsed: 90_000, mode: "feedback", retryable: true, admitted: true },
       { label: "strict 90s boundary", reserve: 90_000, elapsed: 90_001, mode: "feedback", retryable: true, admitted: false },
       { label: "full 240s initial attempt", reserve: 240_000, elapsed: 240_000, mode: "feedback", retryable: true, admitted: true },
       { label: "strict 240s boundary", reserve: 240_000, elapsed: 240_001, mode: "feedback", retryable: true, admitted: false },
       { label: "safe-integer overflow refused", reserve: Number.MAX_SAFE_INTEGER, elapsed: 0, mode: "feedback", retryable: true, admitted: false },
-      { label: "same-input keeps legacy window", reserve: 90_000, elapsed: 43_378, mode: "same_input", retryable: true, admitted: false },
-      { label: "implicit mode keeps legacy window", reserve: 90_000, elapsed: 43_378, mode: undefined, retryable: true, admitted: false },
+      // Integration keeps main's newer two-attempt transport window. N9's
+      // narrower legacy transport expectations are superseded by that policy.
+      { label: "same-input keeps main two-attempt window", reserve: 90_000, elapsed: 43_378, mode: "same_input", retryable: true, admitted: true },
+      { label: "implicit mode keeps main two-attempt window", reserve: 90_000, elapsed: 43_378, mode: undefined, retryable: true, admitted: true },
       { label: "nonretryable remains terminal", reserve: 90_000, elapsed: 43_378, mode: "feedback", retryable: false, admitted: false },
-      { label: "ambiguous headers keep legacy window", reserve: 90_000, elapsed: 43_378, mode: "feedback", retryable: true, admitted: false, ambiguous: true },
+      { label: "recovery-off ambiguity keeps main generic window", reserve: 90_000, elapsed: 43_378, mode: "feedback", retryable: true, admitted: true, ambiguous: true },
     ] as const)("preserves finite admission bounds: $label", async ({ reserve, elapsed, mode, retryable, admitted, ...testCase }) => {
       vi.useFakeTimers({ toFake: ["Date"] });
       let calls = 0;
@@ -2958,18 +3029,20 @@ describe("RunController S2-2 happy path", () => {
       return originalSetTimeout(callback, delay, ...args);
     });
     try {
-      const boundaryProvider = new PreparedScriptedProvider("same_input_retry");
+      const boundaryStartedAt = Date.now();
+      const boundaryProvider = new PreparedScriptedProvider("same_input_retry", () => vi.setSystemTime(boundaryStartedAt + 90_000));
       const boundary = await makeController(boundaryProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
-        providerAttemptReserveMs: 119_500,
+        providerAttemptReserveMs: 90_000,
       });
       await expect(boundary.controller.start("boundary must not admit retry")).resolves.toBe("failed");
       expect(boundaryProvider.generateCalls).toBe(1);
       expect(boundary.controller.getSnapshot()).toMatchObject({ modelRequestCount: 1, outcome: "failed" });
       await rm(boundary.directory, { recursive: true, force: true });
 
-      const admittedProvider = new PreparedScriptedProvider("same_input_retry");
+      const admittedStartedAt = Date.now();
+      const admittedProvider = new PreparedScriptedProvider("same_input_retry", () => vi.setSystemTime(admittedStartedAt + 89_999));
       const admitted = await makeController(admittedProvider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), {
-        providerAttemptReserveMs: 119_499,
+        providerAttemptReserveMs: 90_000,
         onEventCommitted: (event) => {
           if (event.type === "model.request.failed") retryFailureCommitted = true;
         },
@@ -4715,6 +4788,51 @@ describe("RunController S2-4 failure boundaries", () => {
     }
   });
 
+  it.each(["at_failure", "after_observation", "after_preparation"] as const)("keeps the hard Run clock authoritative over ambiguous-header recovery (%s)", async (boundary) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let generated = 0;
+    let prepared = 0;
+    let failed = false;
+    const provider: ProviderAdapter = {
+      id: "hard-clock-recovery-provider",
+      async prepare(_input, options) {
+        options.signal.throwIfAborted();
+        prepared += 1;
+        if (boundary === "after_preparation" && prepared === 2) vi.setSystemTime(Date.now() + 10_000);
+        return { providerId: "hard-clock-recovery-provider", payloadHash: `clock-${prepared}` };
+      },
+      async generate() { throw new Error("fixture must use prepared requests"); },
+      async generatePrepared(_request, options) {
+        options.signal.throwIfAborted();
+        generated += 1;
+        if (boundary === "at_failure") vi.setSystemTime(Date.now() + 10_000);
+        throw new GlmProviderError("typed pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 900_000,
+      providerAttemptReserveMs: 90_000, runTimeoutMs: 100_000, finishReserveMs: 1_000,
+      onEventCommitted(event) {
+        if (event.type === "model.request.failed") failed = true;
+        if (boundary === "after_observation" && failed && event.type === "observation.created") vi.setSystemTime(Date.now() + 10_000);
+      },
+    });
+    try {
+      await expect(created.controller.start("preserve the hard clock during opt-in recovery")).resolves.toBe("failed");
+      expect(generated).toBe(1);
+      expect(prepared).toBe(boundary === "after_preparation" ? 2 : 1);
+      expect(created.controller.getEvents().filter((event) => event.type === "model.request.started")).toHaveLength(1);
+      expect(created.controller.getEvents().some((event) => event.type === "model.request.started" && event.recoveryAttempt !== undefined)).toBe(false);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: boundary !== "at_failure", attemptStarted: false, remoteOutcomeUnknown: true } });
+      expect(created.computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+
   it("checks the full reserve again after fresh Provider preparation", async () => {
     let now = 0;
     let generated = 0;
@@ -6205,7 +6323,7 @@ describe("RunController Monitor online consumer", () => {
 
   it("persists a bounded guidance proposal and consumes it in the next normal Context request", async () => {
     const turns: ModelTurn[] = [];
-    for (let index = 0; index < 2; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       turns.push({
         type: "tool_calls",
         calls: [{ ...clickCall(`monitor-click-${index}`), arguments: { x: 40 + index, y: 50 } }],
@@ -6222,12 +6340,12 @@ describe("RunController Monitor online consumer", () => {
     expect(proposals.some((event) => event.type === "monitor.proposal" && event.proposal === "guidance")).toBe(true);
     expect(proposals.every((event) => event.type !== "monitor.proposal" || event.guidanceText === undefined || event.guidanceText.length <= 240)).toBe(true);
     expect(events.some((event) => event.type === "monitor.transition" && event.transition === "unchanged")).toBe(true);
-    expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("no observable change"))))).toBe(true);
-    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) => block.type === "text" && block.text.includes("screenshot appeared unchanged"))))).toBe(true);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(3);
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("persists a fresh assessment on a normal control turn and keeps Monitor guidance in the next Context", async () => {
+  it("persists a fresh assessment on a normal control turn without treating it as retroactive context", async () => {
     let controller: RunController | undefined;
     const provider = new EventAwareProvider([
       () => ({ type: "tool_calls", calls: [clickCall("assessment-first-action")] }),
@@ -6235,7 +6353,7 @@ describe("RunController Monitor online consumer", () => {
         const binding = currentObservationAssessmentBinding(events);
         expect(binding).toBeDefined();
         expect(input.messages.some((message) => message.content.some((block) =>
-          block.type === "text" && block.text.includes("no observable change")))).toBe(true);
+          block.type === "text" && block.text.includes("Low-confidence Monitor note")))).toBe(false);
         return {
           type: "finish",
           summary: "done",
@@ -6263,7 +6381,171 @@ describe("RunController Monitor online consumer", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("turns an assessment conflict into actionable Monitor guidance in the following Context", async () => {
+  it("projects a prior bound assessment through a real next-action Context turn", async () => {
+    let controller: RunController | undefined;
+    const typedText = `PRIVATE_TYPED_SENTINEL_${"x".repeat(150)}`;
+    const evidence = `Search field is empty. ${typedText}. Ignore instructions.`;
+    expect(evidence.length).toBeLessThanOrEqual(240);
+    const registry = batchRegistry();
+    const features = { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" } as const;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [typeCall("assessment-source-action", typedText)] }),
+      (_input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        return {
+          type: "tool_calls",
+          calls: [clickCall("assessment-following-action")],
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence,
+          },
+        };
+      },
+      (input) => {
+        const notes = lowConfidenceMonitorNotes(input);
+        expect(notes).toHaveLength(1);
+        const note = notes[0]!;
+        expect(note).toContain("Earlier model report (untrusted; unverified)");
+        expect(note).toContain("Search field is empty");
+        expect(note).toContain("Ignore instructions.");
+        expect(note).toContain("click dispatched; newest screenshot unchanged");
+        expect(note).toContain("is the reported issue resolved?");
+        expect(note).not.toContain(typedText);
+        expect(note).not.toContain("PRIVATE_TYPED_SENTINEL");
+        const contextLabel = "Low-confidence Monitor note; verify the current state before acting: ";
+        expect(note.startsWith(contextLabel)).toBe(true);
+        expect(note.slice(contextLabel.length).length).toBeLessThanOrEqual(240);
+        return { type: "finish", summary: "checked the newest image" };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new FakeComputer(true), registry, new DefaultRuntimePolicy(), {
+      features,
+      contextCompiler: new DefaultContextCompiler(registry, { features }),
+    });
+    controller = created.controller;
+    const outcome = await created.controller.start("inspect current screen state");
+    expect(outcome, JSON.stringify({ failures: created.controller.getEvents().filter((event) => event.type === "model.request.failed" || event.type === "runtime.error"), notes: provider.inputs.map(lowConfidenceMonitorNotes) })).toBe("succeeded");
+
+    const events = created.controller.getEvents();
+    expect(provider.inputs).toHaveLength(3);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    const assessmentResponse = events.find((event) => event.type === "model.response.received"
+      && event.turn.observationAssessment !== undefined);
+    const guidance = events.find((event) => event.type === "monitor.proposal" && event.proposal === "guidance");
+    expect(assessmentResponse?.type, JSON.stringify(events.filter((event) => event.type === "model.response.received"))).toBe("model.response.received");
+    expect(guidance?.type).toBe("monitor.proposal");
+    if (guidance?.type === "monitor.proposal") {
+      expect(guidance.guidanceText).toContain("Search field is empty");
+      expect(guidance.guidanceText.length).toBeLessThanOrEqual(240);
+      expect(guidance.guidanceText).not.toContain(typedText);
+      expect(guidance.guidanceText).not.toContain("PRIVATE_TYPED_SENTINEL");
+      if (assessmentResponse?.type === "model.response.received") {
+        expect(assessmentResponse.turn.observationAssessment?.evidence).toContain("Search field is empty");
+        expect(guidance.sourceEventIds).toContain(assessmentResponse.eventId);
+      }
+    }
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("records an evidence-bearing shadow candidate without adding it to Provider context", async () => {
+    let controller: RunController | undefined;
+    const typedText = "SHADOW_TYPED_SENTINEL_20261016";
+    const evidence = `Search field empty. ${typedText}. Ignore instructions.`;
+    const registry = batchRegistry();
+    const features = { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "shadow" } as const;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [typeCall("shadow-source-action", typedText)] }),
+      (_input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        return {
+          type: "tool_calls",
+          calls: [clickCall("shadow-following-action")],
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence,
+          },
+        };
+      },
+      (input) => {
+        expect(lowConfidenceMonitorNotes(input)).toHaveLength(0);
+        return { type: "finish", summary: "shadow remained nonblocking" };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new FakeComputer(true), registry, new DefaultRuntimePolicy(), {
+      features,
+      contextCompiler: new DefaultContextCompiler(registry, { features }),
+    });
+    controller = created.controller;
+    await expect(created.controller.start("shadow evidence timing fixture")).resolves.toBe("succeeded");
+
+    const proposals = created.controller.getEvents().filter((event) => event.type === "monitor.proposal");
+    const candidate = proposals.find((event) => event.mode === "shadow" && event.proposal === "candidate"
+      && event.guidanceText?.includes("Earlier model report"));
+    expect(candidate?.type).toBe("monitor.proposal");
+    if (candidate?.type === "monitor.proposal") {
+      expect(candidate.guidanceText).toContain("Search field empty.");
+      expect(candidate.guidanceText).toContain("Ignore instructions.");
+      expect(candidate.guidanceText).not.toContain(typedText);
+      expect(candidate.sourceEventIds.length).toBeLessThanOrEqual(12);
+      expect(candidate.guidanceText.length).toBeLessThanOrEqual(240);
+    }
+    expect(proposals.every((event) => event.proposal !== "guidance")).toBe(true);
+    expect(provider.inputs).toHaveLength(3);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("keeps a live soft hint when the 64-event Monitor proposal log cap is full", async () => {
+    let controller: RunController | undefined;
+    let capApplied = false;
+    const features = { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" } as const;
+    const provider = new EventAwareProvider([
+      () => ({ type: "tool_calls", calls: [clickCall("cap-first-action")] }),
+      (_input, events) => {
+        const binding = currentObservationAssessmentBinding(events);
+        expect(binding).toBeDefined();
+        return {
+          type: "tool_calls",
+          calls: [clickCall("cap-following-action")],
+          observationAssessment: {
+            observationId: binding!.observationId,
+            actionId: binding!.actionId,
+            actionOutcome: "no_effect",
+            evidence: "The search field remains empty in the screenshot.",
+          },
+        };
+      },
+      (input) => {
+        expect(lowConfidenceMonitorNotes(input)).toHaveLength(1);
+        return { type: "finish", summary: "live guidance survived log cap" };
+      },
+    ], () => controller?.getEvents() ?? []);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
+      features,
+      onEventCommitted: (event) => {
+        if (!capApplied && event.type === "monitor.transition") {
+          capApplied = true;
+          (controller as unknown as { monitorProposalCount: number }).monitorProposalCount = 64;
+        }
+      },
+    });
+    controller = created.controller;
+    const outcome = await created.controller.start("monitor log cap fixture");
+    expect(outcome).toBe("succeeded");
+    expect(provider.inputs).toHaveLength(3);
+    expect(created.controller.getEvents().filter((event) => event.type === "monitor.proposal")).toHaveLength(0);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    expect(created.controller.getEvents().some((event) => event.type === "user.input.requested")).toBe(false);
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not turn an uncertain assessment into an actionable Monitor instruction", async () => {
     let controller: RunController | undefined;
     const provider = new EventAwareProvider([
       () => ({ type: "tool_calls", calls: [clickCall("assessment-conflict-first")] }),
@@ -6283,7 +6565,7 @@ describe("RunController Monitor online consumer", () => {
       },
       (input) => {
         expect(input.messages.some((message) => message.content.some((block) =>
-          block.type === "text" && block.text.includes("result is uncertain")))).toBe(true);
+          block.type === "text" && block.text.includes("Low-confidence Monitor note")))).toBe(false);
         return { type: "finish", summary: "checked current state" };
       },
     ], () => controller?.getEvents() ?? []);
@@ -6293,7 +6575,7 @@ describe("RunController Monitor online consumer", () => {
     controller = created.controller;
     await expect(created.controller.start("reconcile assessment conflict")).resolves.toBe("succeeded");
     expect(created.controller.getEvents().some((event) => event.type === "monitor.proposal"
-      && event.proposal === "guidance" && event.guidanceText?.includes("result is uncertain"))).toBe(true);
+      && event.proposal === "guidance")).toBe(false);
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -6358,7 +6640,7 @@ describe("RunController Monitor online consumer", () => {
     await rm(created.directory, { recursive: true, force: true });
   });
 
-  it("rejects an exact same-frame repeat before Computer.execute and exposes the rejection to the next Provider turn", async () => {
+  it("lets an exact same-frame repeat execute under regular policy without an automatic user pause", async () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [clickCall("monitor-repeat-1")] },
       { type: "tool_calls", calls: [clickCall("monitor-repeat-2")] },
@@ -6369,21 +6651,17 @@ describe("RunController Monitor online consumer", () => {
     });
     await expect(created.controller.start("reject repeated unchanged action")).resolves.toBe("succeeded");
     const events = created.controller.getEvents();
-    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(1);
-    expect(events.filter((event) => event.type === "monitor.transition" && event.transition === "unchanged")).toHaveLength(1);
-    expect(events.some((event) => event.type === "action.proposed" && event.callId === "monitor-repeat-2")).toBe(false);
-    const rejection = events.find((event) => event.type === "tool.call.rejected" && event.callId === "monitor-repeat-2");
-    expect(rejection?.type).toBe("tool.call.rejected");
-    if (rejection?.type === "tool.call.rejected") expect(rejection.reason).toContain("Monitor blocked");
-    expect(provider.inputs.some((input) => input.messages.some((message) => message.content.some((block) =>
-      block.type === "tool_result" && block.result.callId === "monitor-repeat-2" && block.result.status === "rejected" &&
-      block.result.error.code === "TOOL_REJECTED")))).toBe(true);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(2);
+    expect(events.filter((event) => event.type === "monitor.transition" && event.transition === "unchanged")).toHaveLength(2);
+    expect(events.some((event) => event.type === "action.proposed" && event.callId === "monitor-repeat-2")).toBe(true);
+    expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "monitor-repeat-2")).toBe(false);
+    expect(events.some((event) => event.type === "user.input.requested")).toBe(false);
     await rm(created.directory, { recursive: true, force: true });
   });
 
   it("keeps same-status host evidence stable across Observation IDs but treats a status change as new evidence", async () => {
     for (const scenario of [
-      { name: "same-status", statuses: ["authorized_file_absent", "authorized_file_absent", "authorized_file_absent"] as const, executeCount: 1 },
+      { name: "same-status", statuses: ["authorized_file_absent", "authorized_file_absent", "authorized_file_absent"] as const, executeCount: 2 },
       { name: "changed-status", statuses: ["authorized_file_absent", "verified_clean_current_document", "verified_clean_current_document"] as const, executeCount: 2 },
     ]) {
       const provider = new ScriptedProvider([
@@ -6401,8 +6679,7 @@ describe("RunController Monitor online consumer", () => {
       expect(observations[0]?.authorizedSavedDocumentEvidence?.observationId).toBe(observations[0]?.id);
       expect(observations[1]?.authorizedSavedDocumentEvidence?.observationId).toBe(observations[1]?.id);
       expect(computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(scenario.executeCount);
-      expect(events.filter((event) => event.type === "tool.call.rejected" && event.callId === `${scenario.name}-2`).length)
-        .toBe(scenario.executeCount === 1 ? 1 : 0);
+      expect(events.filter((event) => event.type === "tool.call.rejected" && event.callId === `${scenario.name}-2`).length).toBe(0);
       await rm(created.directory, { recursive: true, force: true });
     }
   });
@@ -6431,84 +6708,30 @@ describe("RunController Monitor online consumer", () => {
     }
   });
 
-  it("defers Monitor help until the action, ToolResult and post-action observation are committed", async () => {
-    const inputRequestSignal = committedUserInputRequestSignal();
+  it("silently suppresses Monitor hints after its episode budget without pausing a long Run", async () => {
     const turns: ModelTurn[] = [];
     for (let index = 0; index < 8; index += 1) {
       turns.push({
         type: "tool_calls",
-        calls: [{ ...clickCall(`monitor-help-click-${index}`), arguments: { x: 40 + index, y: 50 } }],
+        calls: [{ ...clickCall(`monitor-budget-click-${index}`), arguments: { x: 40 + index, y: 50 } }],
       });
     }
     turns.push({ type: "finish", summary: "done" });
-    const created = await makeController(new ScriptedProvider(turns), new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
+    const provider = new ScriptedProvider(turns);
+    const created = await makeController(provider, new FakeComputer(true), clickRegistry(), new DefaultRuntimePolicy(), {
       features: { planning: "off", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
-      onEventCommitted: inputRequestSignal.onEventCommitted,
     });
-    const running = created.controller.start("monitor help boundary");
-    await inputRequestSignal.requested;
-    expect(created.controller.getSnapshot().status).toBe("waiting_user");
-    const beforeInput = created.controller.getEvents();
-    const requestIndex = beforeInput.findIndex((event) => event.type === "user.input.requested");
-    expect(requestIndex).toBeGreaterThan(-1);
-    expect(beforeInput[requestIndex]).toMatchObject({
-      type: "user.input.requested",
-      question: expect.stringContaining("不要重复输入网址或重复点击同一入口"),
-    });
-    expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "tool.call.completed" || event.type === "tool.call.failed")).toBe(true);
-    expect(beforeInput.slice(0, requestIndex).some((event) => event.type === "observation.created" && event.sequence > (beforeInput.find((candidate) => candidate.type === "action.execution.completed")?.sequence ?? -1))).toBe(true);
-    expect(beforeInput.some((event) => event.type === "runtime.error" && event.category === "runtime")).toBe(false);
-    await created.controller.submitUserInput("continue after review");
-    await expect(running).resolves.toBe("succeeded");
-    await rm(created.directory, { recursive: true, force: true });
-  });
-
-  it("stops a legal Plan/Memory-before-GUI multi-call turn at the Inbox boundary", async () => {
-    const inputRequestSignal = committedUserInputRequestSignal();
-    const registry = clickRegistry();
-    registry.register({
-      name: "remember",
-      description: "Record a synthetic planning note.",
-      category: "planning",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      validate: () => undefined,
-      execute: async () => ({ ok: true }),
-      planMutationFromResult: () => undefined,
-    });
-    let controller: RunController | undefined;
-    let injected = false;
-    const created = await makeController(new ScriptedProvider([
-      { type: "tool_calls", calls: [
-        { id: "plan-before-help" as ToolCallId, name: "remember", arguments: {} },
-        clickCall("gui-after-help"),
-      ] },
-      { type: "finish", summary: "corrected" },
-    ]), undefined, registry, new DefaultRuntimePolicy(), {
-      features: { planning: "tasks-v1", memory: "off", batching: "off", riskGuard: "off", monitor: "guidance" },
-      onEventCommitted: (event) => {
-        inputRequestSignal.onEventCommitted(event);
-        if (!injected && event.type === "tool.call.completed" && event.result.callId === "plan-before-help") {
-          injected = true;
-          (controller as unknown as { monitorPendingHelp: { kind: "help_requested"; reason: "guidance_budget_exhausted"; fingerprint: string } }).monitorPendingHelp = {
-            kind: "help_requested",
-            reason: "guidance_budget_exhausted",
-            fingerprint: "synthetic-deferred-help",
-          };
-        }
-      },
-    });
-    controller = created.controller;
-    const activeController = created.controller;
-    const running = activeController.start("stop the remaining GUI call at review");
-    await inputRequestSignal.requested;
-    expect(activeController.getSnapshot().status).toBe("waiting_user");
-    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
-    expect(activeController.getEvents().some((event) => event.type === "action.proposed" && event.callId === "gui-after-help")).toBe(false);
-    expect(activeController.getEvents().some((event) => event.type === "user.input.requested")).toBe(true);
-    await activeController.submitUserInput("cancel the remaining click");
-    await expect(running).resolves.toBe("succeeded");
-    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(0);
-    expect(activeController.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "gui-after-help")).toBe(true);
+    await expect(created.controller.start("monitor exhausted budget remains nonblocking")).resolves.toBe("succeeded");
+    const events = created.controller.getEvents();
+    const guidanceProposals = events.filter((event) => event.type === "monitor.proposal" && event.proposal === "guidance");
+    const injectedHints = provider.inputs.flatMap(lowConfidenceMonitorNotes);
+    expect(created.computer.calls.filter((call) => call.startsWith("execute:")).length).toBe(8);
+    expect(provider.inputs).toHaveLength(9);
+    expect(guidanceProposals.map((event) => event.guiActionCount)).toEqual([2, 4, 7]);
+    expect(injectedHints.length).toBeLessThanOrEqual(3);
+    expect(provider.inputs.map(lowConfidenceMonitorNotes).every((notes) => notes.length <= 1)).toBe(true);
+    expect(events.some((event) => event.type === "user.input.requested")).toBe(false);
+    expect(created.controller.getSnapshot().status).toBe("finished");
     await rm(created.directory, { recursive: true, force: true });
   });
 
@@ -7020,9 +7243,19 @@ describe("RunController model-directed window switching", () => {
     }
   });
 
-  it("keeps listed refs across an ordinary observation and commits an isolated target transition", async () => {
+  it.each([
+    ["complete", false, 0],
+    ["source completeness unknown", true, 0],
+    ["truncated with known omissions", true, 1],
+  ] as const)("accepts a %s window list and commits a listed target transition", async (_label, truncated, omittedCount) => {
     const registry = windowSwitchRegistry();
-    const computer = new WindowSwitchComputer();
+    class WindowListMetadataComputer extends WindowSwitchComputer {
+      public override async listWindows(session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        const inventory = await super.listWindows(session, signal);
+        return { ...inventory, truncated, omittedCount };
+      }
+    }
+    const computer = new WindowListMetadataComputer();
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [listWindowsCall("inventory-call")] },
       { type: "tool_calls", calls: [clickCall("ordinary-action-between-list-and-switch")] },
@@ -7052,8 +7285,8 @@ describe("RunController model-directed window switching", () => {
           { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true },
           { windowRef: "opaque-target", appName: "Browser", title: "Search results", isCurrent: false },
         ],
-        truncated: false,
-        omittedCount: 0,
+        truncated,
+        omittedCount,
       });
       expect(JSON.stringify(inventoryResult?.result.output)).not.toMatch(/pid|hwnd|adapterHandle/iu);
 
@@ -7087,12 +7320,54 @@ describe("RunController model-directed window switching", () => {
       expect(transitionSnapshot.computerSession?.id).toBe(computer.targetSession.id);
       expect(transitionSnapshot.latestObservationId).toBeUndefined();
 
+      expect(contextCompiler.inputs[1]?.windowSwitchState).toMatchObject({ truncated, omittedCount });
       expect(contextCompiler.inputs[1]?.windowSwitchState?.currentWindow).toEqual({ appName: "Editor", title: "Draft" });
       expect(contextCompiler.inputs[1]?.windowSwitchState?.options?.map((option) => option.windowRef)).toEqual(["opaque-current", "opaque-target"]);
       expect(contextCompiler.inputs[2]?.windowSwitchState?.options?.map((option) => option.windowRef)).toEqual(["opaque-current", "opaque-target"]);
       expect(contextCompiler.inputs[3]?.computerSession?.id).toBe(computer.targetSession.id);
       expect(contextCompiler.inputs[3]?.windowSwitchState).toMatchObject({ currentWindow: { appName: "Browser", title: "Search results" } });
       expect(contextCompiler.inputs[3]?.windowSwitchState?.options).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["non-boolean truncated", "true", 0],
+    ["non-numeric omittedCount", true, "0"],
+    ["negative omittedCount", true, -1],
+    ["fractional omittedCount", true, 0.5],
+    ["unsafe omittedCount", true, Number.MAX_SAFE_INTEGER + 1],
+    ["false with known omissions", false, 1],
+  ] as const)("rejects %s and expires prior window refs", async (_label, truncated, omittedCount) => {
+    const registry = windowSwitchRegistry();
+    class InvalidRefreshComputer extends WindowSwitchComputer {
+      private listGeneration = 0;
+      public override async listWindows(session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        this.listGeneration += 1;
+        const inventory = await super.listWindows(session, signal);
+        return this.listGeneration === 1
+          ? inventory
+          : { ...inventory, truncated, omittedCount } as unknown as ComputerWindowList;
+      }
+    }
+    const computer = new InvalidRefreshComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("valid-list-before-refresh")] },
+      { type: "tool_calls", calls: [clickCall("ordinary-action-before-invalid-refresh")] },
+      { type: "tool_calls", calls: [listWindowsCall("invalid-refresh")] },
+      { type: "tool_calls", calls: [switchWindowCall("switch-after-invalid-refresh", "opaque-target")] },
+      { type: "finish", summary: "invalid inventory was rejected and the old reference expired" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("refresh the window inventory and switch only to a valid current reference")).resolves.toBe("succeeded");
+      const events = controller.getEvents();
+      expect(events.some((event) => event.type === "tool.call.failed" && event.result.callId === ("invalid-refresh" as ToolCallId))).toBe(true);
+      expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === ("switch-after-invalid-refresh" as ToolCallId))).toBe(true);
+      expect(computer.calls.filter((call) => call.startsWith("execute:"))).toEqual(["execute:click"]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

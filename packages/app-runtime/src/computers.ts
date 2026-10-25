@@ -75,10 +75,15 @@ export function prepareComputerRunAssembly(
 ): ComputerRunAssemblyPolicy {
   const effectiveConfig = effectiveComputerConfig(config, grounding, windowSwitch);
   validateComputerGrounding(effectiveConfig, grounding);
-  validateWindowSwitch(effectiveConfig, windowSwitch, grounding);
+  validateWindowSwitch(effectiveConfig, windowSwitch);
+  if (effectiveConfig.kind === "cua" && effectiveConfig.managedBrowserCompanion === true &&
+      grounding !== "dom-catalog-v1" && grounding !== "hybrid-catalog-v1") {
+    validateManagedBrowserConfig(effectiveConfig);
+  }
 
   const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
-  const windowScoped = effectiveConfig.kind === "cua" && (effectiveConfig.windowTarget !== undefined || managedGrounding);
+  const windowScoped = effectiveConfig.kind === "cua" &&
+    (effectiveConfig.windowTarget !== undefined || managedGrounding || windowSwitch === "opened-windows-v1");
   const groundingTools = grounding === "off"
     ? []
     : groundingComputerTools({ includeSelectOption: managedGrounding });
@@ -86,9 +91,9 @@ export function prepareComputerRunAssembly(
       effectiveConfig.multilineTypeProfile === "foreground-caret-v1"
     ? [{
       name: "type",
-      description: "Type text into the currently focused GUI control. In the host-enabled Windows foreground-caret-v1 profile, multiline text without elementRef follows ordinary foreground typing, intended to insert at the current caret or replace the current selection; driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send in controls where Enter has that meaning; check the intended control before typing. An explicit current UIA elementRef uses the separate append-to-end route regardless of caret or selection; that route does not automatically submit or send. Do not use elementRef for single-line text.",
+      description: "Type text into the currently focused GUI control. In the host-enabled Windows foreground-caret-v1 profile, multiline text without elementRef follows ordinary foreground typing, intended to insert at the current caret or replace the current selection; driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send in controls where Enter has that meaning; check the intended control before typing. Do not assume line breaks are literal text: use a single paragraph in submit-on-Enter controls unless the current route is explicitly documented to preserve literal line breaks. After verifying the entered content, perform any send/submit as a separate deliberate action. An explicit current UIA elementRef uses the separate append-to-end route regardless of caret or selection; that route does not automatically submit or send. Do not use elementRef for single-line text.",
       inputPropertyDescriptions: {
-        text: "Text to type. With the host-enabled Windows foreground-caret-v1 profile, omit elementRef for multiline typing; ordinary foreground input is intended to insert at the current caret or replace the current selection, but driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send depending on the current control.",
+        text: "Text to type. With the host-enabled Windows foreground-caret-v1 profile, omit elementRef for multiline typing; ordinary foreground input is intended to insert at the current caret or replace the current selection, but driver completion does not verify the resulting content. Line breaks are Enter key events and can submit/send depending on the current control. Do not assume line breaks are literal text: use a single paragraph in submit-on-Enter controls unless the current route is explicitly documented to preserve literal line breaks. After verifying the entered content, perform any send/submit as a separate deliberate action.",
         elementRef: "Optional current UIA editable reference for the explicit multiline append-to-end route. It appends regardless of caret or selection; omit it to use ordinary foreground caret typing when that host profile is enabled.",
       },
     } satisfies ComputerToolPresentationOverride]
@@ -142,18 +147,13 @@ function effectiveComputerConfig(
 function validateWindowSwitch(
   config: ComputerBackendConfig,
   windowSwitch: NonNullable<import("./config.js").ResolvedRunConfig["windowSwitch"]>,
-  grounding: NonNullable<import("./config.js").ResolvedRunConfig["grounding"]>,
 ): void {
   if (windowSwitch === "off") return;
   if (windowSwitch !== "opened-windows-v1") throw new Error("windowSwitch must be off or opened-windows-v1");
   if (config.kind !== "cua") throw new Error("windowSwitch opened-windows-v1 requires the CUA Computer");
   // An unbound CUA screen session is a supported starting mode too. Its
-  // inventory is still host-scoped, and model switching binds to an exact
-  // opened window before any targeted action is delivered.
-  const managedGrounding = grounding === "dom-catalog-v1" || grounding === "hybrid-catalog-v1";
-  if (config.managedBrowserCompanion === true && !managedGrounding) {
-    throw new Error("managed browser companion requires hybrid DOM grounding");
-  }
+  // inventory remains available without grounding, and switching binds to an
+  // exact opened window before any targeted action is delivered.
 }
 
 function validateComputerGrounding(
@@ -180,7 +180,7 @@ function validateManagedBrowserConfig(
   config: Extract<ComputerBackendConfig, { kind: "cua" }>,
   grounding?: "dom-catalog-v1" | "hybrid-catalog-v1",
 ): void {
-  const label = grounding === undefined ? "DOM/hybrid grounding" : `grounding ${grounding}`;
+  const label = grounding === undefined ? "managed browser Host" : `grounding ${grounding}`;
   if (!isManagedBrowserUrl(config.managedBrowserUrl)) {
     throw new Error(`${label} requires a credential-free http(s) managedBrowserUrl or exact about:blank`);
   }
@@ -286,12 +286,27 @@ export async function createComputer(
     });
   }
 
-  const managedBrowser = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
-  if (managedBrowser) validateManagedBrowserConfig(config);
+  const managedGroundingMode = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1"
+    ? config.grounding
+    : undefined;
+  const managedGrounding = managedGroundingMode !== undefined;
+  const managedBrowserLifecycle = managedGrounding || config.managedBrowserCompanion === true;
+  if (managedBrowserLifecycle) validateManagedBrowserConfig(config, managedGroundingMode);
+  const desktopCompanionGrounding = config.grounding === "hybrid-catalog-v1" &&
+    config.managedBrowserCompanion === true && config.windowSwitch === "opened-windows-v1";
 
   const relationshipProbe = dependencies.windowRelationshipProbe !== undefined
     ? dependencies.windowRelationshipProbe ?? undefined
     : process.platform === "win32" && config.windowDeliveryMode === "foreground" && config.managedBrowserCompanion !== true
+      ? createWindowsWindowRelationshipProbe()
+      : undefined;
+  // A desktop companion is delivered as foreground only after this factory
+  // builds ManagedBrowserComputer, so its source config may not carry that
+  // derived value yet. Give grounding its own probe to avoid widening the
+  // companion's ordinary window-switch inventory or SurfaceRegistry.
+  const desktopGroundingRelationshipProbe = dependencies.windowRelationshipProbe !== undefined
+    ? dependencies.windowRelationshipProbe ?? undefined
+    : process.platform === "win32" && desktopCompanionGrounding
       ? createWindowsWindowRelationshipProbe()
       : undefined;
 
@@ -306,7 +321,7 @@ export async function createComputer(
     );
   }
 
-  if (!managedBrowser) {
+  if (!managedBrowserLifecycle) {
     return new cuaModule.CuaDriverComputer({
       socketPath: config.socketPath,
       screenshotDir: config.screenshotDir,
@@ -332,6 +347,7 @@ export async function createComputer(
     openBootstrap,
     createDelegate,
     ...(relationshipProbe === undefined ? {} : { windowRelationshipProbe: relationshipProbe }),
+    ...(desktopGroundingRelationshipProbe === undefined ? {} : { desktopGroundingRelationshipProbe }),
   });
 }
 
@@ -346,12 +362,23 @@ function isManagedBrowserUrl(value: string | undefined): value is string {
   }
 }
 
+function isExplicitHttpManagedBrowserUrl(value: string | undefined): boolean {
+  if (value === undefined || value === "about:blank") return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 interface ManagedBrowserComputerOptions {
   readonly config: Extract<ComputerBackendConfig, { kind: "cua" }>;
   readonly createHost: (options: ManagedBrowserHostOptions) => ManagedBrowserHost;
   readonly openBootstrap: typeof openCuaBootstrapSession;
   readonly createDelegate: CuaComputerModule["CuaDriverComputer"];
   readonly windowRelationshipProbe?: WindowRelationshipProbe;
+  readonly desktopGroundingRelationshipProbe?: WindowRelationshipProbe;
 }
 
 class ManagedBrowserComputer implements Computer {
@@ -391,6 +418,8 @@ class ManagedBrowserComputer implements Computer {
       const companionMode = this.options.config.managedBrowserCompanion === true &&
         this.options.config.windowSwitch === "opened-windows-v1";
       const initialTarget = companionMode ? this.options.config.windowTarget : record.target.windowTarget;
+      const activateManagedBrowserOnOpen = companionMode && initialTarget === undefined &&
+        isExplicitHttpManagedBrowserUrl(this.options.config.managedBrowserUrl);
       const allowedTargets = this.options.config.windowSwitchAllowedTargets;
       const hybridCapability = this.options.config.hybridNativeWebDocumentTargets;
       const scopedTargets = allowedTargets === undefined
@@ -404,7 +433,10 @@ class ManagedBrowserComputer implements Computer {
         socketPath: this.options.config.socketPath,
         screenshotDir: this.options.config.screenshotDir,
         browserTarget: record.target,
-        domGroundingTransport: host.createTransport(),
+        ...(activateManagedBrowserOnOpen ? { activateManagedBrowserOnOpen: true } : {}),
+        ...(this.options.config.grounding === "dom-catalog-v1" || this.options.config.grounding === "hybrid-catalog-v1"
+          ? { domGroundingTransport: host.createTransport() }
+          : {}),
         ...(initialTarget === undefined ? {} : { windowTarget: initialTarget }),
         ...(this.options.config.recoveryWindowTarget === undefined ? {} : { recoveryWindowTarget: this.options.config.recoveryWindowTarget }),
         ...(this.options.config.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: this.options.config.recoverBoundWindowMissing }),
@@ -416,6 +448,7 @@ class ManagedBrowserComputer implements Computer {
         ...(this.options.config.windowSwitch === undefined ? {} : { windowSwitch: this.options.config.windowSwitch }),
         ...(scopedTargets === undefined ? {} : { windowSwitchAllowedTargets: scopedTargets }),
         ...(this.options.windowRelationshipProbe === undefined ? {} : { windowRelationshipProbe: this.options.windowRelationshipProbe }),
+        ...(this.options.desktopGroundingRelationshipProbe === undefined ? {} : { desktopGroundingRelationshipProbe: this.options.desktopGroundingRelationshipProbe }),
       };
       const delegate = new this.options.createDelegate(delegateOptions);
       this.delegate = delegate;

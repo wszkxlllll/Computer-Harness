@@ -134,7 +134,7 @@ DEV-3/4/5 可在 Development 做阶段性小规模对照，DEV-7 汇总冻结实
 
 第一批收口后下一批优先DEV-1A Context/Memory与独立的诊断整改，继续先反例、后修复、Sol审计；共享Runtime合同不并发修改。190/194/198项均为整改中间版本，最终本地全量结果为200项。主Agent未实施或审查业务代码，仅记录Luna执行和Sol独立审查结论。第一批实现收口时尚未提交；当前Git检查点见下，不能据此宣称远端CI或分支保护已生效。
 
-本地Git留痕已建立：用户要求的本地检查点分为三笔提交。前两批已在 `codex/dev0-dev1-checkpoint` 完成：Risk修复 `8d9f430`、CI配置 `4f131a5`；第三笔记录剩余文档/归档整理（本段随第三笔提交，故无需在此填写自身hash）。提交由Luna执行，Sol已检查敏感内容；随后仅按用户授权push工作分支并创建 PR #1，未合并main。Hosted run [35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 对应 head `d57d9a8c`，四矩阵和 `ci-required` 均通过；本次补充证据随新的独立文档提交落盘，具体 hash见Git日志，无需在此填写自身hash。后续按[开发文档规范第8节](../../../development-documentation-standard.md#8-本地检查点与远端交付)实行每工单commit、小批次分支PR交付，具体提交结果见Git日志与交接。
+本地Git留痕已建立：用户要求的本地检查点分为三笔提交。前两批已在 `codex/dev0-dev1-checkpoint` 完成：Risk修复 `8d9f430`、CI配置 `4f131a5`；第三笔记录剩余文档/归档整理（本段随第三笔提交，故无需在此填写自身hash）。提交由Luna执行，Sol已检查敏感内容；随后仅按用户授权push工作分支并创建 PR #1，未合并main。Hosted run [35206262326](https://github.com/wszkxlllll/Computer-Harness/actions/runs/35206262326) 对应 head `d57d9a8c`，四矩阵和 `ci-required` 均通过；本次补充证据随新的独立文档提交落盘，具体 hash见Git日志，无需在此填写自身hash。后续按[开发文档规范第8节](../../2026-10-20-product-docs/development-documentation-standard.md#8-本地检查点与远端交付)实行每工单commit、小批次分支PR交付，具体提交结果见Git日志与交接。
 
 ## 6. 分块重构复核（2026-09-17）
 

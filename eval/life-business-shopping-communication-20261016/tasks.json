@@ -1,0 +1,393 @@
+{
+  "schemaVersion": 1,
+  "status": "source_verified_runner_integrated_pending_gui",
+  "suiteId": "life-business-shopping-communication-20261016",
+  "scopeNote": "Standalone suite selected explicitly through scripts/life-eval --suite. Uses Ark Agent Plan with batching off and independently selected Planning/Memory variants; does not change the original nine-task manifest or extend its frozen plans or historical execution. Preparation and dry-run are offline. Live GUI execution requires separate authorization and human preflight; this manifest does not authorize private account, order, message, calendar, or business changes beyond the stated new document deliverables.",
+  "sourceRegistry": [
+    {
+      "id": "S01-1",
+      "title": "购买 20W USB-C 电源适配器 - Apple (中国大陆)",
+      "url": "https://www.apple.com.cn/shop/product/mwvw3ch/a",
+      "accessed": "2026-10-16",
+      "method": "web open canonical URL; official HTML full text, 188 lines",
+      "readability": "关键商品正文可读，无需登录。无跟踪参数的 canonical URL 可直接打开，关键字段与此前参数化 URL 正文一致。"
+    },
+    {
+      "id": "S02-1",
+      "title": "Apple Store 零售店购买政策",
+      "url": "https://www.apple.com/legal/sales-support/sales-policies/retail_cn.html",
+      "accessed": "2026-10-16",
+      "method": "web open official full text, 85 lines",
+      "readability": "正文可读，无需登录。此卡限定实体零售店购买渠道。"
+    },
+    {
+      "id": "S03-1",
+      "title": "Apple 产品与中国消费者权益相关法律法规",
+      "url": "https://www.apple.com.cn/legal/statutory-warranty/",
+      "accessed": "2026-10-16",
+      "method": "web open official full text, 78 lines",
+      "readability": "摘要表格可读。网页标记版本 120124（2024-01-12）；在 2026-10-16 读取，不能据此声称页面刚更新。"
+    },
+    {
+      "id": "S03-2",
+      "title": "Apple 一 (1) 年有限保修",
+      "url": "https://www.apple.com.cn/legal/warranty/products/warranty-china.html",
+      "accessed": "2026-10-16",
+      "method": "web open official full text, 521 lines",
+      "readability": "适用条件与期限正文可读，无需登录。"
+    },
+    {
+      "id": "S-C1",
+      "url": "https://support.apple.com/zh-cn/guide/messages/icht3a134ea1/mac",
+      "title": "在 Mac 上静音和管理‘信息’中的通知",
+      "location": "按对话管理通知；在名字被提及时收到通知；更改或关闭信息的所有通知",
+      "facts": "可按对话隐藏提醒；名字提及通知选项在隐藏提醒时仍适用；系统设置的通知中可关闭整个信息App通知。页面默认手册版本按读取时所示，不把其界面当本机已验。",
+      "toolLines": "web opened article body lines 98–142"
+    },
+    {
+      "id": "S-C2",
+      "url": "https://support.apple.com/zh-cn/guide/calendar/icl1018/16.0/mac/26",
+      "title": "在 Mac 上的‘日历’中设置或删除重复日程（macOS Tahoe 26）",
+      "location": "设置重复日程；删除重复日程的部分重复",
+      "facts": "支持按周选星期及结束重复；删除时可只删所选发生项或删所有将来发生项，需区分范围。",
+      "toolLines": "body lines 112–163"
+    },
+    {
+      "id": "S-C3",
+      "url": "https://support.apple.com/zh-cn/guide/calendar/icl1012/16.0/mac/26",
+      "title": "在 Mac 上的‘日历’中设定日程的提醒（macOS Tahoe 26）",
+      "location": "日程提醒菜单与自定义提醒",
+      "facts": "可设时间/日期或自定义本机有声通知；不以说明可读推定通知已实际送达。",
+      "toolLines": "body lines 111–132"
+    },
+    {
+      "id": "S-C4",
+      "url": "https://support.apple.com/zh-cn/guide/icloud/mm6b1a9479/icloud",
+      "title": "在 iCloud.com 上共享日历",
+      "location": "私下共享日历；公开共享日历",
+      "facts": "私人共享的参与者须有Apple账户并使用iCloud；所有者可分别授予只读或编辑；公开共享及其访问条件不同，不能为家人隐私日程默认选公开。",
+      "toolLines": "body lines 308–352"
+    },
+    {
+      "id": "S-C5",
+      "url": "https://support.apple.com/zh-cn/guide/icloud/mm6b1a8f9f/icloud",
+      "title": "在 iCloud.com 上停止共享日历",
+      "location": "停止与某个人共享日历；停止与所有人共享日历",
+      "facts": "可移除单个参与者或停止全部共享；被移除者失去共享访问，相关参与者会收到通知。",
+      "toolLines": "body lines 303–332"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "S01",
+      "category": "shopping_after_sales",
+      "difficulty": "easy",
+      "title": "确认 iPhone 15 适用的充电器",
+      "sourceLineage": "shopping-after-sales candidates verified 2026-10-16",
+      "startUrl": "https://www.apple.com.cn/shop/product/mwvw3ch/a",
+      "allowedHosts": [
+        "www.apple.com.cn"
+      ],
+      "requiredApps": [
+        "managed-browser"
+      ],
+      "requiresLogin": false,
+      "sourceIds": [
+        "S01-1"
+      ],
+      "outcomeMode": "response",
+      "activeInputs": [],
+      "deliverables": [],
+      "checks": [
+        {
+          "id": "facts",
+          "description": "商品页当前标价、20W额定功率及USB-C接口、兼容清单含iPhone 15、包装是否含线均准确；价格按实际查看时页面内容回答，不要求未来价格不变。",
+          "weight": 40
+        },
+        {
+          "id": "sources",
+          "description": "使用与问题相关的真实Apple官方商品页作为依据；不要求逐字段URL、指定查阅日期格式或固定访问篇数。",
+          "weight": 20
+        },
+        {
+          "id": "consumer",
+          "description": "中文答复完整清楚地回答标价、接口/功率、兼容性和包装含线问题。",
+          "weight": 20
+        },
+        {
+          "id": "constraints",
+          "description": "遵守只查公开商品信息的边界，不登录、不加入购物袋、不下单。",
+          "weight": 10
+        },
+        {
+          "id": "usability",
+          "description": "表达简明易懂，避免把动态商品信息说成永久不变。",
+          "weight": 10
+        }
+      ],
+      "goal": "我有一部 iPhone 15，手边只有一根 USB-C 至 USB-C 线，想买 Apple 的 20W USB-C 电源适配器。请告诉我它的标价多少、接口和功率是什么、能不能给 iPhone 15 用，以及盒子里带不带充电线。请附上官方来源；只查询公开商品信息，不登录账户、不加入购物袋或下单。"
+    },
+    {
+      "id": "S02",
+      "category": "shopping_after_sales",
+      "difficulty": "medium",
+      "title": "确认 Apple Store 零售店 iPhone 退货条件",
+      "sourceLineage": "shopping-after-sales candidates verified 2026-10-16",
+      "startUrl": "https://www.apple.com/legal/sales-support/sales-policies/retail_cn.html",
+      "allowedHosts": [
+        "www.apple.com"
+      ],
+      "requiredApps": [
+        "managed-browser"
+      ],
+      "requiresLogin": false,
+      "sourceIds": [
+        "S02-1"
+      ],
+      "outcomeMode": "response",
+      "activeInputs": [],
+      "deliverables": [],
+      "checks": [
+        {
+          "id": "facts",
+          "description": "准确回答大陆Apple Store实体店购买后的14个日历日窗口、商品/包装/凭证/配件条件、只能原店办理，以及运营商协议机例外和退货不自动取消运营商协议。",
+          "weight": 40
+        },
+        {
+          "id": "sources",
+          "description": "使用与问题相关的真实Apple官方零售店政策作为依据；不要求逐字段URL、指定查阅日期格式或固定访问篇数。",
+          "weight": 20
+        },
+        {
+          "id": "consumer",
+          "description": "用中文完整回答能否退、所需物品、办理地点和运营商协议影响，并保留资格以实际检查和适用条款为准。",
+          "weight": 20
+        },
+        {
+          "id": "constraints",
+          "description": "遵守只解释公开政策的边界，不查真实订单、不申请退货、不联系商家、不修改运营商协议。",
+          "weight": 10
+        },
+        {
+          "id": "usability",
+          "description": "说明简明易懂，不把实体零售店政策扩大到其他购买渠道。",
+          "weight": 10
+        }
+      ],
+      "goal": "我在中国大陆 Apple Store 零售店买了一部 iPhone，买了 10 天，手机没有损坏，原包装、收据和配件都在。请帮我确认还能否退货、退货时要带什么、是否只能回原店办理；如果 iPhone 是和运营商服务协议一起买的，政策有什么不同，退货会不会自动取消运营商协议？请附上官方来源；只解释公开政策，不查询我的订单、不申请退货、不联系商家，也不修改运营商协议。"
+    },
+    {
+      "id": "S03",
+      "category": "shopping_after_sales",
+      "difficulty": "hard",
+      "title": "比较 iPhone 与 Mac 的三包期限和 Apple 有限保修",
+      "sourceLineage": "shopping-after-sales candidates verified 2026-10-16",
+      "startUrl": "https://www.apple.com.cn/legal/statutory-warranty/",
+      "allowedHosts": [
+        "www.apple.com",
+        "www.apple.com.cn"
+      ],
+      "requiredApps": [
+        "managed-browser",
+        "WPS"
+      ],
+      "requiresLogin": false,
+      "sourceIds": [
+        "S03-1",
+        "S03-2",
+        "S02-1"
+      ],
+      "outcomeMode": "document",
+      "activeInputs": [],
+      "deliverables": [
+        {
+          "name": "S03-购物售后说明.docx",
+          "format": "docx"
+        }
+      ],
+      "checks": [
+        {
+          "id": "facts",
+          "description": "准确说明iPhone和Mac三包摘要期限、首年退换修时间段、第二年Mac主要部件与iPhone不适用、适用的地区例外，以及Apple一年有限保修期限/材料和工艺缺陷条件；说明三包时间表以性能故障等法定条件为前提，并与门店不满意14日退货区分。",
+          "weight": 40
+        },
+        {
+          "id": "sources",
+          "description": "使用与问题相关的真实Apple官方三包摘要及有限保修条款作为依据；不要求逐字段URL、指定查阅日期格式或固定访问篇数。",
+          "weight": 20
+        },
+        {
+          "id": "consumer",
+          "description": "新建指定名称的DOCX，正文18磅、可独立打开阅读，完整回答用户要求的比较；不要求表格或固定版式。",
+          "weight": 20
+        },
+        {
+          "id": "constraints",
+          "description": "遵守只保存这一份新DOCX的边界，不登录、不购买或申请售后，不提供个案诊断或保证具体故障一定受理。",
+          "weight": 10
+        },
+        {
+          "id": "usability",
+          "description": "说明简明易懂，清楚区分法定三包条件与门店满意退货政策。",
+          "weight": 10
+        }
+      ],
+      "goal": "我在考虑买一部iPhone和一台Mac，想给长辈看懂中国大陆Apple官方售后说明。请比较官方三包摘要列出的两类产品保修期限、第一年的退货/换货/维修时间段及第二年覆盖情况，有地区例外时请一并说明；再解释Apple一年有限保修的期限和适用条件。要讲清三包退换修时间表适用的性能故障等条件，以及它和门店购买后不满意申请14日退货的区别，别把这些时间段都当成无理由退货承诺。请用WPS新建空白文档，正文18磅，方便长辈阅读，并附官方来源。\n保存文件夹：{{OUTPUT_DIR}}\n文件名：S03-购物售后说明.docx\n只保存这一个新DOCX，不登录账户、不购买或申请售后，不提供个案诊断或保证具体故障一定受理。"
+    },
+    {
+      "id": "CM01",
+      "category": "communication_schedule",
+      "difficulty": "easy",
+      "title": "Mac 家人聊天的提醒设置说明",
+      "sourceLineage": "Apple official public support pages verified 2026-10-16",
+      "startUrl": "https://support.apple.com/zh-cn/guide/messages/icht3a134ea1/mac",
+      "allowedHosts": [
+        "support.apple.com"
+      ],
+      "requiredApps": [
+        "managed-browser"
+      ],
+      "requiresLogin": false,
+      "sourceIds": [
+        "S-C1"
+      ],
+      "outcomeMode": "response",
+      "activeInputs": [],
+      "deliverables": [],
+      "checks": [
+        {
+          "id": "facts",
+          "description": "对话隐藏提醒、名字提及时的通知选项、整个App通知关闭与按对话静音的差别均明确；不将网页说明当作实际消息/通知送达证明，不添加未问的屏蔽或号码功能。",
+          "weight": 40
+        },
+        {
+          "id": "sources",
+          "description": "依据指定Apple官方公开手册核对来源相关性；不将网页说明当作真实设备状态。",
+          "weight": 20
+        },
+        {
+          "id": "consumer",
+          "description": "中文直接答复能帮助长辈区分三个设置，不要求实际App界面终态。",
+          "weight": 20
+        },
+        {
+          "id": "constraints",
+          "description": "不登录账户、不读取聊天、不修改设置、不发送消息。",
+          "weight": 10
+        },
+        {
+          "id": "usability",
+          "description": "表达清楚、适合家庭成员阅读；不增加用户未要求的格式或实际操作结果。",
+          "weight": 10
+        }
+      ],
+      "goal": "家里长辈用Mac自带的‘信息’App和家人联系，某个群消息很多，但又希望别人提到自己名字时能知道。请查Apple官方Mac‘信息’使用手册，简单告诉我怎样只隐藏这个对话的提醒、怎样设置名字被提及时仍收到通知，以及这和关闭整个‘信息’App的通知有什么区别。附上来源方便我确认；只解释公开说明，不进入我们的聊天、不修改任何通知设置，也不发送消息。"
+    },
+    {
+      "id": "CM02",
+      "category": "communication_schedule",
+      "difficulty": "medium",
+      "title": "四周重复日程与提醒的准备说明",
+      "sourceLineage": "Apple official public support pages verified 2026-10-16",
+      "startUrl": "https://support.apple.com/zh-cn/guide/calendar/icl1018/16.0/mac/26",
+      "allowedHosts": [
+        "support.apple.com"
+      ],
+      "requiredApps": [
+        "managed-browser"
+      ],
+      "requiresLogin": false,
+      "sourceIds": [
+        "S-C2",
+        "S-C3"
+      ],
+      "outcomeMode": "response",
+      "activeInputs": [],
+      "deliverables": [],
+      "checks": [
+        {
+          "id": "facts",
+          "description": "覆盖每周三重复及结束重复范围、选择提醒时间及本机有声自定义提醒、单次删除与删除将来重复的差别；用户给定四个周三日期/时段不被改动。",
+          "weight": 40
+        },
+        {
+          "id": "sources",
+          "description": "依据指定Apple官方公开手册核对来源相关性；不将网页说明当作真实设备状态。",
+          "weight": 20
+        },
+        {
+          "id": "consumer",
+          "description": "中文答复能用于用户随后自行配置四周安排；不把操作说明评分为日程已创建。",
+          "weight": 20
+        },
+        {
+          "id": "constraints",
+          "description": "只读公开手册，不接入私人日历、不创建/删除日程、不发送邀请、不承诺送达。",
+          "weight": 10
+        },
+        {
+          "id": "usability",
+          "description": "表达清楚、适合家庭成员阅读；不增加用户未要求的格式或实际操作结果。",
+          "weight": 10
+        }
+      ],
+      "goal": "我准备在macOS Tahoe 26的‘日历’里给长辈安排2026年11月4日至11月25日每周三15:00到16:00的学习时间，想在开始前在Mac上有声提醒，四周后不要继续重复。如果11月11日临时取消，也不要把后面两周删掉。请查Apple官方说明，告诉我怎样设置按周重复、结束时间、选择提醒时间和有声提醒，以及只删除那一次时应注意什么。用中文讲清楚并附来源；只做操作准备说明，不读取或修改我的日历、不发送邀请，也不承诺提醒已经设置或一定送达。"
+    },
+    {
+      "id": "CM03",
+      "category": "communication_schedule",
+      "difficulty": "hard",
+      "title": "家人私下共享日历的易读说明",
+      "sourceLineage": "Apple official public support pages verified 2026-10-16",
+      "startUrl": "https://support.apple.com/zh-cn/guide/icloud/mm6b1a9479/icloud",
+      "allowedHosts": [
+        "support.apple.com"
+      ],
+      "requiredApps": [
+        "managed-browser",
+        "WPS"
+      ],
+      "requiresLogin": false,
+      "sourceIds": [
+        "S-C4",
+        "S-C5"
+      ],
+      "outcomeMode": "document",
+      "activeInputs": [],
+      "deliverables": [
+        {
+          "name": "CM03-家人日历共享说明.docx",
+          "format": "docx"
+        }
+      ],
+      "checks": [
+        {
+          "id": "facts",
+          "description": "私人共享的账户/iCloud与所有者条件、只读/编辑权限、移除单人及停止全部共享的后果准确；区分私人和公开共享，不承诺具体账户或跨设备同步已验证。",
+          "weight": 40
+        },
+        {
+          "id": "sources",
+          "description": "依据指定Apple官方公开手册核对来源相关性；不将网页说明当作真实设备状态。",
+          "weight": 20
+        },
+        {
+          "id": "consumer",
+          "description": "新DOCX回答需求、正文18磅且可独立打开；不要求固定章节、额外文件或实际共享。",
+          "weight": 20
+        },
+        {
+          "id": "constraints",
+          "description": "只新建指定DOCX，不登录或读取账户、不填邮箱、不发邀请/链接、不改参与者或实际共享。",
+          "weight": 10
+        },
+        {
+          "id": "usability",
+          "description": "表达清楚、适合家庭成员阅读；不增加用户未要求的格式或实际操作结果。",
+          "weight": 10
+        }
+      ],
+      "goal": "家里想用iCloud日历安排照看长辈的时间：长辈只看安排，负责照看的家人可以修改，但不希望把家庭日程公开。请查Apple官方说明，解释参与私下共享需要哪些账户条件、谁能发起共享、只读和允许编辑各能做什么，以及以后怎样移除一位参与者或停止全部共享，会对对方产生什么影响。请用WPS新建空白文档，正文18磅，方便长辈阅读，并附官方来源。\n保存文件夹：{{OUTPUT_DIR}}\n文件名：CM03-家人日历共享说明.docx\n只保存这一个新DOCX，不登录我们的账户、不读取真实日历，不填写邮箱、不邀请或移除任何人，也不公开或发送日历链接。"
+    }
+  ]
+}

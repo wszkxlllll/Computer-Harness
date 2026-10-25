@@ -26,7 +26,7 @@ function input(
   sequence: number,
   clock: MonitorWorkClock,
   monitor: MonitorPolicyInput["monitor"] = { candidate: false, reasons: [], evidence: [], eventIds: [] },
-  overrides: Partial<Pick<MonitorPolicyInput, "runId" | "partitionKey" | "executionBarrier" | "terminal">> = {},
+  overrides: Partial<Pick<MonitorPolicyInput, "runId" | "partitionKey" | "executionBarrier" | "terminal" | "guidanceText">> = {},
 ): MonitorPolicyInput {
   return { runId, partitionKey: "session-a|viewport-800x600", sequence, clock, monitor, ...overrides };
 }
@@ -72,63 +72,133 @@ describe("MonitorPolicy", () => {
     expect(secondGuidance.proposal.kind).toBe("guidance");
   });
 
-  it("emits transition guidance immediately so the next Context can consume it", () => {
+  it("waits for a meaningful candidate or assessment before injecting a prompt", () => {
     const state = createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 2 });
-    const result = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 1 }, unchangedTransition()));
-    expect(result.proposal.kind).toBe("guidance");
-    if (result.proposal.kind === "guidance") {
-      expect(result.proposal.text).toContain("no observable change");
-      expect(result.proposal.text).not.toContain("transition-event");
+    const first = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 1 }, unchangedTransition()));
+    expect(first.proposal).toEqual({ kind: "none", reason: "candidate_observed" });
+    const later = reduceMonitorPolicy(first.state, input(2, { modelDecisionCount: 3, guiActionCount: 1 }, unchangedTransition()));
+    expect(later.proposal.kind).toBe("guidance");
+    if (later.proposal.kind === "guidance") {
+      expect(later.proposal.text).toContain("screenshot appeared unchanged");
+      expect(later.proposal.text).not.toContain("transition-event");
     }
+
+    const assessmentEventId = "assessment-evidence" as EventId;
+    const assessed = reduceMonitorPolicy(first.state, input(2, { modelDecisionCount: 2, guiActionCount: 1 }, {
+      ...unchangedTransition(assessmentEventId),
+      assessmentOutcome: "no_effect",
+      evidence: [
+        ...unchangedTransition(assessmentEventId).evidence,
+        { kind: "semantic_assessment", eventIds: [assessmentEventId] },
+      ],
+    }, { guidanceText: "Earlier model report (untrusted): \"the input looked empty\". Check the newest image." }));
+    expect(assessed.proposal.kind).toBe("guidance");
+    if (assessed.proposal.kind === "guidance") expect(assessed.proposal.text).toContain("the input looked empty");
   });
 
-  it("gives actionable next-turn guidance for reconciled assessment outcomes", () => {
-    const scenarios: Array<{
-      outcome: "no_effect" | "unexpected_change" | "uncertain";
-      reason: "no_observed_change" | "unexpected_change" | "assessment_uncertain";
-      evidence: "visual_transition_unchanged" | "visual_transition_changed" | "visual_transition_unknown";
-      phrase: string;
-    }> = [
-      { outcome: "no_effect", reason: "no_observed_change", evidence: "visual_transition_unchanged", phrase: "appears to have had no effect" },
-      { outcome: "unexpected_change", reason: "unexpected_change", evidence: "visual_transition_changed", phrase: "changed in an unexpected way" },
-      { outcome: "uncertain", reason: "assessment_uncertain", evidence: "visual_transition_unknown", phrase: "result is uncertain" },
-    ];
-    for (const [index, scenario] of scenarios.entries()) {
-      const eventId = `assessment-${index}` as EventId;
-      const output: MonitorPolicyInput["monitor"] = {
-        candidate: true,
-        assessmentOutcome: scenario.outcome,
-        reasons: [{ code: scenario.reason, eventIds: [eventId] }],
-        evidence: [
-          { kind: "semantic_assessment", eventIds: [eventId] },
-          { kind: scenario.evidence, eventIds: [eventId] },
-        ],
-        eventIds: [eventId],
-      };
-      const first = reduceMonitorPolicy(
-        createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 1 }),
-        input(100 + index * 2, { modelDecisionCount: 1, guiActionCount: 1 }, output),
-      );
-      const guidance = reduceMonitorPolicy(first.state, input(101 + index * 2, { modelDecisionCount: 2, guiActionCount: 1 }, output));
-      expect(guidance.proposal.kind).toBe("guidance");
-      if (guidance.proposal.kind === "guidance") expect(guidance.proposal.text).toContain(scenario.phrase);
-    }
+  it("uses supplied bounded guidance and does not prompt for uncertainty alone", () => {
+    const eventId = "assessment-uncertain" as EventId;
+    const uncertain: MonitorPolicyInput["monitor"] = {
+      candidate: true,
+      assessmentOutcome: "uncertain",
+      reasons: [{ code: "assessment_uncertain", eventIds: [eventId] }],
+      evidence: [
+        { kind: "semantic_assessment", eventIds: [eventId] },
+        { kind: "visual_transition_unknown", eventIds: [eventId] },
+      ],
+      eventIds: [eventId],
+    };
+    const first = reduceMonitorPolicy(
+      createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 1 }),
+      input(1, { modelDecisionCount: 1, guiActionCount: 1 }, uncertain, { guidanceText: "Untrusted report; inspect the newest image before choosing a next step." }),
+    );
+    expect(first.proposal).toEqual({ kind: "none", reason: "candidate_observed" });
+    const sameEpisode = reduceMonitorPolicy(
+      first.state,
+      input(2, { modelDecisionCount: 2, guiActionCount: 1 }, uncertain, { guidanceText: "Untrusted report; inspect the newest image before choosing a next step." }),
+    );
+    expect(sameEpisode.proposal.kind).not.toBe("guidance");
   });
 
-  it("requests help only after guidance budget, never because an old candidate aged out", () => {
+  it("suppresses guidance after its bounded budget and never requests user input", () => {
     let state = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 2, maxGuidanceCount: 1, cooldownWorkUnits: 1 });
     state = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate())).state;
     const guidance = reduceMonitorPolicy(state, input(2, { modelDecisionCount: 2, guiActionCount: 0 }, candidate()));
     state = guidance.state;
     const budget = reduceMonitorPolicy(state, input(3, { modelDecisionCount: 3, guiActionCount: 0 }, candidate()));
-    expect(budget.proposal).toEqual(expect.objectContaining({ kind: "help_requested", reason: "guidance_budget_exhausted" }));
-    expect(JSON.stringify(budget.proposal)).not.toContain("stop_required");
+    expect(budget.proposal).toEqual({ kind: "none", reason: "guidance_budget_exhausted" });
+    expect(budget.state.guidanceCount).toBe(1);
+    expect(JSON.stringify(budget.proposal)).not.toMatch(/help|retry|waiting_user/iu);
 
     const staleState = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 1 });
     const staleCandidate = reduceMonitorPolicy(staleState, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate()));
     const stale = reduceMonitorPolicy(staleCandidate.state, input(2, { modelDecisionCount: 3, guiActionCount: 0 }));
     expect(stale.proposal).toEqual({ kind: "none", reason: "no_candidate" });
     expect(stale.state.candidateFingerprint).toBeUndefined();
+  });
+
+  it("does not erase a bounded unresolved episode just because pixels changed", () => {
+    let state = createMonitorPolicyState({ mode: "guidance", maxCandidateAgeWorkUnits: 4, maxGuidanceCount: 1, cooldownWorkUnits: 1 });
+    state = reduceMonitorPolicy(state, input(1, { modelDecisionCount: 1, guiActionCount: 0 }, candidate())).state;
+    const first = reduceMonitorPolicy(state, input(2, { modelDecisionCount: 2, guiActionCount: 0 }, candidate()));
+    expect(first.proposal.kind).toBe("guidance");
+    state = first.state;
+
+    const differentReason = reduceMonitorPolicy(state, input(4, { modelDecisionCount: 4, guiActionCount: 1 }, unchangedTransition("new-reason")));
+    expect(differentReason.proposal).toEqual({ kind: "none", reason: "guidance_budget_exhausted" });
+    expect(differentReason.state.guidanceCount).toBe(1);
+
+    const changed = reduceMonitorPolicy(differentReason.state, input(5, { modelDecisionCount: 4, guiActionCount: 1 }, {
+      candidate: false,
+      reasons: [],
+      evidence: [{ kind: "visual_transition_changed", eventIds: ["changed" as EventId] }],
+      eventIds: ["changed" as EventId],
+    }));
+    expect(changed.state.guidanceCount).toBe(1);
+    expect(changed.state.candidateFingerprint).toBeDefined();
+    const stillUnresolved = reduceMonitorPolicy(changed.state, input(6, { modelDecisionCount: 5, guiActionCount: 1 }, candidate("same-target-again")));
+    expect(stillUnresolved.proposal).toEqual({ kind: "none", reason: "guidance_budget_exhausted" });
+
+    const agedOut = reduceMonitorPolicy(stillUnresolved.state, input(7, { modelDecisionCount: 7, guiActionCount: 1 }));
+    expect(agedOut.state.guidanceCount).toBe(0);
+    expect(agedOut.state.candidateFingerprint).toBeUndefined();
+    const freshEpisode = reduceMonitorPolicy(agedOut.state, input(8, { modelDecisionCount: 8, guiActionCount: 1 }, candidate("fresh-candidate")));
+    expect(freshEpisode.proposal).toEqual({ kind: "none", reason: "candidate_observed" });
+    const freshGuidance = reduceMonitorPolicy(freshEpisode.state, input(9, { modelDecisionCount: 9, guiActionCount: 1 }, candidate("fresh-candidate")));
+    expect(freshGuidance.proposal.kind).toBe("guidance");
+  });
+
+  it("preserves bound no-effect episodes but resets unrelated candidates on changed pixels", () => {
+    const initial = reduceMonitorPolicy(
+      createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 1 }),
+      input(1, { modelDecisionCount: 1, guiActionCount: 1 }, unchangedTransition()),
+    );
+    const guidance = reduceMonitorPolicy(initial.state, input(2, { modelDecisionCount: 2, guiActionCount: 1 }, unchangedTransition()));
+    expect(guidance.proposal.kind).toBe("guidance");
+    const changedNoEffect = reduceMonitorPolicy(guidance.state, input(3, { modelDecisionCount: 2, guiActionCount: 2 }, {
+      candidate: false,
+      reasons: [],
+      evidence: [{ kind: "visual_transition_changed", eventIds: ["changed-no-effect" as EventId] }],
+      eventIds: ["changed-no-effect" as EventId],
+    }));
+    expect(changedNoEffect.state.candidateFingerprint).toMatch(/^no_observed_change:/u);
+
+    const proposalOnly: MonitorPolicyInput["monitor"] = {
+      candidate: true,
+      reasons: [{ code: "repeated_proposal", eventIds: ["proposal-only" as EventId] }],
+      evidence: [{ kind: "action_proposed", eventIds: ["proposal-only" as EventId] }],
+      eventIds: ["proposal-only" as EventId],
+    };
+    const firstProposal = reduceMonitorPolicy(createMonitorPolicyState({ mode: "guidance" }), input(1, { modelDecisionCount: 1, guiActionCount: 0 }, proposalOnly));
+    const proposalGuidance = reduceMonitorPolicy(firstProposal.state, input(2, { modelDecisionCount: 2, guiActionCount: 0 }, proposalOnly));
+    const changedProposal = reduceMonitorPolicy(proposalGuidance.state, input(3, { modelDecisionCount: 2, guiActionCount: 1 }, {
+      candidate: false,
+      reasons: [],
+      evidence: [{ kind: "visual_transition_changed", eventIds: ["changed-proposal" as EventId] }],
+      eventIds: ["changed-proposal" as EventId],
+    }));
+    expect(changedProposal.state.candidateFingerprint).toBeUndefined();
+    expect(changedProposal.state.guidanceCount).toBe(0);
   });
 
   it("lets execution barriers suppress monitor proposals and never turns unknown into waiting_user", () => {
@@ -138,6 +208,25 @@ describe("MonitorPolicy", () => {
     expect(suppressed.proposal).toEqual({ kind: "none", reason: "suppressed_by_execution_barrier" });
     expect(JSON.stringify(suppressed.proposal)).not.toContain("retry");
     expect(JSON.stringify(suppressed.proposal)).not.toContain("waiting_user");
+  });
+
+  it("suppresses Monitor output during a normal action while retaining the current episode", () => {
+    const initial = reduceMonitorPolicy(
+      createMonitorPolicyState({ mode: "guidance", cooldownWorkUnits: 2 }),
+      input(1, { modelDecisionCount: 1, guiActionCount: 1 }, unchangedTransition()),
+    );
+    const inFlight = reduceMonitorPolicy(initial.state, input(
+      2,
+      { modelDecisionCount: 2, guiActionCount: 1 },
+      unchangedTransition("in-flight-transition"),
+      { executionBarrier: "action_in_flight" },
+    ));
+    expect(inFlight.proposal).toEqual({ kind: "none", reason: "suppressed_by_execution_barrier" });
+    expect(inFlight.state.candidateClock).toEqual(initial.state.candidateClock);
+    expect(inFlight.state.guidanceCount).toBe(0);
+
+    const settled = reduceMonitorPolicy(inFlight.state, input(3, { modelDecisionCount: 2, guiActionCount: 2 }, unchangedTransition("settled-transition")));
+    expect(settled.proposal.kind).toBe("guidance");
   });
 
   it("is idempotent for replay/out-of-order input and resets across run or partition", () => {

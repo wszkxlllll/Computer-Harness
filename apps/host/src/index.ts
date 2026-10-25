@@ -18,7 +18,7 @@ import { ManagedBrowserProfileService } from "./managed-browser-profile-service.
 import { HostVoiceSessionService } from "./voice-session-service.js";
 import { createConfiguredVoiceProvider } from "./voice-provider-config.js";
 import { resolveHostWindowSelector } from "./window-selection-config.js";
-import { createHostSessionConfig, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, type HostArguments } from "./session-config.js";
+import { createHostSessionConfig, parseHostRiskModel, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, type HostArguments } from "./session-config.js";
 import { resolveHostSourceLinkedFinishContract } from "./source-linked-finish-config.js";
 
 const hostDirectory = dirname(fileURLToPath(import.meta.url));
@@ -172,11 +172,14 @@ function parseArguments(argv: readonly string[]): HostArguments {
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index]!;
     if (item === "--help" || item === "-h") {
-      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192] [--risk-max-model-requests 1..12 (default 1)] [--risk-timeout-ms 1000..240000 (default 15000)]\n");
+      process.stdout.write("Usage: host --env-file <path> --socket <path> --model <glm-5.3-flash|qwen3.8-flash|deepseek-flash|deepseek-v4.1-flash> --output <path> [--port 4317] [--origin <exact-origin> ...] [--max-model-requests 48] [--max-steps 160] [--glm-max-output-tokens 8192] [--risk-model off|same (default off)] [--risk-max-model-requests 1..12 (default 1)] [--risk-timeout-ms 1000..240000 (default 15000)]\n");
       process.stdout.write("--risk-max-model-requests bounds layered semantic review requests only; it does not change the main model-request budget.\n");
       process.stdout.write("Optional local env-file settings: HARNESS_MULTILINE_TYPE_PROFILE=off|foreground-caret-v1; HARNESS_OPERATION_GUIDANCE=off|catalog-v1; HARNESS_PROVIDER_RECOVERY=off|ambiguous-headers-once-v1 (default off); HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS=1..900000 (default 900000).\n");
       process.stdout.write("foreground-caret-v1 is only for an explicitly verified candidate CUA socket; it is not a general stock CUA 0.22 compatibility claim.\n");
       process.stdout.write("Optional Run result contract: HARNESS_SOURCE_LINKED_FINISH_CONTRACT may contain a bounded source-linked-finish-v1 JSON field contract.\n");
+      process.stdout.write("The startup model is fixed for all Runs in this Host process; restart the Host to change it. Web/phone has no model picker, hot switch, fallback, or action replay.\n");
+      process.stdout.write("DeepSeek private env: DEEPSEEK_API_KEY; optional DEEPSEEK_BASE_URL, DEEPSEEK_REQUEST_TIMEOUT_MS (default 90000), DEEPSEEK_MAX_OUTPUT_TOKENS (default 4096). Native tools, thinking disabled, actual-pixel coordinates; no Qwen coordinate flag needed.\n");
+      process.stdout.write("Volcengine Ark Agent Plan model: deepseek-v4.1-flash (separate from DeepSeek official deepseek-flash). Private env: ARK_API_KEY; optional ARK_BASE_URL (default https://ark.cn-beijing.volces.com/api/plan/v3), ARK_REQUEST_TIMEOUT_MS (default 90000), ARK_MAX_OUTPUT_TOKENS (default 4096). Native tools, thinking disabled, actual-pixel coordinates.\n");
       process.exit(0);
     }
     if (!item.startsWith("--")) throw new Error("Host arguments must use named options.");
@@ -200,11 +203,12 @@ function parseArguments(argv: readonly string[]): HostArguments {
   const rawMaxSteps = one("--max-steps", String(DEFAULT_MAX_STEPS));
   const rawMaxModelRequests = one("--max-model-requests", String(DEFAULT_MAX_MODEL_REQUESTS));
   const rawRiskMaxModelRequests = one("--risk-max-model-requests");
+  const riskModel = parseHostRiskModel(one("--risk-model"));
   const riskTimeoutMs = parseHostRiskTimeoutMs(one("--risk-timeout-ms"));
   if (envFile === undefined || socket === undefined || output === undefined) {
     throw new Error("--env-file, --socket, and --output are required.");
   }
-  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash") throw new Error("--model must be glm-5.3-flash or qwen3.8-flash.");
+  if (model !== "glm-5.3-flash" && model !== "qwen3.8-flash" && model !== "deepseek-flash" && model !== "deepseek-v4.1-flash") throw new Error("--model must be glm-5.3-flash, qwen3.8-flash, deepseek-flash, or deepseek-v4.1-flash (Ark Agent Plan).");
   const port = Number(rawPort);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535.");
   const origins = values.get("--origin") ?? ["http://localhost:" + (port === 0 ? "4317" : String(port))];
@@ -213,7 +217,7 @@ function parseArguments(argv: readonly string[]): HostArguments {
   const maxModelRequests = parseBoundedPositiveInteger(rawMaxModelRequests, "--max-model-requests", MAX_CONFIGURED_MODEL_REQUESTS);
   const riskMaxModelRequests = parseHostRiskMaxModelRequests(rawRiskMaxModelRequests);
   const glmMaxOutputTokens = parseGlmOutputBudget(one("--glm-max-output-tokens"));
-  return { envFile, socket, model, output, port, origins, maxSteps, maxModelRequests, riskMaxModelRequests, riskTimeoutMs, glmMaxOutputTokens };
+  return { envFile, socket, model, output, port, origins, maxSteps, maxModelRequests, riskModel, riskMaxModelRequests, riskTimeoutMs, glmMaxOutputTokens };
 }
 
 function parseBoundedPositiveInteger(raw: string | undefined, option: string, maximum: number): number {
@@ -227,11 +231,15 @@ function parseBoundedPositiveInteger(raw: string | undefined, option: string, ma
 function readProviderCredentials(): ProviderCredentials {
   const glmApiKey = process.env.ZHIPUAI_API_KEY ?? process.env.ZHIPU_API_KEY ?? process.env.GLM_API_KEY;
   const qwenApiKey = process.env.DASHSCOPE_API_KEY;
+  const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
+  const arkApiKey = process.env.ARK_API_KEY;
   const memoryEmbeddingApiKey = process.env.MEMORY_EMBEDDING_API_KEY;
   const osworldBridgeToken = process.env.OSWORLD_BRIDGE_TOKEN;
   return {
     ...(glmApiKey === undefined ? {} : { glmApiKey }),
     ...(qwenApiKey === undefined ? {} : { qwenApiKey }),
+    ...(deepseekApiKey === undefined ? {} : { deepseekApiKey }),
+    ...(arkApiKey === undefined ? {} : { arkApiKey }),
     ...(memoryEmbeddingApiKey === undefined ? {} : { memoryEmbeddingApiKey }),
     ...(osworldBridgeToken === undefined ? {} : { osworldBridgeToken }),
   };

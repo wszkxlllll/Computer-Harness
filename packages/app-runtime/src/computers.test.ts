@@ -64,6 +64,8 @@ describe("prepareComputerRunAssembly", () => {
     if (process.platform === "win32") {
       expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("intended to insert at the current caret or replace the current selection");
       expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("driver completion does not verify the resulting content");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("use a single paragraph in submit-on-Enter controls");
+      expect(caretProfile.toolPresentationOverrides[0]?.description).toContain("perform any send/submit as a separate deliberate action");
       expect(caretProfile.toolPresentationOverrides[0]?.description).not.toContain("preserves the current caret or selection");
       expect(caretProfile.toolPresentationOverrides[0]?.inputPropertyDescriptions.elementRef).toContain("append-to-end");
     }
@@ -351,6 +353,47 @@ describe("createComputer", () => {
     expect(createHost).not.toHaveBeenCalled();
   });
 
+  it("keeps the managed-browser Host/profile and cross-window binding when grounding is off", async () => {
+    const fixture = managedFixture();
+    const computer = await createComputer({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      grounding: "off",
+      managedBrowserCompanion: true,
+      managedBrowserUrl: "https://example.test/entry",
+      managedBrowserProfileMode: "persistent",
+      managedBrowserProfileLabel: "fixture.profile",
+      managedBrowserProfileRoot: "C:\\HarnessOwned\\profiles",
+      windowSwitch: "opened-windows-v1",
+    }, {
+      createManagedBrowserHost: fixture.createHost,
+      openCuaBootstrapSession: fixture.openBootstrap,
+      importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+    });
+    const session = await computer.open({}, fixture.signal);
+
+    expect(fixture.calls).toMatchObject({ bootstrapOpen: 1, hostConstruct: 1, hostStart: 1, delegateConstruct: 1, delegateOpen: 1 });
+    expect(fixture.calls.hostOptions).toMatchObject({
+      url: "https://example.test/entry",
+      profileMode: "persistent",
+      profileLabel: "fixture.profile",
+      persistentProfileRoot: "C:\\HarnessOwned\\profiles",
+    });
+    expect(fixture.calls.delegateOptions).toMatchObject({
+      grounding: "off",
+      windowSwitch: "opened-windows-v1",
+      browserTarget: managedTarget,
+      activateManagedBrowserOnOpen: true,
+    });
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("windowSwitchAllowedTargets");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("domGroundingTransport");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+
+    await computer.close(session);
+    expect(fixture.calls).toMatchObject({ delegateClose: 1, hostClose: 1, bootstrapClose: 1 });
+  });
+
   it("rejects SDK persistent managed profiles without an explicit Harness-owned root", async () => {
     await expect(createComputer({
       kind: "cua",
@@ -419,10 +462,65 @@ describe("createComputer", () => {
       windowSwitchAllowedTargets: [nativeScope, managedTarget.windowTarget],
     });
     expect(fixture.calls.delegateOptions).not.toHaveProperty("windowTarget");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("activateManagedBrowserOnOpen");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("windowRelationshipProbe");
+    if (process.platform === "win32") {
+      expect(fixture.calls.delegateOptions?.desktopGroundingRelationshipProbe).toMatchObject({ read: expect.any(Function) });
+    } else {
+      expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+    }
     expect(fixture.calls).toMatchObject({ hostStart: 1, delegateOpen: 1, hostClose: 0, bootstrapClose: 0 });
 
     await computer.close(session);
     expect(fixture.calls).toMatchObject({ delegateClose: 1, hostClose: 1, bootstrapClose: 1 });
+  });
+
+  it("keeps the desktop companion grounding probe explicitly opt-outable", async () => {
+    const fixture = managedFixture();
+    const computer = await createComputer({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      grounding: "hybrid-catalog-v1",
+      managedBrowserUrl: "about:blank",
+      managedBrowserCompanion: true,
+      windowSwitch: "opened-windows-v1",
+    }, {
+      createManagedBrowserHost: fixture.createHost,
+      openCuaBootstrapSession: fixture.openBootstrap,
+      importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+      windowRelationshipProbe: null,
+    });
+    const session = await computer.open({}, fixture.signal);
+
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("windowRelationshipProbe");
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("desktopGroundingRelationshipProbe");
+    await computer.close(session);
+  });
+
+  it("preserves a manually selected native initial window instead of activating the browser companion", async () => {
+    const fixture = managedFixture();
+    const nativeTarget = { pid: 456, windowId: 789 };
+    const computer = await createComputer({
+      kind: "cua",
+      socketPath: "fixture.sock",
+      screenshotDir: "screenshots",
+      grounding: "off",
+      managedBrowserUrl: "https://example.test/entry",
+      managedBrowserCompanion: true,
+      windowSwitch: "opened-windows-v1",
+      windowTarget: nativeTarget,
+      windowSwitchAllowedTargets: [nativeTarget],
+    }, {
+      createManagedBrowserHost: fixture.createHost,
+      openCuaBootstrapSession: fixture.openBootstrap,
+      importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+    });
+    const session = await computer.open({}, fixture.signal);
+
+    expect(fixture.calls.delegateOptions).toMatchObject({ windowTarget: nativeTarget });
+    expect(fixture.calls.delegateOptions).not.toHaveProperty("activateManagedBrowserOnOpen");
+    await computer.close(session);
   });
 
   it("rejects a companion with an empty Host target scope before opening the browser", async () => {

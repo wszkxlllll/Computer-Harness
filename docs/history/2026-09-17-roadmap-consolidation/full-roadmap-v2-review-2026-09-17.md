@@ -16,7 +16,7 @@
 
 同时，应明确：新增能力属于主动扩展的产品目标，不是旧 F01–F17 自动推导出的全部必修漏洞。每个 Bug 按支持范围独立关闭。可以在受控体验可用后暂停扩张、优化体验，再进入后续阶段。
 
-本轮完整阅读两份 V2 文档，并检查当前 Runtime 的一次性 start/finished、CommandInbox/Approval、Trajectory 写入/flush、Memory/Context 及 Stage 6 实验矩阵。源码未变化，因此未重复运行上轮已执行的 179 项测试和 9 项复现探针；没有新 API 或桌面实验。上轮证据见[外部审计复核](external-audit-confirmation-2026-09-17.md)。
+本轮完整阅读两份 V2 文档，并检查当前 Runtime 的一次性 start/finished、CommandInbox/Approval、Trajectory 写入/flush、Memory/Context 及 Stage 6 实验矩阵。源码未变化，因此未重复运行上轮已执行的 179 项测试和 9 项复现探针；没有新 API 或桌面实验。上轮证据见[外部审计复核](./external-audit-confirmation-2026-09-17.md)。
 
 ## 2. 需修正的两个文档冲突
 

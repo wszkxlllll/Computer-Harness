@@ -101,7 +101,7 @@ describe("pending request panel", () => {
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(onRespond).toHaveBeenCalledTimes(2));
     expect(onRespond).toHaveBeenNthCalledWith(2, "Friday morning");
-    expect(input.value).toBe("");
+    await waitFor(() => expect(input.value).toBe(""));
   });
 
   it("keeps initial request content quiet and announces a same-kind replacement once", () => {
