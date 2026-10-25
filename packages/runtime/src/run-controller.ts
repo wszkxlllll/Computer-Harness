@@ -2887,6 +2887,16 @@ export class RunController {
     }
     const action = candidate.action;
     if (context.session.platform === "darwin" && this.latestObservation?.surfaceRef.kind === "desktop") {
+      const unresolvedClick = this.hasUnresolvedNearbyClick(action);
+      const postEnterClick = action.kind === "click" && this.hasCurrentNegativeAssessment()
+        && this.needsConsecutiveActionRefresh(action, isUnmodifiedEnter, false);
+      if (unresolvedClick || postEnterClick) {
+        await this.rejectToolCall(call.id, unresolvedClick
+          ? "CLICK_OUTCOME_UNRESOLVED: no input was sent. Repeating a nearby completed click requires a current, correctly bound expected_change assessment; missing, stale, negative or uncertain evidence does not establish its outcome. Reinspect the fresh image and choose a newly grounded target or another observed method. Pure observation does not authorize repeating this click; this rejected call will not be replayed."
+          : "ENTER_CLICK_REFRESH_REQUIRED: no input was sent. The completed Enter has only its first post-action image and a bound no_effect or uncertain assessment; the dialog may still be transitioning. A fresh observation follows. Reassess the current screen before choosing a new action; this rejected click will not be replayed.");
+        await this.observeAndCommit(context.session);
+        return;
+      }
       const enterRefresh = this.needsConsecutiveActionRefresh(action, isUnmodifiedEnter);
       const cmdShiftGRefresh = this.needsConsecutiveActionRefresh(action, isCmdShiftG);
       const clickRefresh = this.needsConsecutiveActionRefresh(action, (previous): previous is Extract<ActionIntent, { kind: "click" }> =>
@@ -3308,8 +3318,9 @@ export class RunController {
   private needsConsecutiveActionRefresh(
     action: ActionIntent,
     matches: (candidate: ActionIntent | undefined) => candidate is Extract<ActionIntent, { kind: "keypress" | "click" }>,
+    requireMatchingCandidate = true,
   ): boolean {
-    if (!matches(action) || action.basedOn !== this.latestObservation?.id) return false;
+    if ((requireMatchingCandidate && !matches(action)) || action.kind === "wait" || action.basedOn !== this.latestObservation?.id) return false;
     let observationCount = 0;
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       const event = this.events[index];
@@ -3327,6 +3338,63 @@ export class RunController {
         return before?.type === "observation.created" && this.latestObservation !== undefined &&
           sameSurfaceRef(before.observation.surfaceRef, this.latestObservation.surfaceRef);
       }
+    }
+    return false;
+  }
+
+  private boundAssessmentAt(index: number): ReturnType<typeof parseObservationAssessment> {
+    const event = this.events[index];
+    if (event?.type !== "model.response.received") return undefined;
+    const assessment = parseObservationAssessment(event.turn.observationAssessment);
+    if (assessment === undefined) return undefined;
+    const binding = currentObservationAssessmentBinding(this.events.slice(0, index));
+    return binding?.observationId === assessment.observationId && binding.actionId === assessment.actionId
+      ? assessment : undefined;
+  }
+
+  private hasCurrentNegativeAssessment(): boolean {
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      if (this.events[index]?.type !== "model.response.received") continue;
+      const assessment = this.boundAssessmentAt(index);
+      return assessment?.observationId === this.latestObservation?.id
+        && (assessment?.actionOutcome === "no_effect" || assessment?.actionOutcome === "uncertain");
+    }
+    return false;
+  }
+
+  private hasUnresolvedNearbyClick(action: ActionIntent): boolean {
+    const latest = this.latestObservation;
+    if (action.kind !== "click" || latest === undefined || action.basedOn !== latest.id
+      || latest.viewport.coordinateSpace !== "physical") return false;
+    const samePartition = (observation: ObservationFrame): boolean => sameSurfaceRef(observation.surfaceRef, latest.surfaceRef)
+      && observation.viewport.coordinateSpace === latest.viewport.coordinateSpace
+      && observation.viewport.width === latest.viewport.width && observation.viewport.height === latest.viewport.height;
+    let positiveAssessment = false;
+    let assessmentSeen = false;
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index];
+      if (event === undefined) continue;
+      if (event.type === "user.input.received" || event.type === "computer.window.handoff.requested"
+        || event.type === "computer.window.handoff.completed" || event.type === "computer.window.handoff.ignored"
+        || event.type === "computer.surface.transitioned" || event.type === "action.execution.failed") return false;
+      if (event.type === "observation.created" && !samePartition(event.observation)) return false;
+      if (event.type === "model.response.received" && !assessmentSeen) {
+        const assessment = this.boundAssessmentAt(index);
+        if (assessment !== undefined) {
+          assessmentSeen = true;
+          positiveAssessment = assessment.actionOutcome === "expected_change" && assessment.observationId === latest.id;
+        }
+      }
+      if (event.type !== "action.execution.completed") continue;
+      if (event.receipt.status !== "completed") return false;
+      const previous = this.actionForId(event.receipt.actionId);
+      if (previous?.kind === "wait") continue;
+      if (previous?.kind !== "click" || positiveAssessment) return false;
+      const before = this.events.find((item) => item.type === "observation.created" && item.observation.id === previous.basedOn);
+      // Eight physical pixels describe a retry neighbourhood, never a new
+      // click position. Missing diagnostics must not bypass the retry gate.
+      return before?.type === "observation.created" && samePartition(before.observation)
+        && Math.hypot(previous.point.x - action.point.x, previous.point.y - action.point.y) <= 8;
     }
     return false;
   }

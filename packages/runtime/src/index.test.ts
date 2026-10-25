@@ -2299,6 +2299,153 @@ describe("RunController S2-2 happy path", () => {
     expect(events.filter((event) => event.type === "observation.created")).toHaveLength(0);
   });
 
+  describe("Mac desktop unresolved click recovery", () => {
+    type Decision = (input: ModelInput, events: readonly RuntimeEvent[]) => ModelTurn;
+    const click = (id: string, x = 270, y = 151): ToolCall => ({ id: id as ToolCallId, name: "click", arguments: { x, y } });
+    const wait = (id: string): ToolCall => ({ id: id as ToolCallId, name: "wait", arguments: { durationMs: 0 } });
+    const enter = (id: string): ToolCall => ({ id: id as ToolCallId, name: "keypress", arguments: { keys: ["ENTER"] } });
+    const finish: Decision = () => ({ type: "finish", summary: "synthetic recovery complete" });
+    const decide = (call: ToolCall, outcome?: ObservationAssessment["actionOutcome"], invalid?: "action" | "observation"): Decision => (_input, events) => {
+      const binding = currentObservationAssessmentBinding(events);
+      return {
+        type: "tool_calls", calls: [call],
+        ...(outcome === undefined || binding === undefined ? {} : { observationAssessment: {
+          observationId: invalid === "observation" ? "stale-observation" as ObservationId : binding.observationId,
+          actionId: invalid === "action" ? "unrelated-action" as ActionId : binding.actionId,
+          actionOutcome: outcome, evidence: "The current target outcome is being assessed.", progress: null,
+        } }),
+      };
+    };
+    class RecoveryComputer extends FakeComputer {
+      readonly actions: ActionIntent[] = [];
+      observations = 0;
+      constructor(readonly scope: "darwin" | "win32" | "native_window" | "generation" | "viewport" = "darwin", readonly failRefresh = false) {
+        super(false, scope === "win32" ? "win32" : "darwin");
+      }
+      override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        this.observations += 1;
+        if (this.failRefresh && this.observations === 4) throw new Error("injected unresolved-click refresh failure");
+        const capture = await super.observe(session, observationId, signal);
+        return {
+          ...capture,
+          ...(this.scope === "native_window" ? { surfaceRef: nativePeerSurfaceRef } : {}),
+          ...(this.scope === "generation" && this.observations >= 3 ? {
+            surfaceRef: { ...desktopSurfaceRef, generation: 2 },
+            ...(this.observations === 3 ? { surfaceTransitionReason: "generation_advanced" as const } : {}),
+          } : {}),
+          ...(this.scope === "viewport" && this.observations >= 3 ? { viewport: { ...viewport, width: 801 } } : {}),
+        };
+      }
+      override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        this.actions.push(action);
+        return super.execute(session, action, signal);
+      }
+    }
+    async function setup(turns: Decision[], computer = new RecoveryComputer()) {
+      let controller: RunController | undefined;
+      const provider = new EventAwareProvider(turns, () => controller?.getEvents() ?? []);
+      const registry = createDefaultComputerTools();
+      const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(20, 20), {
+        contextCompiler: new DefaultContextCompiler(registry),
+        features: { planning: "off", memory: "off", batching: "same-control-input-v1", riskGuard: "off", monitor: "shadow" },
+      });
+      controller = created.controller;
+      return { ...created, provider, computer };
+    }
+    const rejections = (events: readonly RuntimeEvent[]) => events.filter((event) => event.type === "tool.call.rejected"
+      && (event.reason.startsWith("CLICK_OUTCOME_UNRESOLVED:") || event.reason.startsWith("ENTER_CLICK_REFRESH_REQUIRED:")));
+
+    it.each(["no_effect", "uncertain"] as const)("blocks a near click after a wait-bound %s assessment, preserving the episode across its own refresh", async (outcome) => {
+      const created = await setup([
+        decide(click("first-click")), decide(wait("inspect")),
+        decide(click("near-retry", 270, 153), outcome), decide(click("retry-after-refresh", 270, 159)),
+        decide(click("new-target", 290, 151)), finish,
+      ]);
+      try {
+        await expect(created.controller.start("Inspect a failed target and choose another visible target")).resolves.toBe("succeeded");
+        const events = created.controller.getEvents();
+        expect(created.computer.actions.map((action) => action.kind)).toEqual(["click", "wait", "click"]);
+        expect(rejections(events)).toHaveLength(2);
+        expect(events.filter((event) => event.type === "action.proposed").map((event) => event.callId)).toEqual(["first-click", "inspect", "new-target"]);
+        expect(events.some((event) => event.type === "monitor.transition" && event.transition === "changed")).toBe(true);
+        expect(created.computer.observations).toBe(6);
+        const blocks = created.provider.inputs[3]!.messages.flatMap((message) => message.content);
+        expect(blocks.some((block) => block.type === "tool_result" && JSON.stringify(block.result).includes("CLICK_OUTCOME_UNRESOLVED"))).toBe(true);
+        const observations = events.filter((event) => event.type === "observation.created");
+        expect(blocks.filter((block) => block.type === "image")).toEqual([expect.objectContaining({ asset: observations[3]!.observation.screenshot })]);
+        expect(events.some((event) => event.type === "approval.requested")).toBe(false);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it("retains a click-bound negative assessment across a later unassessed wait and allows a different keyboard method", async () => {
+      const created = await setup([
+        decide(click("first")), decide(wait("inspect"), "no_effect"), decide(click("near", 272, 151)),
+        decide(enter("other-method")), finish,
+      ]);
+      try {
+        await expect(created.controller.start("Use another observed method")).resolves.toBe("succeeded");
+        expect(created.computer.actions.map((action) => action.kind)).toEqual(["click", "wait", "keypress"]);
+        expect(rejections(created.controller.getEvents())).toHaveLength(1);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it.each(["no_effect", "uncertain"] as const)("refreshes once before a click on Enter's first frame assessed %s", async (outcome) => {
+      const created = await setup([decide(enter("confirm")), decide(click("transitional-click"), outcome), decide(click("new-decision")), finish]);
+      try {
+        await expect(created.controller.start("Inspect after Enter before choosing a new click")).resolves.toBe("succeeded");
+        expect(created.computer.actions.map((action) => action.kind)).toEqual(["keypress", "click"]);
+        expect(created.computer.observations).toBe(4);
+        expect(rejections(created.controller.getEvents())).toEqual([expect.objectContaining({ callId: "transitional-click", reason: expect.stringContaining("ENTER_CLICK_REFRESH_REQUIRED:") })]);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it.each(["positive", "outside-radius", "keyboard-reset", "positive-after-negative"] as const)("preserves a legitimate new click for %s", async (scenario) => {
+      const turns: Decision[] = [decide(click("first")), decide(wait("inspect"), scenario === "positive-after-negative" ? "no_effect" : undefined)];
+      if (scenario === "keyboard-reset") turns.push(decide(enter("keyboard"), "no_effect"), decide(wait("after-keyboard")));
+      turns.push(decide(click("new-click", scenario === "outside-radius" ? 279 : 272, 151),
+        scenario === "positive" || scenario === "positive-after-negative" ? "expected_change" : "no_effect"), finish);
+      const created = await setup(turns);
+      try {
+        await expect(created.controller.start("Preserve normal new actions")).resolves.toBe("succeeded");
+        expect(created.computer.actions.filter((action) => action.kind === "click")).toHaveLength(2);
+        expect(rejections(created.controller.getEvents())).toHaveLength(0);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it.each(["missing", "wrong-action", "stale-observation", "unexpected_change"] as const)("blocks an unverified near retry with %s diagnostics", async (scenario) => {
+      const created = await setup([
+        decide(click("first", 490, 548)),
+        decide(click("a70-one-pixel-retry", 489, 548), scenario === "missing" ? undefined : scenario === "unexpected_change" ? "unexpected_change" : "expected_change",
+          scenario === "wrong-action" ? "action" : scenario === "stale-observation" ? "observation" : undefined),
+        decide(wait("independent-frame")), decide(click("still-unverified", 490, 548)), finish,
+      ]);
+      try {
+        await created.controller.start("Do not repeat A70's unverified one-pixel retry");
+        expect(created.computer.actions.map((action) => action.kind)).toEqual(["click", "wait"]);
+        expect(rejections(created.controller.getEvents())).toHaveLength(2);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it.each(["win32", "native_window", "generation", "viewport"] as const)("does not carry a negative click episode across %s scope", async (scope) => {
+      const created = await setup([decide(click("first")), decide(wait("inspect")), decide(click("new-scope", 272, 151), "no_effect"), finish], new RecoveryComputer(scope));
+      try {
+        await expect(created.controller.start("Keep partitions independent")).resolves.toBe("succeeded");
+        expect(created.computer.actions.filter((action) => action.kind === "click")).toHaveLength(2);
+        expect(rejections(created.controller.getEvents())).toHaveLength(0);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it("never dispatches or replays the blocked click when its fresh capture fails", async () => {
+      const created = await setup([decide(click("first")), decide(wait("inspect")), decide(click("blocked", 272, 151), "no_effect"), finish], new RecoveryComputer("darwin", true));
+      try {
+        await expect(created.controller.start("Stop after a failed fresh capture")).resolves.toBe("failed");
+        expect(created.computer.actions.map((action) => action.kind)).toEqual(["click", "wait"]);
+        expect(created.provider.inputs).toHaveLength(3);
+        expect(rejections(created.controller.getEvents())).toHaveLength(1);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+  });
+
   describe.each([
     { label: "Enter", keys: ["ENTER"], toolName: "keypress", effect: "navigate", rejectionPrefix: "ENTER_REFRESH_REQUIRED:" },
     { label: "CMD+SHIFT+G", keys: ["CMD", "SHIFT", "G"], toolName: "hotkey", effect: "local_edit", rejectionPrefix: "SHORTCUT_REFRESH_REQUIRED:" },
@@ -2337,11 +2484,24 @@ describe("RunController S2-2 happy path", () => {
       event.type === "tool.call.rejected" && event.reason.startsWith(rejectionPrefix),
     );
     async function createShortcutRun(turns: ModelTurn[], computer = new ShortcutComputer(), onGenerate?: (count: number) => void, registry = createDefaultComputerTools()) {
+      // These cases exercise independent-frame gating for legitimate repeat
+      // decisions. Missing/invalid outcome diagnostics are tested separately.
+      let controller: RunController | undefined;
       const provider = new ScriptedProvider(turns, onGenerate);
+      const originalGenerate = provider.generate.bind(provider);
+      provider.generate = async (input, options) => {
+        const turn = await originalGenerate(input, options);
+        const binding = currentObservationAssessmentBinding(controller?.getEvents() ?? []);
+        return toolName === "click" && turn.type === "tool_calls" && binding !== undefined
+          ? { ...turn, observationAssessment: { observationId: binding.observationId, actionId: binding.actionId,
+            actionOutcome: "expected_change", evidence: "Synthetic target visibly advanced to a new repeatable state.", progress: null } }
+          : turn;
+      };
       const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(10, 10), {
         contextCompiler: new DefaultContextCompiler(registry),
         features: { planning: "off", memory: "off", batching: "same-control-input-v1", riskGuard: "layered", monitor: "shadow" },
       });
+      controller = created.controller;
       return { ...created, provider, computer };
     }
 
@@ -2630,7 +2790,7 @@ describe("RunController S2-2 happy path", () => {
           expect(computer.actions.map((action) => action.kind)).toEqual(["click", "type"]);
           expect(computer.actions[1]).toMatchObject({ text: "new decision", basedOn: observations[2]!.observation.id });
           expect(events.filter((event) => event.type === "action.proposed").map((event) => event.callId)).toEqual(["first-click", "fresh-input"]);
-          expect(refreshRejections(events)).toHaveLength(1);
+          expect(events.filter((event) => event.type === "tool.call.rejected" && event.reason.startsWith("CLICK_OUTCOME_UNRESOLVED:"))).toHaveLength(1);
           expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "stale-batch-suffix" &&
             event.reason.includes("remaining calls were not executed"))).toBe(true);
           expect(computer.observationAttempts).toBe(4);

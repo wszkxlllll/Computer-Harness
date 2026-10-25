@@ -8,7 +8,7 @@ import { DefaultContextCompiler } from "../../../packages/context/src/index.js";
 import { ApplicationSession } from "../../../packages/app-runtime/src/application-session.js";
 import type { ComputerBackendConfig } from "../../../packages/app-runtime/src/computers.js";
 import { InProcessEnvironmentOwner } from "../../../packages/app-runtime/src/environment-owner.js";
-import { createHostSessionConfig, parseHostRiskModel, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, resolveHostRunProfileSettings, type HostArguments } from "./session-config.js";
+import { parseGlmImageMaxEdge, createHostSessionConfig, parseHostRiskGuard, parseHostRiskModel, parseHostRiskMaxModelRequests, parseHostRiskTimeoutMs, resolveHostRunProfileSettings, type HostArguments } from "./session-config.js";
 
 const hostArguments: HostArguments = {
   envFile: "fixture.env",
@@ -24,6 +24,41 @@ const hostArguments: HostArguments = {
 };
 
 describe("Host-local Run profile configuration", () => {
+  it("requires an explicit valid Host option to disable the layered Guard", () => {
+    expect(parseHostRiskGuard(undefined)).toBe("layered");
+    expect(parseHostRiskGuard("layered")).toBe("layered");
+    expect(parseHostRiskGuard("off")).toBe("off");
+    for (const value of ["", "layer", "OFF", "Layered", " off", "off ", "true", "secret-looking-invalid-value"]) {
+      expect(() => parseHostRiskGuard(value)).toThrow("--risk-guard must be off or layered.");
+    }
+  });
+
+  it("keeps risk Guard selection local to Host arguments and preserves the other session boundaries", () => {
+    const profile = { profileLabel: "fixture", profileRoot: "fixture-profile" };
+    const defaultConfig = createHostSessionConfig(hostArguments, "fixture-output", profile, {
+      HARNESS_RISK_GUARD: "off",
+    });
+    expect(defaultConfig.riskGuard).toBe("layered");
+    expect(createHostSessionConfig({ ...hostArguments, riskGuard: "layered" }, "fixture-output", profile, {})).toEqual(defaultConfig);
+    for (const riskModel of [undefined, "off"] as const) {
+      const config = createHostSessionConfig({
+        ...hostArguments,
+        riskGuard: "off",
+        ...(riskModel === undefined ? {} : { riskModel }),
+      }, "fixture-output", profile, {});
+      expect(config).toEqual({ ...defaultConfig, riskGuard: "off", riskModel: "off" });
+    }
+    expect(() => createHostSessionConfig({
+      ...hostArguments, riskGuard: "invalid" as NonNullable<HostArguments["riskGuard"]>,
+    }, "fixture-output", profile, {})).toThrow("--risk-guard must be off or layered.");
+  });
+
+  it("rejects an active semantic risk model when the Host risk Guard is off", () => {
+    expect(() => createHostSessionConfig({ ...hostArguments, riskGuard: "off", riskModel: "same" }, "fixture-output", {
+      profileLabel: "fixture", profileRoot: "fixture-profile",
+    }, {})).toThrow("--risk-model same requires --risk-guard layered; use --risk-model off or omit it when --risk-guard off.");
+  });
+
   it("keeps semantic review opt-in while preserving layered local checks", () => {
     expect(parseHostRiskModel(undefined)).toBe("off");
     expect(parseHostRiskModel("off")).toBe("off");
@@ -238,9 +273,16 @@ describe("Host-local Run profile configuration", () => {
     }
   });
 
-  it("passes explicit Host env profiles through ApplicationSession and the real Run consumers", async () => {
+  it.each([
+    { goal: "Create a new document and save it.", guidanceId: "text_document_save", riskGuard: "layered" },
+    {
+      goal: "请比较两款商品的官网信息。查询完成后，回到我已经打开并准备好的文本编辑文稿，直接写入中文报告，不需要新建文稿。将报告保存为商品比较报告.txt，通过保存对话框选择本地桌面，不要输入绝对路径。保存后确认文件名和保存位置，保持文稿打开，不必关闭后重新打开。",
+      guidanceId: "combined_task_guidance", riskGuard: "off",
+    },
+    { goal: "不需要新建文稿，保存当前文稿，不必关闭后重新打开。", guidanceId: "text_document_save", riskGuard: "off" },
+  ] as const)("passes Host profiles and $guidanceId through the real Run consumers ($riskGuard)", async ({ goal, guidanceId, riskGuard }) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-host-session-profile-"));
-    const sessionConfig = createHostSessionConfig(hostArguments, outputDir, {
+    const sessionConfig = createHostSessionConfig({ ...hostArguments, riskGuard, riskModel: "off" }, outputDir, {
       profileLabel: "host-profile-fixture",
       profileRoot: join(outputDir, "profile"),
     }, {
@@ -308,7 +350,7 @@ describe("Host-local Run profile configuration", () => {
     });
     let handle: Awaited<ReturnType<typeof session.startRun>> | undefined;
     try {
-      handle = await session.startRun("Create a new document and save it.");
+      handle = await session.startRun(goal);
       await waitForRunFinish(handle);
       await session.waitUntilIdleAfterTerminal();
       const report = await handle.report();
@@ -331,11 +373,20 @@ describe("Host-local Run profile configuration", () => {
       expect(sessionConfig.operationGuidance).toBe("catalog-v1");
       expect(receivedComputerConfig?.kind).toBe("cua");
       expect(receivedComputerConfig?.kind === "cua" ? receivedComputerConfig.multilineTypeProfile : undefined).toBe("foreground-caret-v1");
-      expect(selectedGuidance?.id).toBe("text_document_save");
+      expect(selectedGuidance?.id).toBe(guidanceId);
       expect(selectedGuidance?.text).toContain("菜单明确显示快捷键时优先使用");
       expect([...((selectedGuidance?.text) ?? "")].length).toBeLessThanOrEqual(400);
       expect(providerInputs).toHaveLength(1);
-      expect(providerInputs[0]?.contextBudget?.trace?.operationGuidance).toMatchObject({ id: "text_document_save", included: true });
+      expect(providerInputs[0]?.contextBudget?.trace?.operationGuidance).toMatchObject({ id: guidanceId, included: true });
+      const modelText = providerInputs[0]?.messages.flatMap((message) => message.content)
+        .filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
+      expect(modelText).toContain(selectedGuidance!.text);
+      expect(modelText).toContain("Shift-Cmd-S可能Duplicate");
+      expect(providerInputs[0]?.system).toContain("a translucent, fading or moving dialog");
+      expect(providerInputs[0]?.system).toContain("terminate with the result instead of repeating Save");
+      const clickTool = providerInputs[0]?.tools.find((tool) => tool.name === "click");
+      expect(clickTool?.description).toContain("choose an interior point near its center");
+      expect(clickTool?.description).toContain("Do not reuse a remembered location or nudge a failed point");
       const typeTool = providerInputs[0]?.tools.find((tool) => tool.name === "type");
       if (process.platform === "win32") expect(typeTool?.description).toContain("foreground-caret-v1");
       expect(providerRequestCount).toBe(1);
@@ -345,9 +396,18 @@ describe("Host-local Run profile configuration", () => {
     }
   });
 
-  it("keeps semantic review disabled while the layered Guard still requires approval for unclear actions", async () => {
+  it.each([
+    { riskGuard: undefined, effect: "unknown" },
+    { riskGuard: "layered", effect: "unknown" },
+    { riskGuard: "off", effect: "unknown" },
+    { riskGuard: "off", effect: "financial" },
+    { riskGuard: "off", effect: "external_commitment" },
+  ] as const)("applies Host risk Guard $riskGuard to a $effect action through ApplicationSession", async ({ riskGuard, effect }) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-host-risk-review-off-"));
-    const sessionConfig = createHostSessionConfig(hostArguments, outputDir, {
+    const sessionConfig = createHostSessionConfig({
+      ...hostArguments,
+      ...(riskGuard === undefined ? {} : { riskGuard }),
+    }, outputDir, {
       profileLabel: "host-risk-fixture",
       profileRoot: join(outputDir, "profile"),
     }, {});
@@ -360,6 +420,7 @@ describe("Host-local Run profile configuration", () => {
       capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
       openedAt: "2026-10-07T00:00:00.000Z",
     };
+    const executedActions: Parameters<Computer["execute"]>[1][] = [];
     const computer: Computer = {
       async open() { return computerSession; },
       async observe() {
@@ -373,7 +434,10 @@ describe("Host-local Run profile configuration", () => {
           },
         };
       },
-      async execute(_session, action) { return { actionId: action.actionId, status: "completed" } satisfies ActionReceipt; },
+      async execute(_session, action) {
+        executedActions.push(action);
+        return { actionId: action.actionId, status: "completed" } satisfies ActionReceipt;
+      },
       async close() {},
     };
     const providerInputs: ModelInput[] = [];
@@ -383,13 +447,16 @@ describe("Host-local Run profile configuration", () => {
       async generate(input) {
         providerRequestCount += 1;
         providerInputs.push(input);
+        if (providerRequestCount > 1) {
+          return { type: "finish", summary: "Host risk Guard fixture complete.", reportedStatus: "success" };
+        }
         return {
           type: "tool_calls",
           calls: [{
             id: "host-risk-unclear-action" as ToolCallId,
             name: "click",
             arguments: { x: 0, y: 0 },
-            declaredEffect: { effects: ["unknown"], target: "Fixture button", summary: "Click the fixture button" },
+            declaredEffect: { effects: [effect], target: "Fixture button", summary: "Click the fixture button" },
           }],
         };
       },
@@ -404,10 +471,26 @@ describe("Host-local Run profile configuration", () => {
     });
     try {
       const handle = await session.startRun("Check the Host default risk review boundary.");
-      await waitForRunApproval(handle);
+      if (riskGuard === "off") {
+        await waitForRunFinish(handle);
+        await session.waitUntilIdleAfterTerminal();
+        expect(handle.config).toMatchObject({ riskGuard: "off", riskModel: "off" });
+        expect(executedActions).toHaveLength(1);
+        expect(executedActions[0]).toMatchObject({ kind: "click", point: { x: 0, y: 0 } });
+        expect(providerRequestCount).toBe(2);
+        expect(providerInputs).toHaveLength(2);
+        expect(handle.controller.getSnapshot().riskModelRequestCount).toBe(0);
+        expect(handle.controller.getSnapshot().pendingApproval).toBeUndefined();
+        const events = handle.controller.getEvents();
+        expect(events.some((event) => event.type === "action.guard.evaluated" || event.type === "approval.requested")).toBe(false);
+        expect((await handle.report()).summary).toMatchObject({ riskGuard: "off", riskModel: "off" });
+        return;
+      }
 
+      await waitForRunApproval(handle);
       const guardEvent = handle.controller.getEvents().find((event) => event.type === "action.guard.evaluated");
       expect(sessionConfig).toMatchObject({ riskGuard: "layered", riskModel: "off" });
+      expect(executedActions).toHaveLength(0);
       expect(providerInputs).toHaveLength(1);
       expect(providerRequestCount).toBe(1);
       expect(handle.controller.getSnapshot().riskModelRequestCount).toBe(0);
@@ -447,3 +530,16 @@ async function waitForRunApproval(handle: Awaited<ReturnType<ApplicationSession[
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+
+describe("GLM full-frame presentation opt-in", () => {
+  it("keeps the default unchanged and accepts an explicit bounded size", () => {
+    expect(parseGlmImageMaxEdge(undefined)).toBeUndefined();
+    expect(parseGlmImageMaxEdge("1600")).toBe(1600);
+    expect(createHostSessionConfig(hostArguments, "unused-output", { profileLabel: "default", profileRoot: "fixture" }, {}).glmImageMaxEdge).toBeUndefined();
+    expect(createHostSessionConfig(hostArguments, "unused-output", { profileLabel: "default", profileRoot: "fixture" }, { GLM_IMAGE_MAX_EDGE: "1600" }).glmImageMaxEdge).toBe(1600);
+  });
+  it.each(["", "NaN", "0", "319", "4097", "1600.5"])("rejects invalid presentation size %s", (value) => {
+    expect(() => parseGlmImageMaxEdge(value)).toThrow(/GLM_IMAGE_MAX_EDGE/u);
+  });
+});

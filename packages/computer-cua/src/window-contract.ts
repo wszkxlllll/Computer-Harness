@@ -758,6 +758,106 @@ export async function activateWindowTarget(
 
 type ActivationDiagnosticBranch = "is_error" | "degraded" | "explicit_mismatch" | "unverified";
 type ActivationDiagnosticValue = "true" | "false" | "missing" | "invalid";
+const MAX_ACTIVATION_DIAGNOSTIC_LENGTH = 6_144;
+const MAX_ACTIVATION_CLASSIFICATIONS = 4;
+const MAX_NATIVE_CLASSIFICATION_COUNT = 32;
+const CHECKED_ATTRIBUTE_STATUSES = ["value", "missing", "unsupported", "read_error", "wrong_type", "truncated", "not_checked"] as const;
+// These are Native diagnostic enums, never activation authority or free text.
+const ACTIVATION_CLASSIFICATION_ENUMS: Readonly<Record<string, readonly string[]>> = {
+  classification: ["sharing_control", "ordinary", "unknown"],
+  decision: ["excluded_from_ordinary_rank", "retained"],
+  reason: [
+    "exact_narrow_sharing_control", "exact_dialog_control_child_state_not_supported", "incomplete_snapshot",
+    "too_many_windows", "ax_windows_unavailable", "ax_window_not_unique", "identity_mismatch",
+    "root_role_mismatch", "root_subrole_unknown", "modal_or_main_or_focused", "root_children_not_exact",
+    "child_role_mismatch", "child_has_children", "content_attribute_present", "semantic_mismatch",
+    "semantic_unavailable", "relation_unknown", "focus_or_foreground_mismatch", "focus_or_foreground_unknown",
+    "fresh_tail_mismatch", "attribute_read_unknown", "deadline_exceeded",
+  ],
+  last_stage: [
+    "preflight", "create_application", "read_ax_windows", "match_candidate_identity", "read_root_attributes",
+    "read_child_attributes", "read_focus_evidence", "read_dialog_evidence", "read_root_tail", "semantic_classification",
+  ],
+  last_stage_status: ["not_started", "started", "completed", "completed_after_deadline"],
+  snapshot_status: ["complete", "incomplete"],
+  ax_windows_status: [...CHECKED_ATTRIBUTE_STATUSES, "deadline"],
+  root_role_status: CHECKED_ATTRIBUTE_STATUSES,
+  root_subrole_status: CHECKED_ATTRIBUTE_STATUSES,
+  child_role_status: CHECKED_ATTRIBUTE_STATUSES,
+  child_modal_status: CHECKED_ATTRIBUTE_STATUSES,
+  child_main_status: CHECKED_ATTRIBUTE_STATUSES,
+  focused_window_status: [...CHECKED_ATTRIBUTE_STATUSES, "matches_target", "different_or_unknown"],
+  focused_element_status: CHECKED_ATTRIBUTE_STATUSES,
+  focused_element_direct_status: CHECKED_ATTRIBUTE_STATUSES,
+  focus_proof_source: [
+    "exact_focused_element", "focused_window_and_front_process_no_value", "focused_window_and_front_process_unsupported", "none",
+  ],
+  front_process_status: ["not_checked", "matches_target", "different_process", "unavailable", "unavailable_or_unverified"],
+  relation_status: ["not_checked", "checked", "exact_dialog_direct_cgid_illegal_argument_compatibility"],
+  fresh_tail_status: ["not_checked", "not_checked_deadline", "not_yet_reconciled", "deadline", "mismatch", "matched", "unverified"],
+  inspection_pass: ["initial", "recheck"],
+};
+
+function activationDiagnosticEnum(record: Record<string, unknown> | undefined, key: string, allowed: readonly string[]): string {
+  if (record === undefined || !Object.hasOwn(record, key)) return "missing";
+  const value = record[key];
+  return typeof value === "string" && allowed.includes(value) ? value : "invalid";
+}
+
+function activationDiagnosticBoolean(record: Record<string, unknown> | undefined, key: string): boolean | "missing" | "invalid" {
+  if (record === undefined || !Object.hasOwn(record, key)) return "missing";
+  const value = record[key];
+  return typeof value === "boolean" ? value : "invalid";
+}
+
+function activationDiagnosticInteger(
+  record: Record<string, unknown> | undefined,
+  key: string,
+  min: number,
+  max: number,
+): number | "missing" | "invalid" {
+  if (record === undefined || !Object.hasOwn(record, key)) return "missing";
+  const value = record[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max ? value : "invalid";
+}
+
+function activationNativeEvidence(observed: Record<string, unknown> | undefined): Record<string, unknown> {
+  const frontmost = isRecord(observed?.frontmost_window_diagnostic) ? observed.frontmost_window_diagnostic : undefined;
+  const classifications = Array.isArray(observed?.ordinary_window_classification) ? observed.ordinary_window_classification : undefined;
+  const containerState = (key: string, valid: boolean): "missing" | "invalid" | "present" =>
+    observed === undefined || !Object.hasOwn(observed, key) ? "missing" : valid ? "present" : "invalid";
+  return {
+    verification_stable: activationDiagnosticBoolean(observed, "verification_stable"),
+    verification_poll_count: activationDiagnosticInteger(observed, "verification_poll_count", 0, 10_000),
+    verification_elapsed_ms: activationDiagnosticInteger(observed, "verification_elapsed_ms", 0, 60_000),
+    verification_deadline_reached: activationDiagnosticBoolean(observed, "verification_deadline_reached"),
+    frontmost_row: {
+      container: containerState("frontmost_window_diagnostic", frontmost !== undefined),
+      state: activationDiagnosticEnum(frontmost, "state", ["present", "missing", "invalid"]),
+      target_pid_relation: activationDiagnosticEnum(frontmost, "target_pid_relation", ["same", "different", "unknown"]),
+      target_window_id_relation: activationDiagnosticEnum(frontmost, "target_window_id_relation", ["same", "different", "unknown"]),
+      layer: activationDiagnosticInteger(frontmost, "layer", -64, 64),
+      z: activationDiagnosticInteger(frontmost, "z", 1, 1_000_000),
+      is_on_screen: activationDiagnosticBoolean(frontmost, "is_on_screen"),
+    },
+    ordinary_classifications: {
+      container: containerState("ordinary_window_classification", classifications !== undefined),
+      count: classifications === undefined ? 0 : Math.min(classifications.length, MAX_NATIVE_CLASSIFICATION_COUNT),
+      count_truncated: classifications !== undefined && classifications.length > MAX_NATIVE_CLASSIFICATION_COUNT,
+      truncated: classifications !== undefined && classifications.length > MAX_ACTIVATION_CLASSIFICATIONS,
+      entries: (classifications ?? []).slice(0, MAX_ACTIVATION_CLASSIFICATIONS).map((entry) => {
+        if (!isRecord(entry)) return { state: "invalid" };
+        return {
+          state: "present",
+          ...Object.fromEntries(Object.entries(ACTIVATION_CLASSIFICATION_ENUMS).map(([key, allowed]) =>
+            [key, activationDiagnosticEnum(entry, key, allowed)])),
+          diagnostic_only_partial: activationDiagnosticBoolean(entry, "diagnostic_only_partial"),
+          elapsed_ms: activationDiagnosticInteger(entry, "elapsed_ms", 0, 60_000),
+        };
+      }),
+    },
+  };
+}
 
 /** Fixed, bounded and non-content evidence that survives the Computer.open error wrapper. */
 function activationEvidenceSummary(
@@ -791,8 +891,8 @@ function activationEvidenceSummary(
   };
   const status = structuredState !== "present" ? structuredState
     : !Object.hasOwn(structured!, "status") ? "missing"
-    : structured!.status === "activated" || structured!.status === "partial" || structured!.status === "refused"
-      ? structured!.status as "activated" | "partial" | "refused"
+    : structured!.status === "activated" || structured!.status === "partial" || structured!.status === "refused" || structured!.status === "failed"
+      ? structured!.status as "activated" | "partial" | "refused" | "failed"
       : "invalid";
   const exactVerified = boolean(effect, "verified", effectState);
   const focused = handle(observed, "focused_window_id", observedState);
@@ -810,7 +910,11 @@ function activationEvidenceSummary(
   const reason = reasons.length === 0 ? branch === "degraded" ? "degraded" : "driver_refused_or_missing_proof" : reasons.join(",");
   const isError = typeof result.isError === "boolean" ? String(result.isError) : "invalid";
   const degraded = typeof result.degraded === "boolean" ? String(result.degraded) : "invalid";
-  return `[activation_evidence branch=${branch} is_error=${isError} degraded=${degraded} status=${status} window_id=${handle(structured, "window_id", structuredState)} focused=${focused} frontmost=${frontmost} front_process=${boolean(observed, "front_process_matches_target", observedState)} exact_effect=${effectState} exact_verified=${exactVerified} landed=${boolean(structured, "landed_on_target", structuredState)} target_hwnd=${handle(structured, "target_hwnd", structuredState)} now_fg_hwnd=${handle(structured, "now_fg_hwnd", structuredState)} reason=${reason}]`;
+  const summary = `[activation_evidence branch=${branch} is_error=${isError} degraded=${degraded} status=${status} window_id=${handle(structured, "window_id", structuredState)} focused=${focused} frontmost=${frontmost} front_process=${boolean(observed, "front_process_matches_target", observedState)} exact_effect=${effectState} exact_verified=${exactVerified} landed=${boolean(structured, "landed_on_target", structuredState)} target_hwnd=${handle(structured, "target_hwnd", structuredState)} now_fg_hwnd=${handle(structured, "now_fg_hwnd", structuredState)} reason=${reason} native_evidence=${JSON.stringify(activationNativeEvidence(observed))}]`;
+  const truncatedSuffix = " diagnostic_truncated=true]";
+  return summary.length <= MAX_ACTIVATION_DIAGNOSTIC_LENGTH
+    ? summary
+    : summary.slice(0, MAX_ACTIVATION_DIAGNOSTIC_LENGTH - truncatedSuffix.length) + truncatedSuffix;
 }
 
 function activationUnconfirmedMessage(

@@ -1,0 +1,622 @@
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs
+@@ -192,6 +192,15 @@
+     None,
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum FocusProofSource {
++    ExactFocusedElement,
++    FocusedWindowAndFrontProcessNoValue,
++    FocusedWindowAndFrontProcessUnsupported,
++    None,
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+ pub(crate) struct ClassificationDiagnostic {
+     schema: &'static str,
+@@ -212,6 +221,8 @@
+     semantic_source: SemanticSource,
+     focused_window_status: &'static str,
+     focused_element_status: &'static str,
++    focused_element_direct_status: &'static str,
++    focus_proof_source: FocusProofSource,
+     front_process_status: &'static str,
+     relation_status: &'static str,
+     fresh_tail_status: &'static str,
+@@ -257,6 +268,8 @@
+             semantic_source: SemanticSource::None,
+             focused_window_status: "not_checked",
+             focused_element_status: "not_checked",
++            focused_element_direct_status: "not_checked",
++            focus_proof_source: FocusProofSource::None,
+             front_process_status: "not_checked",
+             relation_status: "not_checked",
+             fresh_tail_status: "not_checked",
+@@ -318,10 +331,20 @@
+     child: ChildEvidence,
+     focused_window: Checked<u32>,
+     focused_element_window: Checked<u32>,
++    // This records the direct application AXFocusedUIElement read, before
++    // owner/window resolution. A downstream relation failure is not absence.
++    focused_element_direct: Checked<()>,
++    focus_fallback_content: Option<FocusFallbackContentEvidence>,
+     front_process_matches_target: Option<bool>,
+     focus_window_target: u32,
+     semantic_source: SemanticSource,
+     exact_dialog: Option<ExactDialogEvidence>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct FocusFallbackContentEvidence {
++    root: Checked<bool>,
++    child: Checked<bool>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -365,6 +388,8 @@
+     child_main_status: &'static str,
+     focused_window_status: &'static str,
+     focused_element_status: &'static str,
++    focused_element_direct_status: &'static str,
++    focus_proof_source: FocusProofSource,
+     front_process_status: &'static str,
+     relation_status: &'static str,
+     ax_windows_status: &'static str,
+@@ -387,6 +412,8 @@
+         child_main_status: e.child.main.status(),
+         focused_window_status: e.focused_window.status(),
+         focused_element_status: e.focused_element_window.status(),
++        focused_element_direct_status: e.focused_element_direct.status(),
++        focus_proof_source: FocusProofSource::None,
+         front_process_status: match e.front_process_matches_target {
+             Some(true) => "matches_target",
+             Some(false) => "different_process",
+@@ -612,6 +639,44 @@
+         .ok_or(Reason::SemanticUnavailable)
+ }
+ 
++fn direct_read_status<T>(value: &Checked<T>) -> Checked<()> {
++    match value {
++        Checked::Value(_) => Checked::Value(()),
++        Checked::Missing => Checked::Missing,
++        Checked::Unsupported => Checked::Unsupported,
++        Checked::ReadError => Checked::ReadError,
++        Checked::WrongType => Checked::WrongType,
++        Checked::Truncated => Checked::Truncated,
++    }
++}
++
++// Called only after the exact narrow sharing-control shape, identity,
++// semantics, nonfocus state and relations have all been proved. Some apps do
++// not expose AXFocusedUIElement at all. Only that direct typed absence can use
++// the existing exact focused-window/front-process proof instead; an owner,
++// relation or window-id read failure of a present element remains a refusal.
++fn focused_element_proof(e: &CandidateEvidence) -> Option<FocusProofSource> {
++    match (&e.focused_element_direct, &e.focused_element_window) {
++        (Checked::Value(()), Checked::Value(id)) if *id == e.focus_window_target => {
++            Some(FocusProofSource::ExactFocusedElement)
++        }
++        (Checked::Missing, Checked::Missing) | (Checked::Unsupported, Checked::Unsupported) => {
++            let content = e.focus_fallback_content.as_ref()?;
++            if !matches!(content.root, Checked::Value(false))
++                || !matches!(content.child, Checked::Value(false))
++            {
++                return None;
++            }
++            Some(if matches!(e.focused_element_direct, Checked::Missing) {
++                FocusProofSource::FocusedWindowAndFrontProcessNoValue
++            } else {
++                FocusProofSource::FocusedWindowAndFrontProcessUnsupported
++            })
++        }
++        _ => None,
++    }
++}
++
+ fn classify(e: &CandidateEvidence) -> Classified {
+     if matches!(e.root.subrole, Checked::Value(ref value) if value == "AXDialog") {
+         return classify_exact_dialog(e);
+@@ -691,11 +756,13 @@
+         return unknown(Reason::RelationUnknown);
+     }
+     if !matches!(e.focused_window, Checked::Value(id) if id == e.focus_window_target)
+-        || !matches!(e.focused_element_window, Checked::Value(id) if id == e.focus_window_target)
+         || e.focus_window_target == e.cgid
+     {
+         return unknown(Reason::FocusOrForegroundMismatch);
+     }
++    let Some(focus_proof) = focused_element_proof(e) else {
++        return unknown(Reason::FocusOrForegroundMismatch);
++    };
+     if e.front_process_matches_target != Some(true) {
+         return unknown(Reason::FocusOrForegroundUnknown);
+     }
+@@ -705,6 +772,7 @@
+         Reason::ExactNarrowSharingControl,
+     );
+     accepted.semantic_source = semantic;
++    accepted.focus_proof_source = focus_proof;
+     accepted
+ }
+ 
+@@ -804,11 +872,13 @@
+         return unknown(Reason::RelationUnknown);
+     }
+     if !matches!(e.focused_window, Checked::Value(id) if id == e.focus_window_target)
+-        || !matches!(e.focused_element_window, Checked::Value(id) if id == e.focus_window_target)
+         || e.focus_window_target == e.cgid
+     {
+         return unknown(Reason::FocusOrForegroundMismatch);
+     }
++    let Some(focus_proof) = focused_element_proof(e) else {
++        return unknown(Reason::FocusOrForegroundMismatch);
++    };
+     if e.front_process_matches_target != Some(true) {
+         return unknown(Reason::FocusOrForegroundUnknown);
+     }
+@@ -821,6 +891,7 @@
+     };
+     let mut accepted = result(e, Classification::SharingControl, reason);
+     accepted.semantic_source = semantic;
++    accepted.focus_proof_source = focus_proof;
+     accepted.relation_status = "exact_dialog_direct_cgid_illegal_argument_compatibility";
+     accepted
+ }
+@@ -1129,6 +1200,32 @@
+                 .collect::<Vec<_>>()
+ }
+ 
++fn focus_signature_matches(
++    prior: &ClassificationDiagnostic,
++    rechecked: &ClassificationDiagnostic,
++) -> bool {
++    prior.focused_window_status == "value"
++        && rechecked.focused_window_status == "value"
++        && prior.focused_element_direct_status == rechecked.focused_element_direct_status
++        && prior.focused_element_status == rechecked.focused_element_status
++        && prior.focus_proof_source == rechecked.focus_proof_source
++        && match prior.focus_proof_source {
++            FocusProofSource::ExactFocusedElement => {
++                prior.focused_element_direct_status == "value"
++                    && prior.focused_element_status == "value"
++            }
++            FocusProofSource::FocusedWindowAndFrontProcessNoValue => {
++                prior.focused_element_direct_status == "missing"
++                    && prior.focused_element_status == "missing"
++            }
++            FocusProofSource::FocusedWindowAndFrontProcessUnsupported => {
++                prior.focused_element_direct_status == "unsupported"
++                    && prior.focused_element_status == "unsupported"
++            }
++            FocusProofSource::None => false,
++        }
++}
++
+ fn exact_dialog_signature_matches(
+     prior: &ClassificationDiagnostic,
+     rechecked: &ClassificationDiagnostic,
+@@ -1161,10 +1258,7 @@
+         && matches!(prior.child_main_status, "value" | "unsupported")
+         && prior.semantic_source != SemanticSource::None
+         && prior.semantic_source == rechecked.semantic_source
+-        && prior.focused_window_status == "value"
+-        && rechecked.focused_window_status == "value"
+-        && prior.focused_element_status == "value"
+-        && rechecked.focused_element_status == "value"
++        && focus_signature_matches(prior, rechecked)
+         && prior.front_process_status == "matches_target"
+         && rechecked.front_process_status == "matches_target"
+         && prior.relation_status == rechecked.relation_status
+@@ -1203,6 +1297,8 @@
+         semantic_source: classified.semantic_source,
+         focused_window_status: classified.focused_window_status,
+         focused_element_status: classified.focused_element_status,
++        focused_element_direct_status: classified.focused_element_direct_status,
++        focus_proof_source: classified.focus_proof_source,
+         front_process_status: classified.front_process_status,
+         relation_status: classified.relation_status,
+         fresh_tail_status,
+@@ -1483,7 +1579,9 @@
+         Checked::WrongType => Checked::WrongType,
+         Checked::Truncated => Checked::Truncated,
+     };
+-    let focused_element = match read_element(app.0, "AXFocusedUIElement") {
++    let focused_element_read = read_element(app.0, "AXFocusedUIElement");
++    let focused_element_direct = direct_read_status(&focused_element_read);
++    let focused_element = match focused_element_read {
+         Checked::Value(element) => {
+             let element_pid = if set_short_timeout(element.0) {
+                 read_pid(element.0)
+@@ -1524,16 +1622,35 @@
+             Some(window_count),
+         ));
+     }
++    let focus_fallback_content = if matches!(
++        focused_element_direct,
++        Checked::Missing | Checked::Unsupported
++    ) {
++        child.as_ref().map(|child| FocusFallbackContentEvidence {
++            root: forbidden_content_present_strict(root.0, child_element_for_root),
++            child: forbidden_content_present_strict(child.0, None),
++        })
++    } else {
++        None
++    };
+     let exact_dialog = if exact_dialog_candidate {
+         child.as_ref().map(|child| ExactDialogEvidence {
+             root_parent: read_parent_shape(root.0),
+             child_direct_cgid: read_direct_cgid_observation(child.0),
+             child_children_count: read_attribute_count_observation(child.0, "AXChildren"),
+-            strict_root_content: forbidden_content_present_strict(root.0, child_element_for_root),
++            strict_root_content: focus_fallback_content
++                .as_ref()
++                .map(|content| content.root.clone())
++                .unwrap_or_else(|| {
++                    forbidden_content_present_strict(root.0, child_element_for_root)
++                }),
+             // This strict gate checks content/visible-content collections but
+             // deliberately does not read AXChildren; that leaf fact comes only
+             // from the count API above.
+-            strict_child_content: forbidden_content_present_strict(child.0, None),
++            strict_child_content: focus_fallback_content
++                .as_ref()
++                .map(|content| content.child.clone())
++                .unwrap_or_else(|| forbidden_content_present_strict(child.0, None)),
+         })
+     } else {
+         None
+@@ -1572,6 +1689,8 @@
+         child: child_evidence,
+         focused_window,
+         focused_element_window: focused_element,
++        focused_element_direct,
++        focus_fallback_content,
+         front_process_matches_target,
+         focus_window_target,
+         semantic_source: SemanticSource::None,
+@@ -1705,6 +1824,7 @@
+         exact_dialog_involved && !exact_dialog_signature_matches(prior, rechecked, pid, cgid);
+     if prior.classification != Classification::SharingControl
+         || rechecked.classification != Classification::SharingControl
++        || !focus_signature_matches(prior, rechecked)
+         || exact_dialog_mismatch
+         || !same_snapshot_rows(before, after)
+         || after_focus_matches != Some(true)
+@@ -1967,6 +2087,8 @@
+             },
+             focused_window: Checked::Value(7),
+             focused_element_window: Checked::Value(7),
++            focused_element_direct: Checked::Value(()),
++            focus_fallback_content: None,
+             front_process_matches_target: Some(true),
+             focus_window_target: 7,
+             semantic_source: SemanticSource::Identifier,
+@@ -2009,6 +2131,27 @@
+         e
+     }
+ 
++    fn without_focused_element(
++        mut evidence: CandidateEvidence,
++        unsupported: bool,
++    ) -> CandidateEvidence {
++        evidence.focused_element_direct = if unsupported {
++            Checked::Unsupported
++        } else {
++            Checked::Missing
++        };
++        evidence.focused_element_window = if unsupported {
++            Checked::Unsupported
++        } else {
++            Checked::Missing
++        };
++        evidence.focus_fallback_content = Some(FocusFallbackContentEvidence {
++            root: Checked::Value(false),
++            child: Checked::Value(false),
++        });
++        evidence
++    }
++
+     fn dialog_root_parent_mut(e: &mut CandidateEvidence) -> &mut ParentShapeEvidence {
+         match &mut e.exact_dialog.as_mut().unwrap().root_parent {
+             Checked::Value(parent) => parent,
+@@ -2055,6 +2198,188 @@
+         let value = classify(&good());
+         assert_eq!(value.classification, Classification::SharingControl);
+         assert_eq!(value.reason, Reason::ExactNarrowSharingControl);
++        assert_eq!(
++            value.focus_proof_source,
++            FocusProofSource::ExactFocusedElement
++        );
++    }
++
++    #[test]
++    fn direct_focused_element_read_keeps_absence_separate_from_read_failures() {
++        for (read, expected) in [
++            (Checked::Value(42), Checked::Value(())),
++            (Checked::Missing, Checked::Missing),
++            (Checked::Unsupported, Checked::Unsupported),
++            (Checked::ReadError, Checked::ReadError),
++            (Checked::WrongType, Checked::WrongType),
++            (Checked::Truncated, Checked::Truncated),
++        ] {
++            assert_eq!(direct_read_status(&read), expected);
++        }
++    }
++
++    #[test]
++    fn exact_narrow_control_can_use_typed_direct_focused_element_absence() {
++        for fixture in [good(), dialog_good()] {
++            for unsupported in [false, true] {
++                let e = without_focused_element(fixture.clone(), unsupported);
++                let classified = classify(&e);
++                assert_eq!(classified.classification, Classification::SharingControl);
++                assert_eq!(
++                    classified.focus_proof_source,
++                    if unsupported {
++                        FocusProofSource::FocusedWindowAndFrontProcessUnsupported
++                    } else {
++                        FocusProofSource::FocusedWindowAndFrontProcessNoValue
++                    }
++                );
++                let diagnostic = diagnostic_from_evidence(&e, classified, "not_yet_reconciled");
++                assert_eq!(
++                    diagnostic.focused_element_direct_status,
++                    if unsupported {
++                        "unsupported"
++                    } else {
++                        "missing"
++                    }
++                );
++                assert_eq!(diagnostic.point_occlusion_policy, "retained");
++                assert!(!diagnostic.is_excluded(), "fresh tail is still required");
++                let json = serde_json::to_value(&diagnostic).unwrap();
++                assert_eq!(
++                    json["focus_proof_source"],
++                    if unsupported {
++                        "focused_window_and_front_process_unsupported"
++                    } else {
++                        "focused_window_and_front_process_no_value"
++                    }
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn focused_element_owner_window_errors_and_contradictions_never_use_absence() {
++        for fixture in [good(), dialog_good()] {
++            for direct in [Checked::ReadError, Checked::WrongType, Checked::Truncated] {
++                for window in [Checked::Value(7), Checked::Missing, Checked::Unsupported] {
++                    let mut e = without_focused_element(fixture.clone(), false);
++                    e.focused_element_direct = direct.clone();
++                    e.focused_element_window = window;
++                    assert_ne!(classify(&e).classification, Classification::SharingControl);
++                }
++            }
++            for window in [
++                Checked::Missing,
++                Checked::Unsupported,
++                Checked::ReadError,
++                Checked::WrongType,
++                Checked::Truncated,
++                Checked::Value(99),
++            ] {
++                let mut e = without_focused_element(fixture.clone(), false);
++                e.focused_element_direct = Checked::Value(());
++                e.focused_element_window = window;
++                assert_ne!(classify(&e).classification, Classification::SharingControl);
++            }
++            for unsupported in [false, true] {
++                for window in [Checked::Value(7), Checked::Value(99), Checked::ReadError] {
++                    let mut e = without_focused_element(fixture.clone(), unsupported);
++                    e.focused_element_window = window;
++                    assert_ne!(classify(&e).classification, Classification::SharingControl);
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn absent_focused_element_still_requires_one_exact_nonconflicting_control_semantic() {
++        for fixture in [good(), dialog_good()] {
++            for semantic in [SemanticSource::Title, SemanticSource::Description] {
++                let mut e = without_focused_element(fixture.clone(), false);
++                e.child.identifier = Checked::Unsupported;
++                e.child.title = Checked::Unsupported;
++                e.child.description = Checked::Unsupported;
++                match semantic {
++                    SemanticSource::Title => {
++                        e.child.title = Checked::Value(EXPECTED_CONTROL.into())
++                    }
++                    SemanticSource::Description => {
++                        e.child.description = Checked::Value(EXPECTED_CONTROL.into())
++                    }
++                    _ => unreachable!(),
++                }
++                e.semantic_source = semantic;
++                assert_eq!(classify(&e).classification, Classification::SharingControl);
++                e.child.identifier = Checked::Value("DifferentControl".into());
++                assert_eq!(classify(&e).reason, Reason::SemanticMismatch);
++            }
++        }
++    }
++
++    #[test]
++    fn absent_focused_element_requires_strict_complete_content_absence() {
++        for fixture in [good(), dialog_good()] {
++            for unsupported in [false, true] {
++                let mut e = without_focused_element(fixture.clone(), unsupported);
++                e.focus_fallback_content = None;
++                assert_ne!(classify(&e).classification, Classification::SharingControl);
++                for content in [
++                    Checked::Value(true),
++                    Checked::Missing,
++                    Checked::Unsupported,
++                    Checked::ReadError,
++                    Checked::WrongType,
++                    Checked::Truncated,
++                ] {
++                    for root in [false, true] {
++                        let mut e = without_focused_element(fixture.clone(), unsupported);
++                        let proof = e.focus_fallback_content.as_mut().unwrap();
++                        if root {
++                            proof.root = content.clone();
++                        } else {
++                            proof.child = content.clone();
++                        }
++                        assert_ne!(classify(&e).classification, Classification::SharingControl);
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn absent_focused_element_keeps_identity_shape_semantic_and_foreground_guards() {
++        for fixture in [good(), dialog_good()] {
++            for unsupported in [false, true] {
++                for case in 0..17 {
++                    let mut e = without_focused_element(fixture.clone(), unsupported);
++                    match case {
++                        0 => e.snapshot_complete = false,
++                        1 => e.root.pid = Checked::Value(99),
++                        2 => e.root.cgid = Checked::Value(99),
++                        3 => e.child.pid = Checked::Value(99),
++                        4 => e.root.modal = Checked::Value(true),
++                        5 => e.root.main = Checked::Value(true),
++                        6 => e.root.focused = Checked::Value(true),
++                        7 => e.child.focused = Checked::Value(true),
++                        8 => e.root.children = Checked::Value(2),
++                        9 => e.child.role = Checked::Value("AXTextField".into()),
++                        10 => e.child.identifier = Checked::Value("DifferentControl".into()),
++                        11 => e.child.parent_relation = Checked::ReadError,
++                        12 => e.focused_window = Checked::Value(99),
++                        13 => e.focused_window = Checked::ReadError,
++                        14 => e.front_process_matches_target = Some(false),
++                        15 => e.front_process_matches_target = None,
++                        _ => e.focus_window_target = e.cgid,
++                    }
++                    assert_ne!(
++                        classify(&e).classification,
++                        Classification::SharingControl,
++                        "fixture dialog={} unsupported={unsupported} case={case}",
++                        e.exact_dialog.is_some()
++                    );
++                }
++            }
++        }
+     }
+ 
+     #[test]
+@@ -2438,4 +2763,108 @@
+             Reason::FreshTailMismatch
+         );
+     }
+-}
++
++    #[test]
++    fn absent_focused_element_requires_same_direct_proof_across_both_passes() {
++        let before = snapshot(vec![row(7, 0), row(88, 1)], 0);
++        let diagnostic =
++            |e: &CandidateEvidence| diagnostic_from_evidence(e, classify(e), "not_yet_reconciled");
++        let confirm = |prior: &ClassificationDiagnostic, next: &ClassificationDiagnostic| {
++            confirm_fresh_candidate(
++                prior,
++                next,
++                42,
++                88,
++                7,
++                &before,
++                &before,
++                Some(true),
++                Some(7),
++                Instant::now() + std::time::Duration::from_secs(1),
++            )
++        };
++        for fixture in [good(), dialog_good()] {
++            let exact = diagnostic(&fixture);
++            let missing = diagnostic(&without_focused_element(fixture.clone(), false));
++            let unsupported = diagnostic(&without_focused_element(fixture, true));
++            for same in [&exact, &missing, &unsupported] {
++                assert!(confirm(same, same).is_excluded());
++                assert_eq!(confirm(same, same).point_occlusion_policy, "retained");
++            }
++            for (first, second) in [
++                (&missing, &unsupported),
++                (&unsupported, &missing),
++                (&exact, &missing),
++                (&missing, &exact),
++                (&exact, &unsupported),
++                (&unsupported, &exact),
++            ] {
++                assert_eq!(confirm(first, second).reason, Reason::FreshTailMismatch);
++                assert!(!confirm(first, second).is_excluded());
++            }
++            let mut changed = missing.clone();
++            changed.focused_element_direct_status = "read_error";
++            assert!(!confirm(&missing, &changed).is_excluded());
++            let mut changed = missing.clone();
++            changed.focus_proof_source = FocusProofSource::None;
++            assert!(!confirm(&missing, &changed).is_excluded());
++        }
++    }
++
++    #[test]
++    fn absent_focused_element_does_not_relax_fresh_tail_or_deadline() {
++        let before = snapshot(vec![row(7, 0), row(88, 1)], 0);
++        for fixture in [good(), dialog_good()] {
++            let e = without_focused_element(fixture, false);
++            let diagnostic = diagnostic_from_evidence(&e, classify(&e), "not_yet_reconciled");
++            for (front, focus) in [
++                (Some(false), Some(7)),
++                (Some(true), Some(99)),
++                (None, Some(7)),
++            ] {
++                let result = confirm_fresh_candidate(
++                    &diagnostic,
++                    &diagnostic,
++                    42,
++                    88,
++                    7,
++                    &before,
++                    &before,
++                    front,
++                    focus,
++                    Instant::now() + std::time::Duration::from_secs(1),
++                );
++                assert!(!result.is_excluded());
++            }
++            let expired = confirm_fresh_candidate(
++                &diagnostic,
++                &diagnostic,
++                42,
++                88,
++                7,
++                &before,
++                &before,
++                Some(true),
++                Some(7),
++                Instant::now(),
++            );
++            assert_eq!(expired.reason, Reason::DeadlineExceeded);
++            assert!(!expired.is_excluded());
++            let mut changed = snapshot(before.windows.clone(), 0);
++            changed.windows[1].z_index = 2;
++            assert!(!confirm_fresh_candidate(
++                &diagnostic,
++                &diagnostic,
++                42,
++                88,
++                7,
++                &before,
++                &changed,
++                Some(true),
++                Some(7),
++                Instant::now() + std::time::Duration::from_secs(1),
++            )
++            .is_excluded());
++        }
++    }
++}

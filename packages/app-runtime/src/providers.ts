@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { resizeModelScreenshotPng } from "./window-preview-image.js";
 import { ArkDeepseekFlashAdapter, FetchArkHttpClient, DeepseekFlashAdapter, FetchDeepseekHttpClient, FetchGlmHttpClient, GlmAdapter, glmProfiles, type GlmProfile } from "@computer-harness/provider-glm";
 import { Qwen38FlashAdapter } from "@computer-harness/provider-qwen";
 import type { ProviderAdapter } from "@computer-harness/runtime";
@@ -85,6 +86,7 @@ function createGlmProvider(options: ProviderFactoryOptions): ProviderAdapter {
     apiKey: apiKey!,
     profile,
     assetReader: options.assetReader,
+    ...(options.config.glmImageMaxEdge === undefined ? {} : { imagePresentation: { maxEdge: options.config.glmImageMaxEdge, resizePng: resizeModelScreenshotPng } }),
     httpClient: options.httpClients?.glm ?? new RecordingGlmHttpClient(
       resolve(options.outputDir, "provider-exchanges.jsonl"),
       new FetchGlmHttpClient({ requestTimeoutMs: options.config.glmRequestTimeoutMs ?? DEFAULT_GLM_REQUEST_TIMEOUT_MS }),

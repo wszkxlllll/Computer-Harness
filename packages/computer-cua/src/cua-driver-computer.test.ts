@@ -11307,6 +11307,189 @@ describe("CuaDriverComputer", () => {
     }
   });
 
+  describe("optional grounding read deadlines", () => {
+    async function fixture() {
+      const directory = await mkdtemp(join(tmpdir(), "harness-optional-grounding-deadline-"));
+      const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
+      fake.setPlatform("darwin");
+      const nativeState = (name: string) => ({ elements_complete: true, elements: [
+        { role: "AXWebArea", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
+        { role: "AXButton", name, frame: { x: 200, y: 180, width: 100, height: 30 }, enabled: true },
+      ] });
+      fake.setGroundingState(nativeState("Current native control"));
+      const browserTarget: ManagedBrowserTarget = {
+        kind: "managed-chromium", browser: "chromium", profileId: "fixture-profile", windowTarget: fake.target,
+        tabId: "current-tab", generation: "current-generation", delivery: "loopback-cdp",
+      };
+      const domState = (name: string, generation = "current-generation") => ({
+        complete: true, tabId: "current-tab", generation, coordinateSpace: "physical" as const,
+        candidates: [{ tagName: "input", ariaRole: "textbox", inputType: "text", name,
+          frame: { x: 200, y: 260, width: 160, height: 30 }, visible: true, interactive: true,
+          state: { enabled: true, editable: true, focused: true } }],
+      });
+      let mode: "healthy" | "native" | "dom" = "healthy";
+      let onReadStarted: (() => void) | undefined;
+      const readSignals: AbortSignal[] = [];
+      const late: Array<{ resolve(): void; reject(): void }> = [];
+      const hold = <T,>(signal: AbortSignal, value: T): Promise<T> => new Promise<T>((resolve, reject) => {
+        readSignals.push(signal);
+        late.push({ resolve: () => resolve(value), reject: () => reject(new Error("private late producer failure")) });
+        onReadStarted?.();
+      });
+      const originalCall = fake.driver.callTool.bind(fake.driver);
+      let nativeReads = 0;
+      fake.driver.callTool = async (name, json, options) => {
+        const args = JSON.parse(json) as Record<string, unknown>;
+        if (name === "get_window_state" && args.include_screenshot === false) {
+          nativeReads += 1;
+          if (mode === "native") {
+            if (options?.signal === undefined) throw new Error("missing optional native read signal");
+            return hold(options.signal, result({ structuredJson: JSON.stringify(nativeState("Late native control")) }));
+          }
+        }
+        return originalCall(name, json, options);
+      };
+      let domReads = 0;
+      const seenBrowserGenerations: string[] = [];
+      let abortDuringMaterialize: AbortController | undefined;
+      const transport: DomGroundingTransport = {
+        kind: "managed-loopback-cdp-v1",
+        async collect(request, signal) {
+          domReads += 1;
+          seenBrowserGenerations.push(request.browserTarget.generation);
+          if (mode === "dom") return hold(signal, domState("Late DOM control", "late-generation"));
+          const value = domState("Current DOM control");
+          if (abortDuringMaterialize !== undefined) {
+            const controller = abortDuringMaterialize;
+            abortDuringMaterialize = undefined;
+            return { ...value, generation: "cancelled-generation", get candidates() {
+              controller.abort(new Error("parent cancelled before enrichment publication"));
+              return value.candidates;
+            } };
+          }
+          return value;
+        },
+      };
+      const computer = new ProductionCuaDriverComputer({
+        platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+        windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget,
+        domGroundingTransport: transport, driverFactory: () => fake.driver,
+      });
+      const session = await computer.open({}, new AbortController().signal);
+      const old = await computer.observe(session, "optional-old" as ObservationId, new AbortController().signal);
+      expect(old.grounding).toMatchObject({ source: "hybrid", completeness: "complete", degraded: false });
+      const oldDom = old.grounding!.elements.find((element) => element.source === "dom")!;
+      return {
+        computer, session, fake, oldDom, readSignals, seenBrowserGenerations,
+        counts: () => ({ nativeReads, domReads }),
+        hold(producer: "native" | "dom") {
+          mode = producer;
+          return new Promise<void>((resolve) => { onReadStarted = resolve; });
+        },
+        healthy() { mode = "healthy"; },
+        settle(kind: "resolve" | "reject") { for (const pending of late.splice(0)) pending[kind](); },
+        abortOnMaterialize(controller: AbortController) { abortDuringMaterialize = controller; },
+        async close() { vi.useRealTimers(); await computer.close(session); await rm(directory, { recursive: true, force: true }); },
+      };
+    }
+
+    it.each(["native", "dom"] as const)("returns fresh degraded enrichment after a permanently hanging %s read", async (producer) => {
+      const test = await fixture();
+      const before = test.counts();
+      vi.useFakeTimers();
+      const started = test.hold(producer);
+      let settled = false;
+      const capture = test.computer.observe(test.session, "optional-timeout" as ObservationId, new AbortController().signal)
+        .then((value) => { settled = true; return value; });
+      try {
+        await started;
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        const current = await capture;
+        expect(current.screenshot.data.byteLength).toBeGreaterThan(0);
+        expect(current.grounding).toMatchObject({ observationId: "optional-timeout", source: "hybrid", completeness: "partial", degraded: true });
+        expect(current.grounding?.elements.some((element) => element.source === "dom" || element.elementRef === test.oldDom.elementRef)).toBe(false);
+        if (producer === "native") expect(current.grounding?.elements).toEqual([]);
+        else expect(current.grounding?.elements.some((element) => element.name === "Current native control")).toBe(true);
+        expect(test.readSignals).toHaveLength(1);
+        expect(test.readSignals[0]?.aborted).toBe(true);
+        expect(test.counts()).toEqual({ nativeReads: before.nativeReads + 1, domReads: before.domReads + (producer === "dom" ? 1 : 0) });
+        expect(vi.getTimerCount()).toBe(0);
+        const inputsBefore = test.fake.calls.filter((call) => ["click", "type_text", "press_key", "hotkey"].includes(call.name)).length;
+        expect(await test.computer.execute(test.session, {
+          kind: "click", actionId: "old-optional-ref" as ActionId, basedOn: "optional-timeout" as ObservationId,
+          groundingRef: test.oldDom.elementRef, point: { x: 280, y: 275 },
+        }, new AbortController().signal)).toMatchObject({ status: "refused", driverCode: "GROUNDING_REF_STALE" });
+        expect(await test.computer.execute(test.session, {
+          kind: "type", actionId: "no-stale-optional-focus" as ActionId, basedOn: "optional-timeout" as ObservationId, text: "must not type",
+        }, new AbortController().signal)).toMatchObject({ status: "refused", driverCode: "DOM_INPUT_FOCUS_MISMATCH" });
+        expect(test.fake.calls.filter((call) => ["click", "type_text", "press_key", "hotkey"].includes(call.name))).toHaveLength(inputsBefore);
+      } finally { await test.close(); }
+    });
+
+    it.each([
+      { producer: "native", settlement: "resolve" }, { producer: "native", settlement: "reject" },
+      { producer: "dom", settlement: "resolve" }, { producer: "dom", settlement: "reject" },
+    ] as const)("ignores a late $settlement from an aborted $producer enrichment read", async ({ producer, settlement }) => {
+      const test = await fixture();
+      vi.useFakeTimers();
+      const started = test.hold(producer);
+      const pending = test.computer.observe(test.session, "optional-before-late" as ObservationId, new AbortController().signal);
+      try {
+        await started;
+        await vi.advanceTimersByTimeAsync(5_000);
+        const current = await pending;
+        const snapshot = JSON.stringify(current);
+        test.settle(settlement);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(JSON.stringify(current)).toBe(snapshot);
+        test.healthy();
+        const next = await test.computer.observe(test.session, "optional-after-late" as ObservationId, new AbortController().signal);
+        expect(next.grounding).toMatchObject({ observationId: "optional-after-late", completeness: "complete", degraded: false });
+        expect(next.grounding?.elements.some((element) => element.name?.startsWith("Late"))).toBe(false);
+        expect(test.seenBrowserGenerations.every((generation) => generation === "current-generation")).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { await test.close(); }
+    });
+
+    it.each([
+      { producer: "native", timing: "before-deadline" }, { producer: "dom", timing: "before-deadline" },
+      { producer: "native", timing: "deadline-turn" }, { producer: "dom", timing: "deadline-turn" },
+    ] as const)("prioritizes parent cancellation $timing for a hanging $producer read", async ({ producer, timing }) => {
+      const test = await fixture();
+      vi.useFakeTimers();
+      const started = test.hold(producer);
+      const parent = new AbortController();
+      const pending = test.computer.observe(test.session, "optional-parent-abort" as ObservationId, parent.signal)
+        .then((capture) => ({ capture }), (error: unknown) => ({ error }));
+      try {
+        await started;
+        if (timing === "before-deadline") parent.abort(new Error("parent grounding cancellation"));
+        else {
+          test.readSignals[0]!.addEventListener("abort", () => parent.abort(new Error("parent grounding cancellation")), { once: true });
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(await pending).toMatchObject({ error: { message: expect.stringContaining("parent grounding cancellation") } });
+        expect(test.readSignals[0]?.aborted).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { await test.close(); }
+    });
+
+    it("does not publish enrichment when the parent cancels during result materialization", async () => {
+      const test = await fixture();
+      const parent = new AbortController();
+      try {
+        test.abortOnMaterialize(parent);
+        await expect(test.computer.observe(test.session, "optional-cancelled-publication" as ObservationId, parent.signal))
+          .rejects.toThrow("parent cancelled before enrichment publication");
+        const next = await test.computer.observe(test.session, "optional-after-cancel" as ObservationId, new AbortController().signal);
+        expect(next.grounding).toMatchObject({ completeness: "complete", degraded: false });
+        expect(test.seenBrowserGenerations.every((generation) => generation === "current-generation")).toBe(true);
+      } finally { await test.close(); }
+    });
+  });
+
   it("resamples the same hybrid observation until its trusted content rect makes DOM grounding available", async () => {
     const directory = await mkdtemp(join(tmpdir(), "computer-harness-cua-hybrid-first-frame-ready-"));
     const fake = windowDriver();
