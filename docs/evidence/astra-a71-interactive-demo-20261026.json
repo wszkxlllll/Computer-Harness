@@ -1,0 +1,94 @@
+{
+  "schema": "astra-interactive-demo-evidence/v1",
+  "releaseLabel": "astra-a71-interactive-demo-20261026",
+  "candidateVersion": "astra-main-bd1200f-r3-a71-fullframe-1600",
+  "runId": "run-1792949639411-4e150367-ef0",
+  "date": "2026-10-26",
+  "timezone": "Asia/Shanghai",
+  "runtimeOutcome": "succeeded",
+  "executionChainPassed": true,
+  "reportAccuracyPassed": false,
+  "strictAcceptancePassed": false,
+  "type": "user-interactive shopping research and local document delivery",
+  "scope": [
+    "Read Apple China MacBook Air purchasing pages",
+    "Accept a user correction during the existing Run",
+    "Write a comparison and recommendation into an already-open TextEdit document",
+    "Save the report to Desktop and keep it open"
+  ],
+  "elapsedSeconds": 802.283,
+  "mainModelRequests": 81,
+  "riskModelRequests": 0,
+  "completedActionsIncludingWait": 75,
+  "runtimeErrors": 0,
+  "userInteraction": {
+    "correctionCount": 1,
+    "sequence": 596,
+    "text": "采用这个配置即可 开始完成报告",
+    "supersededCallRejectedSequence": 597,
+    "rejectionReason": "superseded by user correction",
+    "claim": "Latest user instruction superseded a not-yet-dispatched call and execution continued in the same Run."
+  },
+  "save": {
+    "clickSequence": 712,
+    "receiptSequence": 715,
+    "animationFrameSequence": 717,
+    "settledFrameSequence": 726,
+    "filename": "MacBookAir选购建议-20261026.txt",
+    "bytes": 1319,
+    "sha256": "fea5b2815abac00ffe60d77feff5bd37bf4ddedb279228ab4f3b852adeb4465e",
+    "observed": [
+      "Save panel closed after click and independent observation",
+      "Document title equals requested filename",
+      "Same-named Desktop icon visible",
+      "Report remains open"
+    ],
+    "filesystemVerified": true
+  },
+  "sourceIntegrity": {
+    "sourcePinsCount": 466,
+    "sourceDriftCount": 0,
+    "buildPinsCount": 566,
+    "buildDriftCount": 0
+  },
+  "runtimeProfile": {
+    "model": "glm-5.3-flash",
+    "thinking": "high",
+    "maxModelRequests": 100,
+    "maxSteps": 160,
+    "scope": "desktop",
+    "riskGuard": "off",
+    "riskModel": "off",
+    "glmImageMaxEdge": 1600,
+    "coordinateMode": "actual_pixels",
+    "operationGuidance": "catalog-v1",
+    "providerRecovery": "ambiguous-headers-once-v1",
+    "providerRecoveryRunWindowMs": 900000,
+    "glmMaxInputTokens": 16384,
+    "glmMaxWireInputTokens": 32768
+  },
+  "evidenceDigests": {
+    "trajectorySha256": "51d68c6faec3c6669e9f6bd86d3af5c0c402efac99b4a7eff8e728a0d744cabb",
+    "providerExchangesSha256": "58626264d6049c57ce5cce39c1754bb834273af87cac49e0423a1e66d0c7b315"
+  },
+  "limitations": [
+    "One successful, user-interactive Run; no reliability rate or fully autonomous original-goal claim.",
+    "RiskGuard off/off was explicitly selected by the user. This Run does not certify default/layered Guard.",
+    "Report body says 256GB SSD while notes and captured page say storage starts at 512GB. Report content is not fully verified; the original remains unchanged.",
+    "Other configuration and price claims were not independently fully audited.",
+    "No claim that all clicks are correct or all original Astra acceptance criteria are complete.",
+    "Manual mouse/keyboard assistance cannot be ruled out by logs alone; user video has not been reviewed."
+  ],
+  "video": {
+    "userReportedRecorded": true,
+    "received": false,
+    "reviewed": false,
+    "distributed": false
+  },
+  "publicationPrivacy": "Only selected non-secret event facts and digests are published; raw desktop screenshots, trajectories, provider exchanges, pairing/Relay tokens, private environment files and local paths remain private.",
+  "windowBehavior": {
+    "switchWindowCompletedCount": 1,
+    "windowHandoffEventCount": 0,
+    "note": "Initial UI settings are not certified from a preparation recommendation; 0 handoff events is not a no-window-switch claim."
+  }
+}

@@ -454,3 +454,19 @@ describe("app-runtime provider factory", () => {
     expect(messages?.[0]?.content).toEqual(expect.stringContaining("[pixel]"));
   });
 });
+
+it("wires the opt-in GLM PNG presentation through the actual factory and built provider", async () => {
+  const { createRequire } = await import("node:module");
+  const pngjs = createRequire(import.meta.url)("pngjs") as { PNG: { sync: { write(value: {width:number;height:number;data:Buffer}):Buffer } } };
+  const bytes=pngjs.PNG.sync.write({width:3200,height:2000,data:Buffer.alloc(3200*2000*4,255)});
+  let body:Record<string,unknown>|undefined;
+  const client:ProviderHttpClient={async post(_url,request){body=request;return {choices:[{message:{tool_calls:[{id:"fixture",type:"function",function:{name:"click",arguments:JSON.stringify({x:400,y:250})}}]}}]};}};
+  const provider=createProvider({model:"glm-5.3-flash",config:config({glmImageMaxEdge:1600}),assetReader:{read:async()=>bytes},outputDir:"runs/glm-presentation-fixture",credentials:{glmApiKey:"fixture-key"},httpClients:{glm:client}});
+  const value:ModelInput={...clickInput(),messages:[{role:"user",content:[{type:"image",asset:{assetId:"image" as AssetRef["assetId"],relativePath:"fixture.png",mediaType:"image/png",byteLength:bytes.length},viewport:{width:3200,height:2000,coordinateSpace:"physical"}}]}]};
+  expect(await provider.generate(value,{signal:new AbortController().signal})).toMatchObject({calls:[{arguments:{x:800,y:500}}]});
+  const messages=body!.messages as Array<{content:unknown}>;
+  const image=messages.flatMap(m=>Array.isArray(m.content)?m.content:[]).find((v:{type?:string})=>v.type==="image_url") as {image_url:{url:string}};
+  const sent=Buffer.from(image.image_url.url.split(",")[1]!,"base64");
+  expect([sent.readUInt32BE(16),sent.readUInt32BE(20)]).toEqual([1600,1000]);
+  expect([bytes.readUInt32BE(16),bytes.readUInt32BE(20)]).toEqual([3200,2000]);
+});

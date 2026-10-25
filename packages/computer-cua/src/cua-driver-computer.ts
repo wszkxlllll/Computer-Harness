@@ -919,6 +919,7 @@ export type CuaWindowSwitchMode = "off" | "opened-windows-v1";
 // the hard element cap prevents an unbounded UIA tree from entering Runtime.
 const GROUNDING_MAX_ELEMENTS = 256;
 const GROUNDING_QUERY_MAX_ELEMENTS = 256;
+const OPTIONAL_GROUNDING_READ_TIMEOUT_MS = 5_000;
 const MULTILINE_GROUNDING_QUERY_TIMEOUT_MS = 2_500;
 
 export interface CuaDriverComputerOptions {
@@ -1555,6 +1556,7 @@ export class CuaDriverComputer implements Computer {
           ...(this.options.domGroundingTransport === undefined ? {} : { domTransport: this.options.domGroundingTransport }),
           signal,
         });
+        signal.throwIfAborted();
         const boundGrounding: BoundPrivateGrounding | undefined = desktopGrounding === undefined
           ? undefined
           : {
@@ -1725,6 +1727,7 @@ export class CuaDriverComputer implements Computer {
           current.initialObservationPending,
           current.platform === "darwin",
         );
+        signal.throwIfAborted();
         const observedBrowserTarget = grounding?.browserTarget ?? activeBrowserTarget;
         const includeDomSurface = grounding?.browserTarget !== undefined &&
           (grounding.catalog.source === "dom" || grounding.catalog.source === "hybrid");
@@ -6270,6 +6273,7 @@ async function readAuthorizedDesktopGrounding(
       false,
       input.platform === "darwin",
     );
+    signal.throwIfAborted();
     if (grounding === undefined || grounding.elements.size === 0 || grounding.browserTarget === undefined) return undefined;
     if (grounding.browserTarget.profileId !== activeBrowserTarget.profileId ||
         windowIdentityKey(grounding.browserTarget.windowTarget) !== windowIdentityKey(activeBrowserTarget.windowTarget)) {
@@ -6633,6 +6637,49 @@ async function readWindowGrounding(
   return mergeGroundings(uia, dom, observationId, computerSessionId);
 }
 
+/** Bound only optional enrichment reads; late results never reach catalog materialization. */
+async function readOptionalGrounding<T>(
+  signal: AbortSignal,
+  read: (querySignal: AbortSignal) => Promise<T>,
+): Promise<T | undefined> {
+  signal.throwIfAborted();
+  const timeoutController = new AbortController();
+  const querySignal = AbortSignal.any([signal, timeoutController.signal]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const query = Promise.resolve().then(() => {
+    querySignal.throwIfAborted();
+    return read(querySignal);
+  }).then((value) => ({ kind: "value" as const, value }), (error: unknown) => ({ kind: "error" as const, error }));
+  const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
+    timer = setTimeout(() => {
+      timeoutController.abort(new Error("optional grounding read exceeded its read deadline"));
+      resolve({ kind: "timeout" });
+    }, OPTIONAL_GROUNDING_READ_TIMEOUT_MS);
+  });
+  const aborted = new Promise<{ kind: "aborted" }>((resolve) => {
+    onAbort = () => resolve({ kind: "aborted" });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    const result = await Promise.race([query, timeout, aborted]);
+    // Parent cancellation takes precedence even when the deadline/result won
+    // the race earlier in the same turn. Never turn cancellation into fallback.
+    signal.throwIfAborted();
+    if (result.kind === "timeout" || timeoutController.signal.aborted) return undefined;
+    if (result.kind === "aborted") {
+      signal.throwIfAborted();
+      return undefined;
+    }
+    if (result.kind === "error") throw result.error;
+    return result.value;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 /** A bounded read-only UIA lookup used only while resolving a Windows multiline action. */
 async function readMultilinePrivateGroundingCatalog(
   driver: CuaDriverLike,
@@ -6716,7 +6763,10 @@ async function readDomGroundingCatalog(
 ): Promise<PrivateGrounding> {
   if (trustedContentRect === undefined) return emptyDomGrounding(observationId, computerSessionId);
   try {
-    const result = await transport.collect({ observationId, computerSessionId, viewport, browserTarget }, signal);
+    const result = await readOptionalGrounding(signal, (querySignal) =>
+      transport.collect({ observationId, computerSessionId, viewport, browserTarget }, querySignal));
+    signal.throwIfAborted();
+    if (result === undefined) return emptyDomGrounding(observationId, computerSessionId);
     // The host attests the active tab/generation at collection time. A tab
     // switch may update both private fields; every public ref remains bound to
     // this observation and must be re-observed before reuse.
@@ -6942,14 +6992,17 @@ async function readGroundingCatalog(
   });
   let result: GroundingToolResult;
   try {
-    result = await callTool(driver, "get_window_state", {
+    const queryResult = await readOptionalGrounding(signal, (querySignal) => callTool(driver, "get_window_state", {
       pid: binding.target.pid,
       window_id: binding.target.windowId,
       include_screenshot: false,
       max_depth: 16,
       max_elements: GROUNDING_QUERY_MAX_ELEMENTS,
       session,
-    }, signal);
+    }, querySignal));
+    signal.throwIfAborted();
+    if (queryResult === undefined) return empty("unknown", true);
+    result = queryResult;
   } catch (error) {
     if (signal.aborted) signal.throwIfAborted();
     if (error instanceof Error && error.name === "AbortError") throw error;

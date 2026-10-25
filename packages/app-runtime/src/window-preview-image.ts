@@ -114,6 +114,33 @@ export function normalizeWindowPreviewPng(
   );
 }
 
+/** Full-frame model presentation. No crop, padding, overlays or canonical asset mutation. */
+export function resizeModelScreenshotPng(
+  bytes: Uint8Array,
+  source: { readonly width: number; readonly height: number },
+  presented: { readonly width: number; readonly height: number },
+  signal: AbortSignal,
+): Uint8Array {
+  signal.throwIfAborted();
+  if (bytes.byteLength > MAX_WINDOW_PREVIEW_SOURCE_BYTES) throw new Error("Model screenshot exceeds bounded decode limit");
+  readBoundedPngHeader(bytes, source);
+  const { width, height } = presented;
+  if (![width, height].every((n) => Number.isSafeInteger(n) && n > 0)
+    || width > source.width || height > source.height
+    || Math.abs(width / source.width - height / source.height) > 1 / Math.min(source.width, source.height)) {
+    throw new Error("Model screenshot must be an aspect-preserving full-frame reduction");
+  }
+  const decoded = pngjs.PNG.sync.read(Buffer.from(bytes));
+  if (decoded.width !== source.width || decoded.height !== source.height || decoded.data.byteLength !== source.width * source.height * 4) {
+    throw new Error("Model screenshot dimensions do not match decoded pixels");
+  }
+  signal.throwIfAborted();
+  if (width === source.width && height === source.height) return bytes;
+  const result = pngjs.PNG.sync.write(resizeRgbaBilinear(decoded, width, height), { deflateLevel: 6 });
+  signal.throwIfAborted();
+  return new Uint8Array(result);
+}
+
 function readBoundedPngHeader(
   data: Uint8Array,
   viewport: { readonly width: number; readonly height: number },

@@ -140,6 +140,8 @@ export interface ResolvedRunConfig {
   qwenEndpoint?: string;
   qwenWorkspaceId?: string;
   glmThinking?: "disabled" | "enabled" | "low" | "high" | "max";
+  /** Explicit full-frame presentation; canonical desktop coordinates are preserved. */
+  glmImageMaxEdge?: number;
   /** Total GLM completion/reasoning budget; defaults to 8192, bounded at 131072. */
   glmMaxOutputTokens?: number;
   glmEndpoint?: string;

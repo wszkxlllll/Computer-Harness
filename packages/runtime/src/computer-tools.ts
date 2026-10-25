@@ -19,7 +19,7 @@ export function defaultComputerTools(): readonly ComputerToolDefinition[] {
   return [
     {
       name: "click",
-      description: "Click one point in the current screen observation.",
+      description: "Click one point in the current screen observation. For a bounded control such as a button, locate its visible bounds in the newest image and choose an interior point near its center, away from borders, shadows, cursor tips and click ripples. Do not reuse a remembered location or nudge a failed point by a few pixels. If the effect is unclear or absent, observe separately and re-locate the control; use a different verified method when appropriate. A dispatched click does not prove its intended effect.",
       category: "computer",
       coordinate: { fields: ["x", "y"] },
       inputSchema: {

@@ -989,3 +989,64 @@ describe("FetchGlmHttpClient independent settlement boundary", () => {
     } finally { now.mockRestore(); vi.useRealTimers(); vi.unstubAllGlobals(); }
   });
 });
+
+describe("GLM full-frame image coordinate presentation", () => {
+  const source: Viewport = { width: 3024, height: 1964, coordinateSpace: "physical" };
+  const pixelProfile: GlmProfile = { name: "test-pixels", thinking: "enabled", coordinateMode: "actual_pixels" };
+  const tools = createDefaultComputerTools().modelTools();
+  const frameInput = (): ModelInput => ({ ...input(), tools, messages: [{ role: "user", content: [{ type: "image", asset, viewport: source }] }] });
+  const response = (name: string, args: object) => ({ choices: [{ message: { tool_calls: [{ id: "point", type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] });
+  const resizePng = vi.fn((_bytes: Uint8Array, _source: Viewport, _presented: Viewport, signal: AbortSignal) => { signal.throwIfAborted(); return Uint8Array.of(4, 5, 6); });
+  const build = (client: Client, profile = pixelProfile) => new GlmAdapter({ apiKey: "key", profile, assetReader: new Reader(), httpClient: client, imagePresentation: { maxEdge: 1600, resizePng } });
+
+  it.each([
+    ["click", { x: 938, y: 864 }, { x: 1772.82, y: 864 * 1964 / 1039 }],
+    ["scroll", { x: 800, y: 500, direction: "down", ticks: 3 }, { x: 1512, y: 500 * 1964 / 1039, direction: "down", ticks: 3 }],
+    ["drag", { fromX: 1, fromY: 2, toX: 1599, toY: 1038 }, { fromX: 1.89, fromY: 2 * 1964 / 1039, toX: 1599 * 3024 / 1600, toY: 1038 * 1964 / 1039 }],
+  ] as const)("maps %s back through exact x and y ratios once", async (name, args, expected) => {
+    const client = new Client(response(name, args)); const value = frameInput(); const original = structuredClone(value);
+    const turn = await build(client).generate(value, { signal: new AbortController().signal });
+    expect(turn).toMatchObject({ type: "tool_calls", calls: [{ name, arguments: expected }] });
+    expect(value).toEqual(original);
+    expect(resizePng).toHaveBeenLastCalledWith(Uint8Array.of(1,2,3), source, {width:1600,height:1039,coordinateSpace:"physical"}, expect.any(AbortSignal));
+    expect(JSON.stringify(client.body)).toContain("data:image/png;base64,BAUG");
+    expect(JSON.stringify(client.body)).toContain("complete, uncropped screenshot is 1600x1039");
+    const click = (client.body!.tools as Array<{function:{name:string;parameters:Record<string,unknown>}}>).find(t => t.function.name === "click")!;
+    expect(click.function.parameters).toMatchObject({properties:{x:{maximum:1599},y:{maximum:1038}}});
+  });
+
+  it("rescales each historical call using its own viewport and preserves non-coordinate values", async () => {
+    const client = new Client(response("click", {x:800,y:500})); const value = frameInput();
+    value.messages = [{role:"assistant",content:[{type:"tool_call",call:{id:"old" as ToolCallId,name:"click",arguments:{x:1000,y:500}},viewport:{width:2000,height:1000,coordinateSpace:"physical"}}]},...value.messages];
+    await build(client).generate(value, {signal:new AbortController().signal});
+    const messages=client.body!.messages as Array<{tool_calls?:Array<{function:{arguments:string}}>}>;
+    expect(JSON.parse(messages.find(m=>m.tool_calls)?.tool_calls?.[0]?.function.arguments ?? "null")).toEqual({x:800,y:400});
+  });
+
+  it("keeps prepared geometry immutable when the caller and later request change size", async () => {
+    const client = new Client(response("click", {x:800,y:500})); const adapter=build(client); const value=frameInput();
+    const first=await adapter.prepare(value,{signal:new AbortController().signal});
+    const changed={...frameInput(),messages:[{role:"user" as const,content:[{type:"image" as const,asset,viewport:{width:2000,height:1000,coordinateSpace:"physical" as const}}]}]};
+    await adapter.prepare(changed,{signal:new AbortController().signal});
+    value.messages=[];
+    expect(await adapter.generatePrepared(first,{signal:new AbortController().signal})).toMatchObject({calls:[{arguments:{x:1512,y:500*1964/1039}}]});
+  });
+
+  it("does not apply a second scale in normalized mode", async () => {
+    const client=new Client(response("click",{x:500,y:250}));
+    expect(await build(client, normalizedProfile).generate(frameInput(),{signal:new AbortController().signal})).toMatchObject({calls:[{arguments:{x:1512,y:491}}]});
+  });
+
+  it.each([{x:1600,y:500},{x:800,y:1039},{x:-1,y:500}])("rejects out-of-image coordinates %j",async(args)=>{
+    await expect(build(new Client(response("click",args))).generate(frameInput(),{signal:new AbortController().signal})).rejects.toMatchObject({code:"GLM_COORDINATE_OUT_OF_RANGE"});
+  });
+
+  it("rejects missing historical geometry and unsupported media before HTTP",async()=>{
+    const client=new Client(response("click",{x:800,y:500}));const adapter=build(client);const value=frameInput();
+    value.messages=[{role:"assistant",content:[{type:"tool_call",call:{id:"unknown" as ToolCallId,name:"click",arguments:{x:10,y:20}}}]},...value.messages];
+    await expect(adapter.prepare(value,{signal:new AbortController().signal})).rejects.toMatchObject({code:"GLM_MISSING_VIEWPORT"});
+    const jpeg: ModelInput={...frameInput(),messages:[{role:"user",content:[{type:"image",asset:{...asset,mediaType:"image/jpeg"},viewport:source}]}]};
+    await expect(adapter.prepare(jpeg,{signal:new AbortController().signal})).rejects.toMatchObject({code:"GLM_INVALID_IMAGE"});
+    expect(client.postCount).toBe(0);
+  });
+});

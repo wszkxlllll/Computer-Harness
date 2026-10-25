@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { MAX_WINDOW_PREVIEW_BYTES } from "@computer-harness/protocol";
-import { normalizeWindowPreviewPng, WindowPreviewImageError } from "./window-preview-image.js";
+import { resizeModelScreenshotPng, normalizeWindowPreviewPng, WindowPreviewImageError } from "./window-preview-image.js";
 
 interface FixturePngRaster {
   readonly width: number;
@@ -143,3 +143,35 @@ function createNoisyPng(width: number, height: number): Buffer {
   }
   return pngjs.PNG.sync.write({ width, height, data }, { deflateLevel: 1 });
 }
+
+
+describe("full-frame model PNG presentation", () => {
+  it("preserves all four corners, aspect ratio and the original bytes", () => {
+    const data = Buffer.alloc(320 * 200 * 4);
+    for (let y = 0; y < 200; y++) for (let x = 0; x < 320; x++) {
+      const p = (y * 320 + x) * 4;
+      data[p] = x < 160 ? 40 : 200; data[p + 1] = y < 100 ? 60 : 220; data[p + 3] = 255;
+    }
+    const source = pngjs.PNG.sync.write({ width: 320, height: 200, data });
+    const original = Buffer.from(source);
+    const output = resizeModelScreenshotPng(source, { width: 320, height: 200 }, { width: 160, height: 100 }, new AbortController().signal);
+    const image = pngjs.PNG.sync.read(Buffer.from(output));
+    expect([image.width, image.height]).toEqual([160, 100]);
+    const pixel = (x: number, y: number) => [...image.data.subarray((y * 160 + x) * 4, (y * 160 + x) * 4 + 4)];
+    expect([pixel(10, 10), pixel(150, 10), pixel(10, 90), pixel(150, 90)]).toEqual([[40,60,0,255],[200,60,0,255],[40,220,0,255],[200,220,0,255]]);
+    expect(source).toEqual(original);
+    expect(resizeModelScreenshotPng(source, { width: 320, height: 200 }, { width: 320, height: 200 }, new AbortController().signal)).toBe(source);
+  });
+  it("rejects wrong metadata, stretching, upscaling and corruption before using coordinates", () => {
+    const source = createNoisyPng(320, 200);
+    const signal = new AbortController().signal;
+    expect(() => resizeModelScreenshotPng(source, { width: 321, height: 200 }, { width: 160, height: 100 }, signal)).toThrow();
+    for (const size of [{width:160,height:80},{width:640,height:400},{width:0,height:0}]) {
+      expect(() => resizeModelScreenshotPng(source, { width: 320, height: 200 }, size, signal)).toThrow();
+    }
+    const bad = Buffer.from(source); bad[45] = bad[45]! ^ 255;
+    expect(() => resizeModelScreenshotPng(bad, { width: 320, height: 200 }, { width:160,height:100 }, signal)).toThrow();
+    const controller = new AbortController(); controller.abort();
+    expect(() => resizeModelScreenshotPng(source, { width:320,height:200 }, { width:160,height:100 }, controller.signal)).toThrow();
+  });
+});

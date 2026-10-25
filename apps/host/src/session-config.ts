@@ -13,13 +13,21 @@ export interface HostArguments {
   origins: string[];
   maxSteps: number;
   maxModelRequests: number;
+  riskGuard?: "off" | "layered";
   riskModel?: "off" | "same";
   riskMaxModelRequests?: number;
   riskTimeoutMs?: number;
   glmMaxOutputTokens: number;
 }
 
-/** Semantic risk review is an explicit Host opt-in; local layered checks stay on. */
+/** Disabling action risk review requires an explicit Host-local option. */
+export function parseHostRiskGuard(raw: string | undefined): "off" | "layered" {
+  if (raw === undefined || raw === "layered") return "layered";
+  if (raw === "off") return "off";
+  throw new Error("--risk-guard must be off or layered.");
+}
+
+/** Semantic risk review is an explicit Host opt-in within the layered Guard. */
 export function parseHostRiskModel(raw: string | undefined): "off" | "same" {
   if (raw === undefined || raw === "off") return "off";
   if (raw === "same") return "same";
@@ -27,6 +35,12 @@ export function parseHostRiskModel(raw: string | undefined): "off" | "same" {
 }
 
 export const DEFAULT_HOST_RISK_MAX_MODEL_REQUESTS = 1;
+export function parseGlmImageMaxEdge(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 320 || value > 4096) throw new Error("GLM_IMAGE_MAX_EDGE must be an integer from 320 to 4096");
+  return value;
+}
 export const MAX_HOST_RISK_MAX_MODEL_REQUESTS = 12;
 export const DEFAULT_HOST_RISK_TIMEOUT_MS = 15_000;
 export const MAX_HOST_RISK_TIMEOUT_MS = 240_000;
@@ -99,6 +113,11 @@ export function createHostSessionConfig(
   managedBrowserProfile: HostManagedBrowserProfileConfig,
   env: NodeJS.ProcessEnv = process.env,
 ): ApplicationSessionConfig {
+  const riskGuard = parseHostRiskGuard(args.riskGuard);
+  const riskModel = parseHostRiskModel(args.riskModel);
+  if (riskGuard === "off" && riskModel !== "off") {
+    throw new Error("--risk-model same requires --risk-guard layered; use --risk-model off or omit it when --risk-guard off.");
+  }
   const model: RunModel = args.model;
   const qwenModel = args.model === "qwen3.8-flash";
   const baseUrl = env.DASHSCOPE_BASE_URL ?? env.DASHSCOPE_ENDPOINT;
@@ -142,8 +161,8 @@ export function createHostSessionConfig(
     ...(qwenModel ? { contextMaxInputTokens: 8_000 } : deepseekModel || arkModel ? { contextMaxInputTokens: 16_384, contextMaxWireInputTokens: 24_576 } : parseGlmInputBudgets(env.GLM_MAX_INPUT_TOKENS, env.GLM_MAX_WIRE_INPUT_TOKENS)),
     ...(profileSettings.operationGuidance === undefined ? {} : { operationGuidance: profileSettings.operationGuidance }),
     riskProfile: "live-interactive",
-    riskGuard: "layered",
-    riskModel: parseHostRiskModel(args.riskModel),
+    riskGuard,
+    riskModel,
     riskMaxModelRequests: parseHostRiskMaxModelRequests(args.riskMaxModelRequests === undefined ? undefined : String(args.riskMaxModelRequests)),
     riskTimeoutMs: parseHostRiskTimeoutMs(args.riskTimeoutMs === undefined ? undefined : String(args.riskTimeoutMs)),
     cleanupDeadlineMs: 5_000,
@@ -153,6 +172,7 @@ export function createHostSessionConfig(
     windowHandoff: "confirm-v1",
     ...(!deepseekModel && !arkModel ? {
       glmThinking: readGlmThinking(env.GLM_THINKING),
+      ...(env.GLM_IMAGE_MAX_EDGE === undefined ? {} : { glmImageMaxEdge: parseGlmImageMaxEdge(env.GLM_IMAGE_MAX_EDGE)! }),
       glmMaxOutputTokens: args.glmMaxOutputTokens,
       glmRequestTimeoutMs: parseGlmRequestTimeoutMs(env.GLM_REQUEST_TIMEOUT_MS),
       ...(glmEndpoint === undefined ? {} : { glmEndpoint }),

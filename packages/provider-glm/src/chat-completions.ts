@@ -107,6 +107,11 @@ export interface GlmAdapterOptions {
   assetReader: AssetReader;
   endpoint?: string;
   httpClient?: GlmHttpClient;
+  /** Full-frame, aspect-preserving presentation only; canonical observations remain unchanged. */
+  imagePresentation?: {
+    readonly maxEdge: number;
+    readonly resizePng: (bytes: Uint8Array, source: Viewport, presented: Viewport, signal: AbortSignal) => Uint8Array;
+  };
 }
 
 export type GlmRecoveryHint =
@@ -172,7 +177,8 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
   private readonly endpoint: string;
   private readonly apiKey: string;
   private readonly httpClient: GlmHttpClient;
-  private readonly preparedRequests = new WeakMap<PreparedProviderRequest, { body: Record<string, unknown>; input: ModelInput }>();
+  private readonly imagePresentation: GlmAdapterOptions["imagePresentation"];
+  private readonly preparedRequests = new WeakMap<PreparedProviderRequest, { body: Record<string, unknown>; input: ModelInput; sourceInput: ModelInput }>();
 
   public constructor(options: GlmAdapterOptions, private readonly boundary: ChatCompletionsBoundary = glmBoundary) {
     if (options.apiKey.trim().length === 0) {
@@ -188,6 +194,11 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     this.endpoint = options.endpoint ?? boundary.endpoint;
     this.apiKey = options.apiKey;
     this.httpClient = options.httpClient ?? new FetchChatCompletionsHttpClient({}, boundary);
+    if (options.imagePresentation !== undefined && (!Number.isSafeInteger(options.imagePresentation.maxEdge)
+      || options.imagePresentation.maxEdge < 320 || options.imagePresentation.maxEdge > 4096)) {
+      throw new Error("GLM image presentation maxEdge must be an integer from 320 to 4096");
+    }
+    this.imagePresentation = options.imagePresentation;
   }
 
   public async generate(input: ModelInput, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<ModelTurn> {
@@ -198,10 +209,11 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
   public async prepare(input: ModelInput, options: { signal: AbortSignal; requestContext?: ProviderRequestContext }): Promise<PreparedProviderRequest> {
     const boundary = this.boundary;
     options.signal.throwIfAborted();
-    const snapshot = structuredClone(input);
+    const sourceInput = structuredClone(input);
+    const snapshot = this.imagePresentation === undefined ? sourceInput : projectImageCoordinates(sourceInput, this.imagePresentation.maxEdge);
     const body = {
       model: this.profile.name,
-      messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile, boundary)}\n${OBSERVATION_ASSESSMENT_GUIDANCE}`, snapshot.messages, snapshot.tools, options.signal),
+      messages: await this.presentMessages(`${snapshot.system}\n${profilePrompt(this.profile, boundary)}\n${OBSERVATION_ASSESSMENT_GUIDANCE}`, snapshot.messages, snapshot.tools, options.signal, sourceInput),
       tools: snapshot.tools.map((tool) => toGlmTool(tool, this.profile, latestViewport(snapshot))),
       stream: false,
       thinking: { type: this.profile.thinking === "disabled" ? "disabled" : "enabled" },
@@ -224,7 +236,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         estimationMethod: "provider_projection",
       } as const),
     });
-    this.preparedRequests.set(prepared, { body: frozenBody, input: snapshot });
+    this.preparedRequests.set(prepared, { body: frozenBody, input: snapshot, sourceInput });
     return prepared;
   }
 
@@ -250,10 +262,11 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       },
     );
     options.signal.throwIfAborted();
-    return this.parseResponse(response, state.input);
+    const turn = this.parseResponse(response, state.input);
+    return this.imagePresentation === undefined ? turn : restoreImageCoordinates(turn, state.input, state.sourceInput);
   }
 
-  private async presentMessages(system: string, messages: readonly ModelMessage[], tools: readonly ModelToolSpec[], signal: AbortSignal): Promise<unknown[]> {
+  private async presentMessages(system: string, messages: readonly ModelMessage[], tools: readonly ModelToolSpec[], signal: AbortSignal, sourceInput: ModelInput): Promise<unknown[]> {
     const boundary = this.boundary;
     const result: unknown[] = [{ role: "system", content: system }];
     for (const message of messages) {
@@ -286,7 +299,15 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         if (block.type === "text") {
           content.push({ type: "text", text: block.text });
         } else if (block.type === "image") {
-          const bytes = await this.assetReader.read(block.asset, signal);
+          let bytes = await this.assetReader.read(block.asset, signal);
+          if (this.imagePresentation !== undefined) {
+            const source = sourceInput.messages.flatMap((item) => item.content).find((item) => item.type === "image" && item.asset.assetId === block.asset.assetId);
+            if (source?.type !== "image" || block.asset.mediaType !== "image/png") {
+              throw providerError(boundary, "GLM image presentation requires a matching PNG observation", "GLM_INVALID_IMAGE", false);
+            }
+            bytes = this.imagePresentation.resizePng(bytes, source.viewport, block.viewport, signal);
+            content.push({ type: "text", text: `Provider image coordinate contract: this complete, uncropped screenshot is ${block.viewport.width}x${block.viewport.height} pixels. Its top-left is (0,0); x increases right and y increases down. For pixel tools use ONLY these displayed-image pixels, not the original capture dimensions or macOS points mentioned in metadata or receipts. Do not subtract window/browser offsets or scale coordinates yourself; the adapter performs the conversion. Locate the current control center anew.` });
+          }
           content.push({ type: "image_url", image_url: { url: toDataUrl(block.asset.mediaType, bytes) } });
         } else if (block.type === "provider_continuation") {
           // A disabled-thinking live profile must not replay prior hidden
@@ -872,6 +893,49 @@ function profilePrompt(profile: GlmProfile, boundary: ChatCompletionsBoundary): 
   return profile.coordinateMode === "normalized_1000"
     ? `${boundary.label} GUI contract: follow the Context tool-call and batching contract; absent an explicit permitted batch, emit at most one Computer tool call per turn. Coordinates must be normalized to 0..1000 relative to the current image.`
     : `${boundary.label} GUI contract: follow the Context tool-call and batching contract; absent an explicit permitted batch, emit at most one Computer tool call per turn. Coordinates are pixels in the current image viewport.`;
+}
+
+function fitImageViewport(source: Viewport, maxEdge: number): Viewport {
+  if (![source.width, source.height].every((n) => Number.isSafeInteger(n) && n > 0)) {
+    throw new GlmProviderError("Invalid source image viewport", "GLM_INVALID_IMAGE", false);
+  }
+  const ratio = Math.min(1, maxEdge / Math.max(source.width, source.height));
+  return { ...source, width: Math.max(1, Math.round(source.width * ratio)), height: Math.max(1, Math.round(source.height * ratio)) };
+}
+
+function scaleCallToViewport(call: ToolCall, tools: readonly ModelToolSpec[], from: Viewport | undefined, to: Viewport | undefined, validate = false): ToolCall {
+  const fields = tools.find((tool) => tool.name === call.name)?.coordinate?.fields;
+  if (fields === undefined || !isRecord(call.arguments)) return call;
+  if (from === undefined || to === undefined) throw new GlmProviderError("Coordinate presentation requires an image viewport", "GLM_MISSING_VIEWPORT", false);
+  const args = { ...call.arguments };
+  for (const field of fields) {
+    const value = args[field];
+    if (value === undefined) continue;
+    const x = field === "x" || field.endsWith("X");
+    const extent = x ? from.width : from.height;
+    if (typeof value !== "number" || !Number.isFinite(value) || (validate && (value < 0 || value >= extent))) {
+      throw new GlmProviderError(`Invalid presented coordinate ${field}`, "GLM_COORDINATE_OUT_OF_RANGE");
+    }
+    args[field] = value * (x ? to.width : to.height) / extent;
+  }
+  return { ...call, arguments: args as JsonValue };
+}
+
+function projectImageCoordinates(input: ModelInput, maxEdge: number): ModelInput {
+  return { ...input, messages: input.messages.map((message) => ({ ...message, content: message.content.map((block): ModelContentBlock => {
+    if (block.type === "image") return { ...block, viewport: fitImageViewport(block.viewport, maxEdge) };
+    if (block.type === "tool_call" && input.tools.some((tool) => tool.name === block.call.name && tool.coordinate !== undefined)) {
+      if (block.viewport === undefined) throw new GlmProviderError("Historical coordinate call lacks its source viewport", "GLM_MISSING_VIEWPORT", false);
+      const viewport = fitImageViewport(block.viewport, maxEdge);
+      return { ...block, viewport, call: scaleCallToViewport(block.call, input.tools, block.viewport, viewport) };
+    }
+    return block;
+  }) })) };
+}
+
+function restoreImageCoordinates(turn: ModelTurn, presented: ModelInput, source: ModelInput): ModelTurn {
+  if (turn.type !== "tool_calls") return turn;
+  return { ...turn, calls: turn.calls.map((call) => scaleCallToViewport(call, source.tools, latestViewport(presented), latestViewport(source), true)) };
 }
 
 function latestViewport(input: ModelInput): Viewport | undefined {

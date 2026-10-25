@@ -24,6 +24,26 @@ function result(overrides: Partial<ToolResult> = {}): ToolResult {
   };
 }
 
+function nativeActivationDiagnostic(error: unknown): {
+  verification_stable: unknown;
+  verification_poll_count: unknown;
+  verification_elapsed_ms: unknown;
+  verification_deadline_reached: unknown;
+  frontmost_row: Record<string, unknown>;
+  ordinary_classifications: {
+    container: string;
+    count: number;
+    count_truncated: boolean;
+    truncated: boolean;
+    entries: Record<string, unknown>[];
+  };
+} {
+  const message = (error as Error).message;
+  const start = message.indexOf(" native_evidence=");
+  expect(start).toBeGreaterThan(-1);
+  return JSON.parse(message.slice(start + " native_evidence=".length, -1));
+}
+
 function minimalPngBase64(width = 320, height = 240): string {
   const data = new Uint8Array(24);
   data.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
@@ -114,6 +134,140 @@ describe("CuaWindowDiscovery", () => {
     const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
     expect((error as Error).message).toContain("is_error=invalid degraded=invalid");
     expect((error as Error).message).not.toMatch(/PRIVATE_/u);
+  });
+
+  it("preserves Native verification, frontmost-row and focus diagnostics without granting activation or retrying", async () => {
+    const calls: string[] = [];
+    const driver = { async callTool(name: string) {
+      calls.push(name);
+      return result({ isError: true, structuredJson: JSON.stringify({
+        status: "failed", window_id: 1312, exact_window_effect: { verified: false },
+        observed: {
+          focused_window_id: 1312, frontmost_ordinary_window_id: 999, front_process_matches_target: true,
+          verification_stable: false, verification_poll_count: 3, verification_elapsed_ms: 1499, verification_deadline_reached: true,
+          frontmost_window_diagnostic: {
+            state: "present", target_pid_relation: "same", target_window_id_relation: "different",
+            layer: 0, z: 1, is_on_screen: true, title: "PRIVATE_WINDOW_TITLE",
+          },
+          ordinary_window_classification: [{
+            classification: "unknown", decision: "retained", reason: "focus_or_foreground_unknown",
+            last_stage: "read_focus_evidence", last_stage_status: "completed", snapshot_status: "complete",
+            focused_window_status: "value", focused_element_status: "unsupported", focused_element_direct_status: "unsupported",
+            focus_proof_source: "none", front_process_status: "matches_target", inspection_pass: "initial",
+            diagnostic_only_partial: false, elapsed_ms: 25, description: "PRIVATE_AX_DESCRIPTION",
+          }],
+          prior_observation_diagnostic_only: { ordinary_window_classifications: [{ reason: "PRIVATE_PRIOR_REASON" }] },
+        },
+      }) });
+    } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "WINDOW_ACTIVATION_UNCONFIRMED", message: expect.stringContaining("status=failed") });
+    const diagnostic = nativeActivationDiagnostic(error);
+    expect(diagnostic).toMatchObject({
+      verification_stable: false, verification_poll_count: 3, verification_elapsed_ms: 1499, verification_deadline_reached: true,
+      frontmost_row: { container: "present", state: "present", target_pid_relation: "same", target_window_id_relation: "different", layer: 0, z: 1, is_on_screen: true },
+      ordinary_classifications: { count: 1, count_truncated: false, truncated: false, entries: [{
+        classification: "unknown", decision: "retained", reason: "focus_or_foreground_unknown", last_stage: "read_focus_evidence",
+        last_stage_status: "completed", focused_element_direct_status: "unsupported", focus_proof_source: "none", elapsed_ms: 25,
+      }] },
+    });
+    expect(calls).toEqual(["bring_to_front"]);
+    expect((error as Error).message).not.toMatch(/PRIVATE_|prior_observation/u);
+  });
+
+  it("rejects unrecognized Native enums, numeric strings and private nested content from activation diagnostics", async () => {
+    const secret = `PRIVATE_NATIVE_PAYLOAD${"x".repeat(20_000)}`;
+    const driver = { async callTool() { return result({ text: secret, rawJson: secret, isError: true, structuredJson: JSON.stringify({
+      status: "partial", exact_window_effect: { verified: false }, observed: {
+        verification_stable: secret, verification_poll_count: "9000", verification_elapsed_ms: 987654321, verification_deadline_reached: { value: secret },
+        frontmost_window_diagnostic: {
+          state: secret, target_pid_relation: { value: secret }, target_window_id_relation: secret,
+          layer: -987654321, z: secret, is_on_screen: "true", title: secret, description: secret, [secret]: secret,
+        },
+        ordinary_window_classification: [{
+          classification: secret, decision: [secret], reason: secret, last_stage: secret, last_stage_status: secret,
+          focused_element_direct_status: secret, focus_proof_source: secret, elapsed_ms: 987654321,
+          diagnostic_only_partial: "false", title: secret, description: secret, ax: { children: [{ text: secret }] }, [secret]: secret,
+        }],
+      },
+    }) }); } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "WINDOW_ACTIVATION_UNCONFIRMED" });
+    const diagnostic = nativeActivationDiagnostic(error);
+    expect(diagnostic).toMatchObject({
+      verification_stable: "invalid", verification_poll_count: "invalid", verification_elapsed_ms: "invalid", verification_deadline_reached: "invalid",
+      frontmost_row: { state: "invalid", target_pid_relation: "invalid", target_window_id_relation: "invalid", layer: "invalid", z: "invalid", is_on_screen: "invalid" },
+      ordinary_classifications: { entries: [{
+        classification: "invalid", decision: "invalid", reason: "invalid", last_stage: "invalid", last_stage_status: "invalid",
+        focused_element_direct_status: "invalid", focus_proof_source: "invalid", elapsed_ms: "invalid", diagnostic_only_partial: "invalid",
+      }] },
+    });
+    expect((error as Error).message).not.toMatch(/PRIVATE_|987654321|9000|description|"title"|"ax"/u);
+    expect((error as Error).message.length).toBeLessThan(6_500);
+  });
+
+  it.each([
+    { poll: 0, elapsed: 0, expectedPoll: 0, expectedElapsed: 0 },
+    { poll: 10_000, elapsed: 60_000, expectedPoll: 10_000, expectedElapsed: 60_000 },
+    { poll: -1, elapsed: -1, expectedPoll: "invalid", expectedElapsed: "invalid" },
+    { poll: 10_001, elapsed: 60_001, expectedPoll: "invalid", expectedElapsed: "invalid" },
+    { poll: 1.5, elapsed: 1.5, expectedPoll: "invalid", expectedElapsed: "invalid" },
+    { poll: null, elapsed: null, expectedPoll: "invalid", expectedElapsed: "invalid" },
+  ])("bounds Native verification numbers without coercion: $poll/$elapsed", async ({ poll, elapsed, expectedPoll, expectedElapsed }) => {
+    const driver = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: false, observed: {
+      verification_poll_count: poll, verification_elapsed_ms: elapsed,
+    } }) }); } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "WINDOW_ACTIVATION_REFUSED" });
+    expect(nativeActivationDiagnostic(error)).toMatchObject({ verification_poll_count: expectedPoll, verification_elapsed_ms: expectedElapsed });
+  });
+
+  it("limits current Native classifications to four entries and caps the count without reading prior observations", async () => {
+    const entries = Array.from({ length: 33 }, (_, index) => ({
+      classification: "unknown", decision: "retained", reason: index < 4 ? "deadline_exceeded" : "semantic_mismatch",
+      last_stage: "semantic_classification", last_stage_status: "completed_after_deadline",
+      relation_status: "exact_dialog_direct_cgid_illegal_argument_compatibility",
+      focus_proof_source: "focused_window_and_front_process_unsupported", diagnostic_only_partial: true, elapsed_ms: 60_000,
+    }));
+    const driver = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: false, observed: {
+      ordinary_window_classification: entries,
+      prior_observation_diagnostic_only: { ordinary_window_classifications: [{ reason: "PRIVATE_PRIOR_REASON" }] },
+    } }) }); } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "WINDOW_ACTIVATION_REFUSED" });
+    const diagnostic = nativeActivationDiagnostic(error);
+    expect(diagnostic.ordinary_classifications).toMatchObject({ container: "present", count: 32, count_truncated: true, truncated: true });
+    expect(diagnostic.ordinary_classifications.entries).toHaveLength(4);
+    expect(diagnostic.ordinary_classifications.entries.every((entry) => entry.reason === "deadline_exceeded")).toBe(true);
+    expect(diagnostic.ordinary_classifications.entries[0]).toMatchObject({
+      relation_status: "exact_dialog_direct_cgid_illegal_argument_compatibility",
+      focus_proof_source: "focused_window_and_front_process_unsupported", diagnostic_only_partial: true,
+    });
+    expect((error as Error).message).not.toMatch(/PRIVATE_|semantic_mismatch/u);
+    expect((error as Error).message.length).toBeLessThan(6_500);
+  });
+
+  it("reports malformed Native diagnostic containers and rows without serializing them", async () => {
+    const driver = { async callTool() { return result({ structuredJson: JSON.stringify({ landed_on_target: false, observed: {
+      frontmost_window_diagnostic: ["PRIVATE_FRONTMOST"], ordinary_window_classification: [null, "PRIVATE_CLASSIFICATION", [], 12],
+    } }) }); } } as unknown as CuaDriverLike;
+    const error = await activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal).catch((caught: unknown) => caught);
+    const diagnostic = nativeActivationDiagnostic(error);
+    expect(diagnostic.frontmost_row.container).toBe("invalid");
+    expect(diagnostic.ordinary_classifications.entries).toEqual(Array.from({ length: 4 }, () => ({ state: "invalid" })));
+    expect((error as Error).message).not.toMatch(/PRIVATE_/u);
+  });
+
+  it.each([
+    { landed_on_target: true, target_hwnd: 1312, now_fg_hwnd: 1312 },
+    { status: "activated", window_id: 1312, exact_window_effect: { verified: true }, observed: { focused_window_id: 1312, frontmost_ordinary_window_id: 1312, front_process_matches_target: true } },
+  ])("does not make diagnostic-only Native fields a new activation condition", async (structured) => {
+    const driver = { async callTool() { return result({ structuredJson: JSON.stringify({ ...structured, observed: {
+      ...("observed" in structured ? structured.observed : {}),
+      verification_stable: false, verification_deadline_reached: true, verification_poll_count: "PRIVATE_POLL_COUNT",
+      ordinary_window_classification: [{ classification: "PRIVATE_CLASSIFICATION", diagnostic_only_partial: true }],
+    } }) }); } } as unknown as CuaDriverLike;
+    await expect(activateWindowTarget(driver, "private-session", { pid: 42, windowId: 1312 }, new AbortController().signal)).resolves.toBeUndefined();
   });
 
   it("keeps the legacy exact landing success path and rejects it if another exact ID conflicts", async () => {
