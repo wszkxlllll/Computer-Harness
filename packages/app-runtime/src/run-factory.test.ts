@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryRunModule, FileMemoryStore, HybridMemoryRecallService, InMemoryMemoryStore, type MemoryRunModule, type MemoryStore } from "@computer-harness/memory";
 import { DefaultContextCompiler } from "@computer-harness/context";
-import type { EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
+import type { ComputerSessionDescriptor, EventId, JsonValue, MemoryMutation, RunId, RuntimeEvent, SurfaceId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { createDefaultToolRegistry, ToolRegistry, type Computer, type MemoryRecallService, type ModelInput, type NonComputerToolDefinition, type PlanningTaskMutation, type ProviderAdapter } from "@computer-harness/runtime";
 import { createPlanningRunModule, FilePlanStore, InMemoryPlanStore, type PlanningRunModule } from "@computer-harness/planning";
 import { readRuntimeEvents, reduceRuntimeEvents } from "@computer-harness/trajectory";
@@ -84,11 +84,12 @@ async function withDarwinPlatform<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-function fakeComputer(calls: { open: number; observe: number; close: number }): Computer {
+function fakeComputer(calls: { open: number; observe: number; close: number }, platform?: ComputerSessionDescriptor["platform"]): Computer {
   const viewport: Viewport = { width: 1, height: 1, coordinateSpace: "physical" };
   const session = {
     id: "fixture-session",
     backend: "fixture",
+    ...(platform === undefined ? {} : { platform }),
     viewport,
     capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
     openedAt: "2026-09-17T00:00:00.000Z",
@@ -277,15 +278,21 @@ describe("app-runtime RunHandle", () => {
   });
 
   it.each([
-    [undefined, false],
-    ["off", false],
-    ["catalog-v1", true],
-  ] as const)("keeps task operation guidance opt-in for a Run (%s)", async (operationGuidance, expectedIncluded) => {
+    [undefined, false, undefined],
+    [undefined, false, "darwin"],
+    [undefined, false, "win32"],
+    ["off", false, "darwin"],
+    ["catalog-v1", true, undefined],
+    ["catalog-v1", true, "darwin"],
+    ["catalog-v1", true, "win32"],
+  ] as const)("keeps task operation guidance %s opt-in (%s included) for session platform %s", async (operationGuidance, expectedIncluded, platform) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-app-operation-guidance-"));
     const inputs: ModelInput[] = [];
     let configuredOperationGuidance: string | undefined;
     let compiledGoal: string | undefined;
     let selectedOperationGuidance: string | undefined;
+    let guidanceText: string | undefined;
+    let compiledPlatform: ComputerSessionDescriptor["platform"];
     const provider: ProviderAdapter = {
       id: "fixture-provider",
       async generate(input) {
@@ -300,7 +307,7 @@ describe("app-runtime RunHandle", () => {
         ...(operationGuidance === undefined ? {} : { operationGuidance }),
       }, {
         createProvider: () => provider,
-        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 })),
+        createComputer: () => Promise.resolve(fakeComputer({ open: 0, observe: 0, close: 0 }, platform)),
         createContextCompiler: (tools, features, runConfig) => {
           configuredOperationGuidance = runConfig.operationGuidance;
           const base = new DefaultContextCompiler(tools, { features });
@@ -308,6 +315,8 @@ describe("app-runtime RunHandle", () => {
             async compile(input, signal) {
               compiledGoal = input.goal;
               selectedOperationGuidance = input.operationGuidance?.id;
+              guidanceText = input.operationGuidance?.text;
+              compiledPlatform = input.computerSession?.platform;
               return base.compile(input, signal);
             },
           };
@@ -316,6 +325,7 @@ describe("app-runtime RunHandle", () => {
       await expect(handle.start()).resolves.toBe("succeeded");
       expect(configuredOperationGuidance).toBe(operationGuidance);
       expect(compiledGoal).toBe("新建文档并保存。");
+      expect(compiledPlatform).toBe(platform);
       expect(selectedOperationGuidance).toBe(expectedIncluded ? "text_document_save" : undefined);
       const input = inputs[0];
       if (input === undefined) throw new Error("fixture Provider did not receive a Context");
@@ -324,6 +334,22 @@ describe("app-runtime RunHandle", () => {
       );
       expect(guidanceMessages).toHaveLength(expectedIncluded ? 1 : 0);
       expect(input.contextBudget?.trace?.operationGuidance?.included).toBe(expectedIncluded ? true : undefined);
+      if (expectedIncluded) {
+        expect(guidanceText).toContain("通用：编辑前核内容");
+        const renderedGuidance = guidanceMessages[0]?.content
+          .filter((part) => part.type === "text").map((part) => part.text).join("\n");
+        expect(renderedGuidance).toContain(guidanceText);
+        if (platform === "darwin") {
+          expect(guidanceText).toContain("macOS：");
+          expect(guidanceText).toContain("Cmd-Shift-G定位");
+        } else {
+          expect(guidanceText).not.toMatch(/macOS|Cmd|TextEdit|Option|Duplicate/iu);
+          if (platform === "win32") expect(guidanceText).toContain("Windows：");
+          else expect(guidanceText).not.toContain("Windows");
+        }
+      } else {
+        expect(guidanceText).toBeUndefined();
+      }
       await handle.close();
     } finally {
       await rm(outputDir, { recursive: true, force: true });

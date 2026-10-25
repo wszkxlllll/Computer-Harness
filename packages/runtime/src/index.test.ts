@@ -2304,6 +2304,7 @@ describe("RunController S2-2 happy path", () => {
     const click = (id: string, x = 270, y = 151): ToolCall => ({ id: id as ToolCallId, name: "click", arguments: { x, y } });
     const wait = (id: string): ToolCall => ({ id: id as ToolCallId, name: "wait", arguments: { durationMs: 0 } });
     const enter = (id: string): ToolCall => ({ id: id as ToolCallId, name: "keypress", arguments: { keys: ["ENTER"] } });
+    const goToFolder = (id: string): ToolCall => ({ id: id as ToolCallId, name: "hotkey", arguments: { keys: ["CMD", "SHIFT", "G"] } });
     const finish: Decision = () => ({ type: "finish", summary: "synthetic recovery complete" });
     const decide = (call: ToolCall, outcome?: ObservationAssessment["actionOutcome"], invalid?: "action" | "observation"): Decision => (_input, events) => {
       const binding = currentObservationAssessmentBinding(events);
@@ -2312,7 +2313,9 @@ describe("RunController S2-2 happy path", () => {
         ...(outcome === undefined || binding === undefined ? {} : { observationAssessment: {
           observationId: invalid === "observation" ? "stale-observation" as ObservationId : binding.observationId,
           actionId: invalid === "action" ? "unrelated-action" as ActionId : binding.actionId,
-          actionOutcome: outcome, evidence: "The current target outcome is being assessed.", progress: null,
+          actionOutcome: outcome, evidence: outcome === "expected_change"
+            ? "The first dialog has closed; the next observed confirmation control is visible."
+            : "The current target outcome is being assessed.", progress: null,
         } }),
       };
     };
@@ -2354,6 +2357,91 @@ describe("RunController S2-2 happy path", () => {
     }
     const rejections = (events: readonly RuntimeEvent[]) => events.filter((event) => event.type === "tool.call.rejected"
       && (event.reason.startsWith("CLICK_OUTCOME_UNRESOLVED:") || event.reason.startsWith("ENTER_CLICK_REFRESH_REQUIRED:")));
+
+    it.each(["Enter", "same-point click", "CMD+SHIFT+G"] as const)("allows two normally grounded %s confirmations without an extra observation or model request", async (kind) => {
+      const confirm = kind === "Enter" ? enter : kind === "same-point click" ? click : goToFolder;
+      class RejectRedundantCaptureComputer extends RecoveryComputer {
+        override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+          if (this.observations === 2 && this.actions.length === 1) throw new Error("injected redundant confirmation capture failure");
+          return super.observe(session, observationId, signal);
+        }
+      }
+      // An unnecessary extra capture between the two confirmations fails.
+      // Only the initial and the two normal post-action images are needed.
+      const created = await setup([
+        decide(confirm("first-confirmation")), decide(confirm("next-observed-control"), "expected_change"), finish,
+      ], new RejectRedundantCaptureComputer());
+      try {
+        await expect(created.controller.start("Confirm the current dialog, then confirm the next observed control")).resolves.toBe("succeeded");
+        const events = created.controller.getEvents();
+        const observations = events.filter((event) => event.type === "observation.created");
+        expect(created.computer.actions).toHaveLength(2);
+        expect(created.computer.actions[1]?.basedOn).toBe(observations[1]!.observation.id);
+        expect(created.provider.inputs[1]!.messages.flatMap((message) => message.content).filter((block) => block.type === "image"))
+          .toEqual([expect.objectContaining({ asset: observations[1]!.observation.screenshot })]);
+        expect(created.computer.observations).toBe(3);
+        expect(created.provider.inputs).toHaveLength(3);
+        expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+        expect(events.filter((event) => event.type === "action.proposed").map((event) => event.callId)).toEqual(["first-confirmation", "next-observed-control"]);
+        expect(events.some((event) => event.type === "monitor.transition" && event.transition === "changed")).toBe(true);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it.each(["Enter", "CMD+SHIFT+G"] as const)("keeps the %s refresh boundary for missing, negative or incorrectly bound current assessments", async (kind) => {
+      const confirm = kind === "Enter" ? enter : goToFolder;
+      for (const scenario of ["missing", "no_effect", "uncertain", "unexpected_change", "wrong-action", "stale-observation"] as const) {
+        const created = await setup([
+          decide(confirm("first-confirmation")),
+          decide(confirm("unresolved-confirmation"), scenario === "missing" ? undefined
+            : scenario === "wrong-action" || scenario === "stale-observation" ? "expected_change" : scenario,
+          scenario === "wrong-action" ? "action" : scenario === "stale-observation" ? "observation" : undefined), finish,
+        ]);
+        try {
+          await expect(created.controller.start("Inspect an unresolved confirmation before further input")).resolves.toBe("succeeded");
+          const events = created.controller.getEvents();
+          expect(created.computer.actions, scenario).toHaveLength(1);
+          expect(created.computer.observations, scenario).toBe(3);
+          expect(events.filter((event) => event.type === "tool.call.rejected" && event.callId === "unresolved-confirmation"), scenario).toHaveLength(1);
+          // A different bitmap is available even in these unresolved cases.
+          expect(events.some((event) => event.type === "monitor.transition" && event.transition === "changed"), scenario).toBe(true);
+        } finally { await rm(created.directory, { recursive: true, force: true }); }
+      }
+    });
+
+    it.each(["Enter", "same-point click"] as const)("preserves both completed %s receipts if the second action's normal follow-up capture fails", async (kind) => {
+      class FailedFollowupComputer extends RecoveryComputer {
+        override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+          const capture = await super.observe(session, observationId, signal);
+          if (this.observations === 3) throw new Error("injected normal confirmation follow-up failure");
+          return capture;
+        }
+      }
+      const confirm = kind === "Enter" ? enter : click;
+      const created = await setup([decide(confirm("first-confirmation")), decide(confirm("second-confirmation"), "expected_change"), finish], new FailedFollowupComputer());
+      try {
+        await expect(created.controller.start("Keep completed input durable when observing its result fails")).resolves.toBe("failed");
+        const events = created.controller.getEvents();
+        expect(created.computer.actions).toHaveLength(2);
+        expect(created.provider.inputs).toHaveLength(2);
+        expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(2);
+        expect(events.filter((event) => event.type === "tool.call.completed").map((event) => event.result.callId)).toEqual(["first-confirmation", "second-confirmation"]);
+        expect(events.filter((event) => event.type === "observation.created")).toHaveLength(2);
+        expect(events.filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+        expect(events.some((event) => event.type === "runtime.error" && event.message.includes("injected normal confirmation follow-up failure"))).toBe(true);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
+
+    it.each(["Enter", "same-point click"] as const)("does not impose a Mac %s assessment boundary on Windows", async (kind) => {
+      const confirm = kind === "Enter" ? enter : click;
+      const created = await setup([decide(confirm("first-confirmation")), decide(confirm("second-confirmation"), "no_effect"), finish], new RecoveryComputer("win32"));
+      try {
+        await expect(created.controller.start("Preserve Windows confirmation policy")).resolves.toBe("succeeded");
+        expect(created.computer.actions).toHaveLength(2);
+        expect(created.computer.observations).toBe(3);
+        expect(created.provider.inputs).toHaveLength(3);
+        expect(created.controller.getEvents().filter((event) => event.type === "tool.call.rejected")).toHaveLength(0);
+      } finally { await rm(created.directory, { recursive: true, force: true }); }
+    });
 
     it.each(["no_effect", "uncertain"] as const)("blocks a near click after a wait-bound %s assessment, preserving the episode across its own refresh", async (outcome) => {
       const created = await setup([
@@ -2481,11 +2569,13 @@ describe("RunController S2-2 happy path", () => {
     });
     const finish: ModelTurn = { type: "finish", summary: "synthetic contract complete" };
     const refreshRejections = (events: readonly RuntimeEvent[]) => events.filter((event) =>
-      event.type === "tool.call.rejected" && event.reason.startsWith(rejectionPrefix),
+      event.type === "tool.call.rejected" && (event.reason.startsWith(rejectionPrefix)
+        || toolName === "click" && event.reason.startsWith("CLICK_OUTCOME_UNRESOLVED:")),
     );
-    async function createShortcutRun(turns: ModelTurn[], computer = new ShortcutComputer(), onGenerate?: (count: number) => void, registry = createDefaultComputerTools()) {
-      // These cases exercise independent-frame gating for legitimate repeat
-      // decisions. Missing/invalid outcome diagnostics are tested separately.
+    async function createShortcutRun(turns: ModelTurn[], computer = new ShortcutComputer(), onGenerate?: (count: number) => void,
+      registry = createDefaultComputerTools(), unassessedCallIds: readonly string[] = []) {
+      // Normal pointer decisions carry a current positive assessment. A test
+      // must explicitly withhold it when exercising an unresolved retry.
       let controller: RunController | undefined;
       const provider = new ScriptedProvider(turns, onGenerate);
       const originalGenerate = provider.generate.bind(provider);
@@ -2493,6 +2583,7 @@ describe("RunController S2-2 happy path", () => {
         const turn = await originalGenerate(input, options);
         const binding = currentObservationAssessmentBinding(controller?.getEvents() ?? []);
         return toolName === "click" && turn.type === "tool_calls" && binding !== undefined
+          && !turn.calls.some((call) => unassessedCallIds.includes(call.id))
           ? { ...turn, observationAssessment: { observationId: binding.observationId, actionId: binding.actionId,
             actionOutcome: "expected_change", evidence: "Synthetic target visibly advanced to a new repeatable state.", progress: null } }
           : turn;
@@ -2510,7 +2601,7 @@ describe("RunController S2-2 happy path", () => {
         shortcut("confirm-go-to-folder"), shortcut("stale-second-enter"),
         { type: "tool_calls", calls: [{ ...typeCall("fill-filename", "astra-a24-target.txt"), declaredEffect: { effects: ["local_edit"], target: "filename", summary: "Fill the target filename" } }] },
         finish,
-      ]);
+      ], undefined, undefined, undefined, ["stale-second-enter"]);
       try {
         await expect(created.controller.start("Confirm Go To Folder, inspect Save, then fill its filename")).resolves.toBe("succeeded");
         const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
@@ -2538,14 +2629,14 @@ describe("RunController S2-2 happy path", () => {
         expect(rejected[0]!.sequence).toBeLessThan(observations[2]!.sequence);
         expect(created.controller.getSnapshot()).toMatchObject({ stepCount: 2, modelRequestCount: 4 });
         expect(events.find((event) => event.type === "monitor.transition")).toMatchObject({ transition: "changed" });
-        if (toolName === "click") expect(rejected[0]).toMatchObject({ reason: expect.stringContaining("completion does not prove no effect") });
+        if (toolName === "click") expect(rejected[0]).toMatchObject({ reason: expect.stringContaining("CLICK_OUTCOME_UNRESOLVED:") });
       } finally {
         await rm(created.directory, { recursive: true, force: true });
       }
     });
 
     it("fails a refresh capture without reusing the old frame or replaying either shortcut", async () => {
-      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), finish], new ShortcutComputer(true));
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), finish], new ShortcutComputer(true), undefined, undefined, ["stale-second-enter"]);
       try {
         await expect(created.controller.start("Do not act after an unconfirmed refresh")).resolves.toBe("failed");
         const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
@@ -2584,7 +2675,7 @@ describe("RunController S2-2 happy path", () => {
     });
 
     it("allows a new shortcut decision bound to the independent frame without replay or a refresh loop", async () => {
-      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), shortcut("fresh-second-enter"), finish]);
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), shortcut("fresh-second-enter"), finish], undefined, undefined, undefined, ["stale-second-enter"]);
       try {
         await expect(created.controller.start("Two distinct decisions may both require the same shortcut")).resolves.toBe("succeeded");
         const events = created.controller.getEvents();
@@ -2674,7 +2765,7 @@ describe("RunController S2-2 happy path", () => {
           return super.observe(session, observationId, signal);
         }
       }
-      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), finish], new CancelRefreshComputer());
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), finish], new CancelRefreshComputer(), undefined, undefined, ["stale-second-enter"]);
       cancel = () => created.controller.cancel("cancel during the independent refresh");
       try {
         await expect(created.controller.start("Cancel safely at the observation boundary")).resolves.toBe("cancelled");

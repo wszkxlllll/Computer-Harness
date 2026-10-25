@@ -2,12 +2,16 @@ import { createHash } from "node:crypto";
 import type { ContextCompileInput, ContextOperationGuidance } from "@computer-harness/runtime";
 
 type OperationGuidanceId = "text_document_save" | "structured_extract";
+type SessionPlatform = NonNullable<ContextCompileInput["computerSession"]>["platform"];
+
+const documentSavePrinciples = "通用：编辑前核内容；仅见尾部≠前缀丢失。保留原文空白与末尾LF。先辨面板类型；未见字段/按钮不臆造。菜单明确显示快捷键时优先使用。文件名框裁剪≠路径丢失；分清目录输入/文件名/标题。输入全名含后缀，核目录/全名再保存。过渡不明时独立wait(0)一次，仍不明报告未确认，不重复Enter。内容正确≠精确路径；标题不单独证明保存。";
+const documentSavePlatformBlocks = {
+  darwin: "macOS：名称/标签/位置弹层无保存按钮≠保存框；列视图祖先≠当前位置。TextEdit：Make Plain Text；首次Save；Option核对Save As；Shift-Cmd-S可能Duplicate。Cmd-Shift-G定位；Cmd+S未必重开面板；关闭用[\"CMD\",\"W\"]；[\"W\"]只输入字符。",
+  win32: "Windows：保存通常用[\"CTRL\",\"S\"]；另存为遵循当前应用菜单，不默认其他应用的快捷键；关闭文档前核对保存状态。",
+};
 
 const catalog = {
-  text_document_save: makeEntry(
-    "text_document_save",
-    "编辑前核内容；仅见尾部≠前缀丢失。保留原文空白与末尾LF。先辨面板类型：名称/标签/位置弹层无保存按钮≠保存框，未见字段/按钮不臆造。TextEdit用Make Plain Text转纯文本；首次Save；Option核对Save As；Shift-Cmd-S可能Duplicate。菜单明确显示快捷键时优先使用。文件名框裁剪≠路径丢失；Cmd-Shift-G定位，列视图祖先≠当前位置；分清目录输入/文件名/标题。输入全名含后缀，核目录/全名再保存。过渡不明时独立wait(0)一次，仍不明则报告未确认，不重复Enter。内容正确≠精确路径；Cmd+S未必重开面板，标题不单独证明保存。macOS关闭用[\"CMD\",\"W\"]；[\"W\"]只输入字符。",
-  ),
+  text_document_save: makeEntry("text_document_save", documentSavePrinciples),
   structured_extract: makeEntry(
     "structured_extract",
     "整理查询或比较结果时，只记录界面或来源明确给出的关系。价格与类别没有明确关联时分开列出或标为未知，不推断配对；不要把推断保存成 Memory 事实。",
@@ -23,7 +27,7 @@ const structuredResearchAppLabels = new Set([
 
 /** Pure matcher over user task intent and existing Run metadata; it makes no model or filesystem calls. */
 export function selectOperationGuidance(
-  input: Pick<ContextCompileInput, "goal" | "recentEvents" | "plan" | "windowSwitchState">,
+  input: Pick<ContextCompileInput, "goal" | "recentEvents" | "plan" | "windowSwitchState" | "computerSession">,
 ): ContextOperationGuidance | undefined {
   const latestCorrection = [...input.recentEvents].reverse().find((event) => event.type === "user.input.received");
   const correctionText = latestCorrection?.type === "user.input.received" ? latestCorrection.text : undefined;
@@ -44,12 +48,15 @@ export function selectOperationGuidance(
   const phaseHint = phaseCategories.length === 1 ? phaseCategories[0] : undefined;
   const appCandidate = appHint !== undefined && taskCategories.includes(appHint) ? appHint : undefined;
   const phaseCandidate = phaseHint !== undefined && taskCategories.includes(phaseHint) ? phaseHint : undefined;
+  // Only the trusted opened Computer session selects platform instructions.
+  // App labels, task text and the Host process platform cannot establish it.
+  const platform = input.computerSession?.platform;
   if (appCandidate !== undefined && phaseCandidate !== undefined && appCandidate !== phaseCandidate) {
-    return combinedTaskGuidance();
+    return combinedTaskGuidance(platform);
   }
   const selected = appCandidate ?? phaseCandidate;
-  if (selected !== undefined) return catalog[selected];
-  return taskCategories.length === 1 ? catalog[taskCategories[0]!] : combinedTaskGuidance();
+  if (selected !== undefined) return guidanceForCategory(selected, platform);
+  return taskCategories.length === 1 ? guidanceForCategory(taskCategories[0]!, platform) : combinedTaskGuidance(platform);
 }
 
 function categoriesForText(value: string): OperationGuidanceId[] {
@@ -139,9 +146,14 @@ function makeEntry(id: string, text: string): ContextOperationGuidance {
   };
 }
 
-function combinedTaskGuidance(): ContextOperationGuidance {
+function guidanceForCategory(id: OperationGuidanceId, platform: SessionPlatform): ContextOperationGuidance {
+  if (id !== "text_document_save" || (platform !== "darwin" && platform !== "win32")) return catalog[id];
+  return makeEntry(id, `${documentSavePrinciples}\n${documentSavePlatformBlocks[platform]}`);
+}
+
+function combinedTaskGuidance(platform: SessionPlatform): ContextOperationGuidance {
   return makeEntry(
     "combined_task_guidance",
-    `${catalog.text_document_save.text}\n${catalog.structured_extract.text}`,
+    `${guidanceForCategory("text_document_save", platform).text}\n${catalog.structured_extract.text}`,
   );
 }

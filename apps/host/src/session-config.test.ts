@@ -274,20 +274,25 @@ describe("Host-local Run profile configuration", () => {
   });
 
   it.each([
-    { goal: "Create a new document and save it.", guidanceId: "text_document_save", riskGuard: "layered" },
+    { goal: "Create a new document and save it.", guidanceId: "text_document_save", riskGuard: "layered", platform: "darwin", enabled: true },
     {
       goal: "请比较两款商品的官网信息。查询完成后，回到我已经打开并准备好的文本编辑文稿，直接写入中文报告，不需要新建文稿。将报告保存为商品比较报告.txt，通过保存对话框选择本地桌面，不要输入绝对路径。保存后确认文件名和保存位置，保持文稿打开，不必关闭后重新打开。",
-      guidanceId: "combined_task_guidance", riskGuard: "off",
+      guidanceId: "combined_task_guidance", riskGuard: "off", platform: "darwin", enabled: true,
     },
-    { goal: "不需要新建文稿，保存当前文稿，不必关闭后重新打开。", guidanceId: "text_document_save", riskGuard: "off" },
-  ] as const)("passes Host profiles and $guidanceId through the real Run consumers ($riskGuard)", async ({ goal, guidanceId, riskGuard }) => {
+    { goal: "不需要新建文稿，保存当前文稿，不必关闭后重新打开。", guidanceId: "text_document_save", riskGuard: "off", platform: "darwin", enabled: true },
+    { goal: "Compare search results and save the current document.", guidanceId: "combined_task_guidance", riskGuard: "off", platform: "win32", enabled: true },
+    { goal: "Compare search results and save the current document.", guidanceId: "combined_task_guidance", riskGuard: "off", platform: undefined, enabled: true },
+    { goal: "Create a new document and save it.", guidanceId: undefined, riskGuard: "off", platform: "darwin", enabled: false },
+    { goal: "Create a new document and save it.", guidanceId: undefined, riskGuard: "off", platform: "win32", enabled: false },
+    { goal: "Create a new document and save it.", guidanceId: undefined, riskGuard: "off", platform: undefined, enabled: false },
+  ] as const)("passes Host operation guidance enabled=$enabled ($guidanceId) for session $platform through the real Run consumers ($riskGuard)", async ({ goal, guidanceId, riskGuard, platform, enabled }) => {
     const outputDir = await mkdtemp(join(tmpdir(), "harness-host-session-profile-"));
     const sessionConfig = createHostSessionConfig({ ...hostArguments, riskGuard, riskModel: "off" }, outputDir, {
       profileLabel: "host-profile-fixture",
       profileRoot: join(outputDir, "profile"),
     }, {
       HARNESS_MULTILINE_TYPE_PROFILE: "foreground-caret-v1",
-      HARNESS_OPERATION_GUIDANCE: "catalog-v1",
+      ...(enabled ? { HARNESS_OPERATION_GUIDANCE: "catalog-v1" } : {}),
       HARNESS_PROVIDER_RECOVERY: "ambiguous-headers-once-v1",
       HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS: "900000",
     });
@@ -296,6 +301,7 @@ describe("Host-local Run profile configuration", () => {
     const computerSession: ComputerSessionDescriptor = {
       id: "host-profile-computer-session" as ComputerSessionDescriptor["id"],
       backend: "fixture-cua",
+      ...(platform === undefined ? {} : { platform }),
       viewport,
       capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
       openedAt: "2026-10-07T00:00:00.000Z",
@@ -370,18 +376,32 @@ describe("Host-local Run profile configuration", () => {
       });
       expect(sessionConfig.computer.kind).toBe("cua");
       expect(sessionConfig.computer.kind === "cua" ? sessionConfig.computer.multilineTypeProfile : undefined).toBe("foreground-caret-v1");
-      expect(sessionConfig.operationGuidance).toBe("catalog-v1");
+      expect(sessionConfig.operationGuidance).toBe(enabled ? "catalog-v1" : undefined);
+      expect(handle.config.operationGuidance).toBe(enabled ? "catalog-v1" : undefined);
       expect(receivedComputerConfig?.kind).toBe("cua");
       expect(receivedComputerConfig?.kind === "cua" ? receivedComputerConfig.multilineTypeProfile : undefined).toBe("foreground-caret-v1");
       expect(selectedGuidance?.id).toBe(guidanceId);
-      expect(selectedGuidance?.text).toContain("菜单明确显示快捷键时优先使用");
-      expect([...((selectedGuidance?.text) ?? "")].length).toBeLessThanOrEqual(400);
       expect(providerInputs).toHaveLength(1);
-      expect(providerInputs[0]?.contextBudget?.trace?.operationGuidance).toMatchObject({ id: guidanceId, included: true });
       const modelText = providerInputs[0]?.messages.flatMap((message) => message.content)
         .filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
-      expect(modelText).toContain(selectedGuidance!.text);
-      expect(modelText).toContain("Shift-Cmd-S可能Duplicate");
+      if (enabled) {
+        expect(selectedGuidance?.text).toContain("菜单明确显示快捷键时优先使用");
+        expect([...selectedGuidance!.text].length).toBeLessThanOrEqual(400);
+        expect(providerInputs[0]?.contextBudget?.trace?.operationGuidance).toMatchObject({ id: guidanceId, included: true });
+        expect(modelText).toContain(selectedGuidance!.text);
+        if (platform === "darwin") {
+          expect(selectedGuidance?.text).toContain("macOS：");
+          expect(selectedGuidance?.text).toContain("Shift-Cmd-S可能Duplicate");
+        } else {
+          expect(selectedGuidance?.text).not.toMatch(/macOS|Cmd|TextEdit|Option|Duplicate/iu);
+          if (platform === "win32") expect(selectedGuidance?.text).toContain("Windows：");
+          else expect(selectedGuidance?.text).not.toContain("Windows");
+        }
+      } else {
+        expect(selectedGuidance).toBeUndefined();
+        expect(providerInputs[0]?.contextBudget?.trace?.operationGuidance).toBeUndefined();
+        expect(modelText).not.toContain("Current task operation note");
+      }
       expect(providerInputs[0]?.system).toContain("a translucent, fading or moving dialog");
       expect(providerInputs[0]?.system).toContain("terminate with the result instead of repeating Save");
       const clickTool = providerInputs[0]?.tools.find((tool) => tool.name === "click");
