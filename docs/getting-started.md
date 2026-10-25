@@ -2,7 +2,7 @@
 
 手机用浏览器打开控制页面，电脑负责执行任务。电脑需要保持开机、联网，并停留在已登录的桌面；手机不用安装 App。
 
-本教程对应 [Lightspeaker v0.1.0-rc.2 源码预发布](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)。电脑端和 Relay 使用这一版本，按下面步骤安装即可。当前安装步骤覆盖 Windows；macOS 安装流程由平台成员后续补齐。
+Windows 使用 [Lightspeaker v0.1.0-rc.2 源码预发布](https://github.com/wszkxlllll/Computer-Harness/releases/tag/v0.1.0-rc.2)，按下方 Windows 步骤准备。macOS 使用[Mac 源码启动步骤](#macos-start)，其中单独固定了源码和驱动版本。电脑端与 Relay 必须配套；不要把 Windows 的 rc.2 服务直接当作其他版本 Mac 的服务。
 
 两端通过一个 **Relay（中继服务）** 连接：电脑上的 Host 主动连到 Relay，手机也访问同一个 Relay。Host 运行在你要控制的电脑上；Relay 由团队管理员运行在有 HTTPS 地址的服务器上，可以供多台电脑使用。你的电脑不需要开放公网端口。
 
@@ -54,6 +54,104 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Co
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start
 ```
 
+<a id="macos-start"></a>
+## 1B. 在 Mac 电脑上准备并启动
+
+### 第一次使用：准备一次即可
+
+以下源码流程面向 Apple 芯片的 Mac。准备 [Node.js 24 LTS](https://nodejs.org/en/download)（最低22.13.0）、Git、Python 3，以及 Google Chrome 或 Chromium。驱动自行构建还需要 Rust 和 Xcode Command Line Tools，详见下方驱动说明。Intel Mac 的新机流程尚未验收。
+
+1. 在自己选择的文件夹打开“终端”，下载配套源码。下面固定的是公开主干代码 `bd1200f`，不包含其他机器尚未发布的 Demo 修复：
+
+```sh
+git clone https://github.com/wszkxlllll/Computer-Harness.git
+cd Computer-Harness
+git checkout --detach bd1200ff176f9edfb00143881423bfd63e1b1e2e
+node --version
+npm install --global pnpm@11.19.0
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm --filter @computer-harness/web build
+```
+
+已有 pnpm 11.19.0 时跳过全局安装；若全局安装没有写权限，按本机 Node 的安装方式配置，不向项目目录复制其他人的依赖。后续命令都在包含 `package.json` 的项目根目录执行。`typecheck` 同时生成电脑端程序，Web 页面需单独构建。
+
+2. 准备与项目配套的 **LightspeakerCua.app**，放在自己的 `~/Applications` 文件夹。可以由维护者提供可核对来源的构建，或按[驱动源码、打包与签名步骤](../patches/cua-driver/n9/README.md#local-packaging-signing-and-permissions)自行生成。本文使用 SDK 0.22.2 与公开的 N9 下游补丁；官方原版0.22.2不包含这些补丁。不能只下载一个同名 App 就认为版本匹配。
+3. 创建私有配置；已有 `.env` 不覆盖：
+
+```sh
+umask 077
+if [ ! -e .env ]; then cp .env.example .env; fi
+chmod 600 .env
+```
+
+用本机文本编辑器填写 `.env` 中的以下项目。密钥不要直接贴进终端命令，也不要提交或发送实际 `.env` 文件。
+
+| 配置项 | 填什么 |
+| --- | --- |
+| `ZHIPUAI_API_KEY` | 你的 GLM 模型密钥，用于任务模型调用 |
+| `HARNESS_RELAY_URL`、`HARNESS_RELAY_PUBLIC_ORIGIN` | 管理员提供的同一个 HTTPS 地址 |
+| `HARNESS_HOST_ID` | 管理员分配给这台 Mac 的电脑编号 |
+| `HARNESS_RELAY_CREDENTIAL` | 与这个编号配套的连接凭据 |
+
+连接资料与模型密钥不同。Mac 的 Relay 管理员应使用与上述 Host 相同提交的 Relay/Web；下方 rc.2 部署示例专供 Windows 路线。新建 Mac 服务时使用独立目录、配置、端口及服务名，再按相同的 HTTPS 部署步骤配置。已有服务不要直接覆盖。
+
+4. 打开“系统设置 → 隐私与安全性”，为这个 **LightspeakerCua.app** 开启“辅助功能”和“屏幕录制”（部分系统显示“屏幕与系统音频录制”）。系统要求 Touch ID 或密码时由本人验证。权限属于这台电脑上的实际签名 App，不能从另一台 Mac 复制；重新构建或签名后需要核对权限是否仍有效。
+
+### 启动电脑端
+
+先在第一个终端启动配套驱动。以下约定 App 内可执行文件名为 `cua-driver`；由维护者提供不同名称时，应按其实际 `CFBundleExecutable` 调整这一行。
+
+```sh
+HARNESS_CUA_BINARY="$HOME/Applications/LightspeakerCua.app/Contents/MacOS/cua-driver"
+test -x "$HARNESS_CUA_BINARY" || { printf '未找到配套驱动，请先完成首次准备。\n'; exit 1; }
+HARNESS_CUA_RUNTIME="$(mktemp -d /tmp/lightspeaker.XXXXXX)" || exit 1
+HARNESS_CUA_SOCKET="$HARNESS_CUA_RUNTIME/cua.sock"
+printf '本轮 socket：%s\n' "$HARNESS_CUA_SOCKET"
+"$HARNESS_CUA_BINARY" serve --socket "$HARNESS_CUA_SOCKET" --no-overlay
+```
+
+保留这个终端，复制它打印的完整 socket 路径。每次启动使用新的短路径，避免连到别的任务驱动。若系统仍提示权限未就绪，先按系统提示核对 App，不开始任务。
+
+在第二个终端进入同一个项目文件夹，把下方占位路径换成刚才打印的路径，再启动 Host：
+
+```sh
+HARNESS_CUA_SOCKET="/tmp/lightspeaker.本轮随机值/cua.sock"
+node apps/host/dist/index.js \
+  --env-file .env \
+  --socket "$HARNESS_CUA_SOCKET" \
+  --model glm-5.3-flash \
+  --output runs/local/mobile \
+  --port 4317 \
+  --origin http://localhost:4317 \
+  --max-model-requests 100
+```
+
+看到电脑端已监听后，在**这台 Mac**的浏览器打开[连接手机](http://localhost:4317/connect)，继续下方扫码步骤。保留两个终端；手机链接依赖已连接的 HTTPS Relay，`localhost` 不能在手机上访问。首次运行仍用下文的公开网页只读任务检查截图和操作是否正常；系统开关开启不等于驱动实际权限已核验。
+
+本命令保留默认 layered Guard，语义风险模型为默认 off；后者不等于关闭本地检查与审批。100是单任务主模型请求上限，不保证任务必定成功，也不改变风险审批策略。
+
+### 以后使用与更新
+
+以后在同一个源码目录，重新执行上面“启动电脑端”的两组命令即可；每次把新 socket 路径填给 Host。源码更新后，先统一 Host/Relay 版本，再重新运行：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm --filter @computer-harness/web build
+```
+
+更新驱动时先结束任务并停止旧驱动，重新核对来源、签名和本机权限，不在任务中途替换版本。不要覆盖 `.env`、已有文稿或运行记录。
+
+用完先在 Host 终端按 `Ctrl+C`，再停止本轮专用驱动。若驱动仍在运行，可另开终端执行以下命令，替换为本轮 socket 路径：
+
+```sh
+"$HOME/Applications/LightspeakerCua.app/Contents/MacOS/cua-driver" stop \
+  --socket "/tmp/lightspeaker.本轮随机值/cua.sock"
+```
+
+只停止本轮自己启动的驱动，不删除仍在使用的 socket 或任务所有权记录。本节命令已按公开源码入口核对；新机签名、系统授权及手机全链路仍需在目标机器验证，不以历史 Demo 或离线测试替代新机验收。[N9历史复现记录](./releases/astra-n9-verified-2026-10-25.md)另列当时版本和结果。
+
 ## 2. 手机扫码，电脑确认
 
 1. 在电脑的“连接手机”页面点“生成配对二维码”。
@@ -67,9 +165,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Co
 
 在手机“新任务”页选择“打开网站（推荐）”，填写网站地址和目标，再点“开始任务”。例如，网址填 `https://example.com`，目标填“阅读这个页面，用中文告诉我它的标题和用途”。这个例子不需要登录或发送信息。
 
-电脑会打开 Harness 专用的 Edge 窗口。手机可以查看进度和结果，遇到确认请求时按页面提示处理。首次使用先从简单的网页任务开始；长篇中文输入、复杂文稿编辑和整个桌面任务仍有已知限制。
+电脑会打开 Harness 专用浏览器窗口：Windows 使用 Edge，Mac 默认使用 Chrome 或 Chromium。手机可以查看进度和结果，遇到确认请求时按页面提示处理。首次使用先从简单的网页任务开始；长篇中文输入、复杂文稿编辑和整个桌面任务仍有已知限制。
 
-用完后，回到电脑的 PowerShell 窗口按 `Ctrl+C`。它会停止电脑端，以及本次启动的 CUA 驱动；原本已运行的驱动会保留。
+Windows 用完后，回到电脑的 PowerShell 窗口按 `Ctrl+C`。它会停止电脑端，以及本次启动的 CUA 驱动；原本已运行的驱动会保留。Mac 按上方步骤分别停止 Host 和本轮专用驱动。
 
 <a id="需要时再设置"></a>
 <details>
@@ -84,7 +182,7 @@ Set-Location .\Computer-Harness
 
 版本标签检出后提示 detached HEAD 属于正常现象，不影响使用。开发修改时自行创建分支；普通使用者直接下载 ZIP 即可。
 
-**使用网站登录状态。** 手机打开“设置 → 浏览器与登录状态”，选择“本机已准备的登录状态”，点“准备登录状态”；在电脑出现的 Harness Edge 窗口中自行登录，再回手机点“我已在电脑完成登录”。后续任务可复用这份专用登录状态；它不会复制个人浏览器或手机里的登录信息。
+**使用网站登录状态。** 手机打开“设置 → 浏览器与登录状态”，选择“本机已准备的登录状态”，点“准备登录状态”；在电脑出现的 Harness 专用浏览器窗口中自行登录，再回手机点“我已在电脑完成登录”。后续任务可复用这份专用登录状态；它不会复制个人浏览器或手机里的登录信息。
 
 **语音输入。** 在电脑的 `.env` 追加以下两项，填入自己的 DashScope 资料，然后重启电脑端：
 
@@ -97,11 +195,11 @@ DASHSCOPE_WORKSPACE_ID=填入你的语音服务workspace_ID
 
 **朗读通知。** 在手机同一设置页开启“朗读任务关键通知”，使用手机浏览器的语音合成，无需语音识别密钥。
 
-**更换模型。** 默认使用 GLM。需要 Qwen 时，把 `.harness.local.psd1` 中的 `Model` 改为 `qwen3.8-flash`，并在 `.env` 填写 `DASHSCOPE_API_KEY`，然后重启。
+**更换模型。** 默认使用 GLM。Windows 需要 Qwen 时，把 `.harness.local.psd1` 中的 `Model` 改为 `qwen3.8-flash`；Mac 将 Host 启动参数改为 `--model qwen3.8-flash`。两者均在 `.env` 填写 `DASHSCOPE_API_KEY`，然后重启 Host。
 
 ### 已有配置怎么填写
 
-源码内提供 [.env.example](../.env.example) 和 [.harness.local.example.psd1](../.harness.local.example.psd1)。准备程序会自动生成实际文件；只有手动配置时才需要复制模板并填写。模板不包含任何人的密钥或本机路径。
+源码内提供 [.env.example](../.env.example) 和 [.harness.local.example.psd1](../.harness.local.example.psd1)。Windows 准备程序会自动生成实际文件；Mac 按首次准备步骤创建 `.env`，不使用 PowerShell 的 `.psd1` 配置。模板不包含任何人的密钥或本机路径。
 
 准备程序首次运行时自动生成 `.harness.local.psd1` 中的 Node 路径；已有配置时优先使用其中的有效 `NodePath`，无需再次把 Node 加入 PATH。驱动位于 `.tools\cua-driver\0.22.2\bin\cua-driver.exe`。通常不用编辑这个文件。已有配置指向别处时，程序会保留原值；如果那个文件已不存在，按报错修正路径后再运行。
 

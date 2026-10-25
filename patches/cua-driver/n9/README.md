@@ -54,7 +54,77 @@ The Harness macOS route and installed SDK are `@trycua/cua-driver@0.22.2` under 
 
 ## Local packaging, signing and permissions
 
-Package the built executable in a locally owned macOS app bundle if the Harness launch route requires a bundle. Keep its CFBundleExecutable and actual executable aligned, sign that local bundle with your own identity or a local ad-hoc signature, and use normal macOS permission setup for that exact bundle. This package deliberately does not require the original developer's bundle identity, private socket, local account UID, or application. The historical packaging helper contained local gates and an existing-app dependency, so it is not shipped as a portable build recipe.
+The following local packaging procedure is the companion to the [Mac startup instructions](../../../docs/getting-started.md#macos-start). It creates a new app from your own build, without depending on the original developer's app, account, signature or private socket. It is a source-build procedure, not a notarized binary distribution or proof of installation on a fresh Mac.
+
+### Prepare the source checkout
+
+Install Git, Python 3, Rust through your usual trusted toolchain setup, and Xcode or Command Line Tools. Begin in the Harness repository root. This example keeps the upstream checkout in the ignored `.tools` directory and refuses to reuse an existing source checkout:
+
+```sh
+export HARNESS_SOURCE_ROOT="$PWD"
+mkdir -p .tools
+test ! -e .tools/cua-source-n9 || { printf 'Use a fresh source directory; do not reapply patches.\n'; exit 1; }
+git clone https://github.com/trycua/cua.git .tools/cua-source-n9
+git -C .tools/cua-source-n9 checkout --detach d114f35fec05ecd37bf529e5587be86852205b64
+export NATIVE_SOURCE="$HARNESS_SOURCE_ROOT/.tools/cua-source-n9"
+cd "$HARNESS_SOURCE_ROOT/patches/cua-driver/n9"
+```
+
+Now run the Python block in **Apply and verify** above, once. Continue only after all 443 final source files match. In the same terminal, build to an explicit target directory so an inherited `CARGO_TARGET_DIR` cannot change the packaging input:
+
+```sh
+rustup toolchain install 1.97.1
+cd "$NATIVE_SOURCE/libs/cua-driver/rust"
+cargo +1.97.1 test --locked -p platform-macos --target-dir target
+cargo +1.97.1 build --locked --release -p cua-driver --target-dir target
+```
+
+If these commands fail, resolve the build error before packaging; do not substitute a stock daemon or unrelated candidate and call it the same source build.
+
+### Package and sign the local app
+
+Continue in the same terminal after the build succeeds. This block runs in a subshell, refuses to overwrite an existing app, and retains the upstream license. It uses an ad-hoc signature for local use, not an Apple Developer ID or notarization claim:
+
+```sh
+(
+  set -eu
+  : "${HARNESS_SOURCE_ROOT:?Run source preparation first}"
+  : "${NATIVE_SOURCE:?Run source preparation first}"
+  driver="$NATIVE_SOURCE/libs/cua-driver/rust/target/release/cua-driver"
+  app="$HOME/Applications/LightspeakerCua.app"
+  test -x "$driver"
+  test ! -e "$app" || { printf 'Existing app retained; stop and plan an explicit update.\n'; exit 1; }
+  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  cp "$driver" "$app/Contents/MacOS/cua-driver"
+  chmod 755 "$app/Contents/MacOS/cua-driver"
+  cp "$HARNESS_SOURCE_ROOT/patches/cua-driver/n9/MIT-LICENSE.trycua.txt" "$app/Contents/Resources/LICENSE.trycua.txt"
+  cat > "$app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleIdentifier</key><string>org.lightspeaker.cua.local</string>
+  <key>CFBundleName</key><string>LightspeakerCua</string>
+  <key>CFBundleDisplayName</key><string>Lightspeaker CUA</string>
+  <key>CFBundleExecutable</key><string>cua-driver</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.22.2</string>
+  <key>CFBundleVersion</key><string>1</string>
+</dict></plist>
+PLIST
+  plutil -lint "$app/Contents/Info.plist"
+  codesign --force --sign - "$app"
+  codesign --verify --strict --verbose=2 "$app"
+  printf 'Local app ready for permission setup: %s\n' "$app"
+)
+```
+
+The signed app contains its own executable; do not replace that executable after signing. If your build links non-system dynamic libraries, inspect `otool -L` on the executable and resolve those dependencies before treating the app as portable. A failed packaging attempt can leave an incomplete app directory; inspect it and choose a new destination or deliberately remove only that incomplete local artifact before retrying. The recipe will not overwrite it automatically.
+
+### Grant permissions and start
+
+In macOS System Settings → Privacy & Security, grant Accessibility and Screen Recording to **this exact app**. Complete Touch ID/password verification yourself when requested. Rebuilding or changing its signature may require refreshing these grants. Do not disable macOS security checks or copy another machine's TCC database. Return to [Mac startup](../../../docs/getting-started.md#macos-start) to run the bundled `cua-driver serve` with a new socket, then run Host against that same socket. Verify fresh screenshots and a simple task on the target Mac; signing verification alone does not establish permission or successful GUI operation.
+
 
 The archived release executable before app signing had SHA-256 `3db02b3fe801dbbd1ab6764674175ac5a4b2a6d51690bbbba42ab8ce050e74d1`. The executable used by A48/A49/A50 after ad-hoc app signing had SHA-256 `3d0811e78f590e693762acd28fe3ddac24497eab452f11a537a6a39812cfe5f8` and CDHash `dadeacfba7f383a25bc5e2a0937dd0d9e152643f`. These identify historical artifacts. Builds, embedded paths, SDK/linker versions and signatures may differ on another machine; identical executable hashes and inherited TCC grants are not promised. Source replay and behavior validation are separate from byte-identical binary reproduction.
 
