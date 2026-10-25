@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "caseId": "A71-S-02",
+  "reviewDate": "2026-10-26",
+  "runId": "run-1792949639411-4e150367-ef0",
+  "originalGoal": "我想买一台13英寸MacBook Air，主要用来学习、写文档和轻度编程，颜色选银色。\n\n请在苹果中国官网比较一套便宜够用的配置和一套性能稍好的配置，告诉我各自的价格、芯片、内存、硬盘，以及贵的那套主要提升在哪里。不需要付费软件、AppleCare或以旧换新。\n\n我的预算是10000元，最多可以增加到11000元。请简短说明推荐哪套、是否值得加预算；如果超预算就如实说明，不购买。\n\n把比较结果和官网来源写进我已经打开的空白文本编辑文稿，保存到桌面，命名为“MacBookAir选购建议-20261026.txt”。保存成功后保持文稿打开，并告诉我结果。",
+  "originalGoalUtf8Sha256": "ac72d2f4d5f4e76153017633f001f4edc4eed2d72e12fc11d4e587a0a23faec2",
+  "version": {
+    "candidate": "astra-main-bd1200f-r3-a71-fullframe-1600",
+    "baseCommit": "bd1200ff176f9edfb00143881423bfd63e1b1e2e",
+    "published": false,
+    "freezeSha256": "ce442df44f6668f70a1c0ff80a1c1442dc2e43b9fcfd0ed1e4d29f6378f1e144",
+    "sourcePinCount": 466,
+    "buildPinCount": 566,
+    "sourceAndBuildDriftAtReview": [],
+    "nativeSha256": "1605e37a5260696ce6e6679706c2fb8444ada5d3e58b6480796e2a1658cd8758",
+    "model": "glm-5.3-flash",
+    "thinking": "high",
+    "imageMaxEdge": 1600,
+    "coordinateMode": "actual_pixels",
+    "captureScope": "desktop",
+    "riskGuard": "off",
+    "riskModel": "off",
+    "guardAuthorization": "explicit prior user request; not proof under default Guard"
+  },
+  "result": {
+    "runtimeOutcome": "succeeded",
+    "executionChainPassed": true,
+    "coreBusinessAcceptance": "not passed: material report content inconsistency; other configuration claims not fully verified",
+    "strictAcceptancePassed": false,
+    "elapsedSeconds": 802.283,
+    "mainRequests": 81,
+    "completedActionsIncludingWait": 75,
+    "userCorrectionCount": 1,
+    "runtimeErrorEvents": 0,
+    "approvalEvents": 0,
+    "windowHandoffEvents": 0
+  },
+  "correction": {
+    "userText": "采用这个配置即可 开始完成报告",
+    "sequence": 596,
+    "rejectedCallId": "call_-7141903548022776179",
+    "rejectedOperation": "scroll down 10 ticks",
+    "rejectionSequence": 597,
+    "rejectionReason": "superseded by user correction",
+    "rejectedCallHasActionProposedOrToolCallReceived": false,
+    "meaning": "One pending scroll superseded before dispatch; same Run continued into report delivery. Not rollback of an already executed action."
+  },
+  "selectedEvents": [
+    {
+      "sequence": 595,
+      "type": "model.response.received",
+      "occurredAt": "2026-10-25T17:43:17.794Z",
+      "call": {
+        "id": "call_-7141903548022776179",
+        "name": "scroll",
+        "arguments": {
+          "direction": "down",
+          "ticks": 10,
+          "x": 1965.6,
+          "y": 1134.167468719923
+        }
+      },
+      "assistantText": "继续向下滚动，查看“专业App”推广之后的下一个区块，寻找实际的内存/硬盘选项卡。"
+    },
+    {
+      "sequence": 596,
+      "type": "user.input.received",
+      "occurredAt": "2026-10-25T17:43:17.795Z",
+      "text": "采用这个配置即可 开始完成报告"
+    },
+    {
+      "sequence": 597,
+      "type": "tool.call.rejected",
+      "occurredAt": "2026-10-25T17:43:17.798Z",
+      "callId": "call_-7141903548022776179",
+      "reason": "superseded by user correction"
+    },
+    {
+      "sequence": 607,
+      "type": "planning.task.updated",
+      "occurredAt": "2026-10-25T17:44:32.550Z",
+      "planningStatus": "in_progress",
+      "taskDescription": "官网购买页已确认：MacBook Air RMB 9999 起（RMB 417/月×24期起）；统一内存可选配 16GB/24GB/32GB；固态硬盘可选配 512GB 至 4TB；芯片选项含 M5 8核GPU 与 10核GPU。用户指示采用默认基础配置完成报告。剩余：切换到已打开的文本编辑空白文稿（win-8ba3e8e9），写入选购建议，保存为桌面 MacBookAir选购建议-20261026.txt，保持打开并核验。"
+    },
+    {
+      "sequence": 712,
+      "type": "tool.call.received",
+      "occurredAt": "2026-10-25T17:46:54.529Z",
+      "call": {
+        "id": "call_-7139272966453326006",
+        "name": "click",
+        "arguments": {
+          "x": 1725.57,
+          "y": 1043.434071222329
+        }
+      }
+    },
+    {
+      "sequence": 715,
+      "type": "action.execution.completed",
+      "occurredAt": "2026-10-25T17:46:56.914Z",
+      "receipt": {
+        "actionId": "868a1f13-e5f4-4b7e-aa54-d15d4359e2c4",
+        "status": "completed",
+        "message": "✅ Sent screen-absolute click at desktop-pixel (1726,1043) → screen-point (863,522) (desktop scope; not driver-verified)."
+      }
+    },
+    {
+      "sequence": 721,
+      "type": "tool.call.received",
+      "occurredAt": "2026-10-25T17:47:04.077Z",
+      "call": {
+        "id": "call_-7141911553841820061",
+        "name": "wait",
+        "arguments": {
+          "durationMs": 0
+        }
+      }
+    },
+    {
+      "sequence": 724,
+      "type": "action.execution.completed",
+      "occurredAt": "2026-10-25T17:47:04.079Z",
+      "receipt": {
+        "actionId": "04bd1f06-42bf-42c4-aac1-b09ffb5b2843",
+        "status": "completed"
+      }
+    },
+    {
+      "sequence": 735,
+      "type": "run.finished",
+      "occurredAt": "2026-10-25T17:47:21.717Z",
+      "outcome": "succeeded",
+      "reportedStatus": "success"
+    }
+  ],
+  "file": {
+    "displayName": "MacBookAir选购建议-20261026.txt",
+    "publicCopy": "report-original.txt",
+    "byteLength": 1319,
+    "sha256": "fea5b2815abac00ffe60d77feff5bd37bf4ddedb279228ab4f3b852adeb4465e",
+    "copyPreservesOriginalBytes": true
+  },
+  "privateSourceHashes": {
+    "trajectory": "51d68c6faec3c6669e9f6bd86d3af5c0c402efac99b4a7eff8e728a0d744cabb",
+    "providerExchanges": "58626264d6049c57ce5cce39c1754bb834273af87cac49e0423a1e66d0c7b315",
+    "readOnlyReviewReceipt": "4e15f4d34da2bd6e2ddf79e85c0a1ad00e71ad167dfd3f1f4bd3c0719543305f"
+  },
+  "savedFrames": [
+    {
+      "sequence": 708,
+      "capturedAt": "2026-10-25T17:46:49.023Z",
+      "assetId": "9cd0cc20-f10a-421f-9f7d-6fdb43831329",
+      "sha256": "6950940156b1dfda32c65b87fdf6dd43f3937b28c3bedc951696d19dda8df62c",
+      "published": false,
+      "reason": "Original full desktop image retained privately; no unredacted desktop inventory published."
+    },
+    {
+      "sequence": 717,
+      "capturedAt": "2026-10-25T17:46:57.095Z",
+      "assetId": "28c05b03-3bec-413f-a0e3-efc9f535a0bc",
+      "sha256": "0ae75f65cd93cd36c56250a39fb2895bf318a5a8ace55de8044a5ff04db1346d",
+      "published": false,
+      "reason": "Original full desktop image retained privately; no unredacted desktop inventory published."
+    },
+    {
+      "sequence": 726,
+      "capturedAt": "2026-10-25T17:47:04.257Z",
+      "assetId": "9c44c81e-237c-4c39-8d88-bc707d0e4e70",
+      "sha256": "78c6265f81c323abee4890e5c5c46cf0da49c9bce453b1b25c7f906ca4ed4fc2",
+      "published": false,
+      "reason": "Original full desktop image retained privately; no unredacted desktop inventory published."
+    }
+  ],
+  "contentAccuracyIssues": [
+    "Report body states 256GB SSD; its note and captured website state options start at 512GB.",
+    "At seq606 the model wrote that default memory/storage and upgrade price details were not individually read. This is not evidence supporting assumed defaults.",
+    "Remaining exact configuration/price pairing not independently verified in this review."
+  ],
+  "video": {
+    "userReportedRecorded": true,
+    "received": true,
+    "reviewed": true,
+    "reviewScope": "Selected original-recording frames for query, phone correction input and saved report; does not establish absence of all manual assistance.",
+    "figureProvenance": "../../submission/figures/sources.json#fig06-shopping-correction-demo",
+    "desktopDurationSeconds": 844.831125,
+    "phoneDurationSeconds": 534.015669,
+    "phoneFramePTSSeconds": 288.46
+  },
+  "limits": [
+    "User correction was real and in-task, not scripted prior-budget reply.",
+    "No claim of zero human involvement or independently verified absence of manual desktop assistance.",
+    "No single-run success rate, universal click guarantee, default Guard acceptance or correction latency benchmark.",
+    "No original report/goal rewrite, no new run or source-code change; publication limited to documentation, figure assets and this evidence summary."
+  ],
+  "priorAttempt": {
+    "runId": "run-1792949577223-94265cf7-23b",
+    "outcome": "cancelled",
+    "countAsSuccess": false
+  },
+  "offlineVerification": {
+    "relatedUniqueTestsPassed": 583,
+    "scope": "A71 pre-deployment tests; not rerun during documentation update; not real task success count"
+  }
+}

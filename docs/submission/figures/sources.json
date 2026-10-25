@@ -23,5 +23,94 @@
       {"file": "66815afe16c9074f17f652bb89d0728a.mp4", "seconds": 210, "cropXYXY": [10,65,438,780]},
       {"file": "desktop.mp4", "seconds": 270, "cropXYXY": [1030,290,2310,860]}
     ]
+  },
+  "fig06-shopping-correction-demo": {
+    "kind": "real recording crops from desktop and phone recordings of the same Run",
+    "run": "run-1792949639411-4e150367-ef0",
+    "recordingDate": "2026-10-26",
+    "originalRecordings": [
+      {
+        "file": "录屏2026-10-26 01.33.28.mov",
+        "bytes": 461555249,
+        "sha256": "47bcdb0d25f6f792ae395fa03fa3d89445cfb841f8014a4afa1194df0e6cc4cd"
+      },
+      {
+        "file": "微信视频2026-10-26_020015_105.mp4",
+        "bytes": 171207976,
+        "sha256": "64b961e61ef6e5999282428d2f51ec468502fa4ab8a09b45d2ec2749fe087ed4"
+      }
+    ],
+    "panels": [
+      {
+        "file": "shopping-correction-a71/a-official-query.png",
+        "originalDimensions": [
+          3024,
+          1964
+        ],
+        "cropXYXY": [
+          180,
+          780,
+          2330,
+          1690
+        ],
+        "sha256": "05c5aa5ecd6bc7fe1cd32cd8fc144ab11a981149d86b2ed15036df94292e07fe",
+        "source": "录屏2026-10-26 01.33.28.mov",
+        "seconds": 180,
+        "selection": "first decoded frame at or after 180s"
+      },
+      {
+        "file": "shopping-correction-a71/b-phone-correction.png",
+        "originalDimensions": [
+          1320,
+          2868
+        ],
+        "cropXYXY": [
+          25,
+          330,
+          1295,
+          2660
+        ],
+        "sha256": "7336f527e5ad4c47b330fb711843445d2c78df89b2fe182ea3e7e830914b6c99",
+        "source": "微信视频2026-10-26_020015_105.mp4",
+        "seconds": 288.46,
+        "selection": "exact decoded frame PTS 288.460s"
+      },
+      {
+        "file": "shopping-correction-a71/c-desktop-report.png",
+        "originalDimensions": [
+          3024,
+          1964
+        ],
+        "cropXYXY": [
+          290,
+          85,
+          3024,
+          1020
+        ],
+        "sha256": "21a5280af0fbbed34f0cf8e9830579697963cb3c3dc3f000a89cc1e19eac4ae7",
+        "source": "录屏2026-10-26 01.33.28.mov",
+        "seconds": 816,
+        "selection": "first decoded frame at or after 816s"
+      }
+    ],
+    "generatedProductImagery": false,
+    "transform": "Decode original media, crop, scale and arrange with external panel headings. No UI/text replacement. Phone browser header excluded by cropping.",
+    "interpretationLimits": [
+      "Three stages, not simultaneous screenshots. Phone and desktop media clocks are different.",
+      "Phone frame shows IME composition, not proof of the full Chinese message being sent; quote corroborated by trajectory seq596/597.",
+      "Delivery-chain demonstration, not full content accuracy, default Guard validation or measured success rate."
+    ],
+    "artifactVerification": {
+      "dateLocal": "2026-10-26",
+      "scope": "Three selected original-video frames, crops and figure readability; no new task run.",
+      "sha256ByRelativePath": {
+        "fig06-shopping-correction-demo.svg": "dfc6875e4fc67f267d1f2b6f94db9aaa49de09d99b0b9d10a40e41e6f2eef9b1",
+        "fig06-shopping-correction-demo.png": "2eafbe7ed3faceb1eac6923fb949cce7fc40171f1002a781ae03d0ada94ada8d",
+        "README.md": "73c2ead714d33bcb983e6b7d0212a818dd0154f1cd5b4fe8a5427a3607ae4264",
+        "shopping-correction-a71/b-phone-correction.png": "7336f527e5ad4c47b330fb711843445d2c78df89b2fe182ea3e7e830914b6c99",
+        "shopping-correction-a71/a-official-query.png": "05c5aa5ecd6bc7fe1cd32cd8fc144ab11a981149d86b2ed15036df94292e07fe",
+        "shopping-correction-a71/c-desktop-report.png": "21a5280af0fbbed34f0cf8e9830579697963cb3c3dc3f000a89cc1e19eac4ae7"
+      }
+    }
   }
 }

@@ -9,7 +9,8 @@
 | [技术报告](./technical-report.md) | 正式报告正文，最终导出PDF |
 | [第三方资源清单](./third-party-resources.md) | 随报告附后提交 |
 | [真实任务卡](./real-task-cases.md) | 后期明确题面的28张任务卡，按六类整理，包含Demo |
-| [插图预览](./figures/README.md) | 当前五张图与可编辑源文件 |
+| [插图预览](./figures/README.md) | 当前六张图与可编辑源文件 |
+| [商品查询与手机纠偏Demo](./interactive-shopping-demo-a71.md) | 技术报告5.4.2及图6的过程、证据与验收范围 |
 | 本文件 | 团队填写与上传时查阅，不作为报告附件 |
 
 演示视频使用已确认的 **02-Lightspeaker-demo.mp4**，约4分31秒。本机成片位于仓库根目录的 `output/submission-review/`。旧PDF与旧版填写资料已移入本机历史目录。
