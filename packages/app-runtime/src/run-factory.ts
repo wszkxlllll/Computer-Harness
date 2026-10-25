@@ -92,6 +92,12 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
     throw new Error("runTimeoutMs must be a positive safe integer");
   }
   if (input.model === "glm-5.3-flash") validateGlmRequestTimeoutMs(input.glmRequestTimeoutMs);
+  const providerRecovery = input.providerRecovery ?? "off";
+  const providerRecoveryRunWindowMs = input.providerRecoveryRunWindowMs ?? 900_000;
+  if (providerRecovery !== "off" && providerRecovery !== "ambiguous-headers-once-v1") throw new Error("providerRecovery must be off or ambiguous-headers-once-v1");
+  if (!Number.isSafeInteger(providerRecoveryRunWindowMs) || providerRecoveryRunWindowMs <= 0 || providerRecoveryRunWindowMs > 900_000) {
+    throw new Error("providerRecoveryRunWindowMs must be a positive safe integer no greater than 900000");
+  }
   if (input.model === "deepseek-flash" || (input.riskGuard === "layered" && input.riskModel === "deepseek-flash")) {
     validateDeepseekRequestTimeoutMs(input.deepseekRequestTimeoutMs);
     validateDeepseekMaxOutputTokens(input.deepseekMaxOutputTokens);
@@ -325,6 +331,8 @@ export async function createRun(input: ResolvedRunConfig, dependencies: RunDepen
             ? config.arkRequestTimeoutMs ?? DEFAULT_ARK_REQUEST_TIMEOUT_MS
             : config.model === "qwen3.8-flash" ? 240_000 : DEFAULT_GLM_REQUEST_TIMEOUT_MS,
       ...(config.runTimeoutMs === undefined ? {} : { runTimeoutMs: config.runTimeoutMs }),
+      providerRecovery,
+      providerRecoveryRunWindowMs,
       ...(actionPolicy === undefined ? {} : { actionPolicy }),
       eventWriter,
       assetStore,

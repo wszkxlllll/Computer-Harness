@@ -1,0 +1,163 @@
+{
+  "schema": "cua-driver-n9-native-publication-review/v1",
+  "at": "2026-10-25T02:58:47.140351+00:00",
+  "upstream": {
+    "git": "https://github.com/trycua/cua.git",
+    "commit": "d114f35fec05ecd37bf529e5587be86852205b64",
+    "tree": "1be75321ea36185d2fd660107785c07cc1daa67c"
+  },
+  "existingChain": {
+    "mainCommit": "f510b914b512a9496d5a988d0631286dc25e5200",
+    "allElevenPatchesTrackedAndHashMatched": true,
+    "allElevenTrackedAtHarnessBase": "a2757d64a48245510a31905068569ea7e65f04bb",
+    "f018MainPath": "docs/history/2026-10-20-product-docs/a-line-sync/diagnostics/F-20261007-018/native.patch",
+    "f018HistoricalHarnessBasePath": "docs/a-line-sync/diagnostics/F-20261007-018/native.patch"
+  },
+  "independentReplay": {
+    "method": "git archive exact 439 upstream file scope into a fresh temporary directory; git apply --check then git apply all 12 source patches in order; compare all final files byte for byte",
+    "patchChecks": [
+      {
+        "order": 1,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "980323a0737626152a27ad0edda2eb0408f944e707f5a63f6094bd74d3e8393b"
+      },
+      {
+        "order": 2,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "66beef9c2d6906bbed07053e2cf0fbfeca5cb6640a2bcf9d0e839ebf3999bb7c"
+      },
+      {
+        "order": 3,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "2e624c66251e1c2785fe43a452556ac73b7b29b76ddc725af37ee2ee1b8d432e"
+      },
+      {
+        "order": 4,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "f784f6ae53dcf40e42615b45732617f1ac5f29e508349cde741f36b5892770f4"
+      },
+      {
+        "order": 5,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "a47655cc07f5536029da53d13263b83bfa46125afdbaae1307cc29a2c1994cb1"
+      },
+      {
+        "order": 6,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "5db869d3c5b9180832cac08bce2c584a3426ceb8d5501a5e23fc2300085e73f5"
+      },
+      {
+        "order": 7,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "650bb5c57f538972ddabbcef673ab65e38bd011996fd43b91424c0ad3f465d5e"
+      },
+      {
+        "order": 8,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "6e3dd9cf25423abdd77e943cb7c77e577067f181ce07d0d6a3d86b207885f109"
+      },
+      {
+        "order": 9,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "4a0d6112699ab059ddebc09bd2b5f778ab1f6e6c3e01ab03b0ed9f83f59a1c49"
+      },
+      {
+        "order": 10,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "b78f6c8e9d76dfddcd015fdf4a56b7778dceb36423f4f429541a2d74087e425f"
+      },
+      {
+        "order": 11,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "cb1d8f8443f80020ecbbec3391eba1b8b3d39bdd871f0517a6998cea347d5500"
+      },
+      {
+        "order": 12,
+        "checkExit": 0,
+        "applyExit": 0,
+        "sha256": "96e340a27285158403c79071cb9f337e5b0d5ea259b8c9ff89452ba40be4fb7b"
+      }
+    ],
+    "finalSourceFileCount": 443,
+    "missing": 0,
+    "unexpected": 0,
+    "byteMismatches": 0,
+    "temporaryDirectoryRemoved": true,
+    "buildExecutedThisReview": false,
+    "guiNativeProviderServiceCalls": 0
+  },
+  "finalDelta": {
+    "files": [
+      "libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/capture.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/foreground_oracle_diagnostic.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs",
+      "libs/cua-driver/rust/crates/platform-macos/src/windows.rs"
+    ],
+    "bytes": 146869,
+    "sha256": "96e340a27285158403c79071cb9f337e5b0d5ea259b8c9ff89452ba40be4fb7b",
+    "addedLines": 2916,
+    "removedLines": 252
+  },
+  "privacyScan": {
+    "scope": "All final-delta bytes including removed lines and context; no behavior-changing sanitization",
+    "personalAbsolutePathHits": 0,
+    "privateSocketOrEnvironmentHits": 0,
+    "credentialAssignmentHits": 0
+  },
+  "license": {
+    "upstreamLicense": "MIT",
+    "copyright": "Copyright (c) 2025 Cua AI, Inc.",
+    "licenseFileSha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
+    "preservation": "Keep upstream copyright/permission notice and all known contributor attribution; local macOS modifications are published as a downstream patch, not claimed as original upstream work.",
+    "npmBindingSeparately": "@trycua/cua-driver-darwin-arm64@0.22.2 package metadata declares MIT AND MPL-2.0; this source-only package contains no binding binary."
+  },
+  "sdk": {
+    "harnessAlias": "@trycua/cua-driver-0.22.2",
+    "actualInstalledSdkName": "@trycua/cua-driver",
+    "actualInstalledSdkVersion": "0.22.2",
+    "actualDarwinArm64BindingVersion": "0.22.2",
+    "driverWorkspaceVersion": "0.22.2",
+    "linuxSdkVersionExcludedFromMacClaims": "0.32.0"
+  },
+  "historicBuildEvidence": {
+    "toolchain": "1.97.1-aarch64-apple-darwin",
+    "cargoLockSha256": "cb7cdf7d03eee68f2dd48b6dc75a6005e74ca96a5604a7a88a2994ddd5125a2f",
+    "finalPlatformUnitTests": {
+      "passed": 444,
+      "failed": 0,
+      "ignored": 2
+    },
+    "finalDocTests": {
+      "passed": 0,
+      "ignored": 1
+    },
+    "buildCommand": "cargo build --locked --offline --release -p cua-driver",
+    "unsignedReleaseSha256": "3db02b3fe801dbbd1ab6764674175ac5a4b2a6d51690bbbba42ab8ce050e74d1",
+    "signedExecutableSha256": "3d0811e78f590e693762acd28fe3ddac24497eab452f11a537a6a39812cfe5f8",
+    "cdHash": "dadeacfba7f383a25bc5e2a0937dd0d9e152643f",
+    "signature": "ad-hoc; historical identity only, not a portable or required signing identity",
+    "sourceBuildEvidence": "Archived final r2 source/build/test/package receipts were read; no native compile/test was rerun by this review."
+  },
+  "reproducibilityLimits": [
+    "Source replay is byte-exact. Fresh builds/signatures are not promised byte-identical across machines, SDKs, local paths or signing identities.",
+    "The 12th patch closes the previously unpublished final Native source delta. Existing stock CUA 0.22.2 downloads alone do not contain this downstream patch stack.",
+    "No app binary, runtime secret, private environment file, raw provider trace, screenshot or machine-specific socket is included.",
+    "A new locally signed bundle must receive normal local macOS Accessibility/Screen Recording authorization; matching a historic binary SHA is not a TCC grant.",
+    "This offline source replay does not establish physical-phone/public-Relay acceptance or new business-task results."
+  ]
+}

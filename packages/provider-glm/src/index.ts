@@ -15,6 +15,7 @@ export {
   type GlmTransportEvidence,
   type GlmHttpDiagnostics,
   type GlmRetryMode,
+  type GlmRecoveryHint,
   type FetchGlmHttpClientOptions,
   type GlmAdapterOptions,
 } from "./chat-completions.js";

@@ -347,7 +347,9 @@ export function PendingRequestPanel({
           )}
           {handoffCandidates.map((candidate, candidateIndex) => {
             const previewRequired = requiresCandidatePreview(candidate);
-            const candidateName = [candidate.appName, candidate.title || candidate.description]
+            const candidateName = candidate.restoreCurrentManagedBrowser === true
+              ? "本任务的托管浏览器"
+              : [candidate.appName, candidate.title || candidate.description]
               .filter((value) => value?.trim())
               .join(" · ") || "电脑上的窗口";
             const candidatePosition = `第 ${candidateIndex + 1} 个候选窗口`;
@@ -377,11 +379,15 @@ export function PendingRequestPanel({
                 <button
                   className="window-choice"
                   type="button"
-                  aria-label={`选择 ${candidateName}，${candidatePosition}`}
+                  aria-label={candidate.restoreCurrentManagedBrowser === true
+                    ? "恢复本任务的托管浏览器并继续"
+                    : `选择 ${candidateName}，${candidatePosition}`}
                   disabled={controlsDisabled}
                   onClick={() => void onChooseWindow(candidate)}
                 >
-                  {candidateLabel}
+                  {candidate.restoreCurrentManagedBrowser === true
+                    ? <><span className="window-choice-app">恢复本任务的托管浏览器</span><span className="window-choice-title">重新读取精确窗口并继续；刚才被拒绝的操作不会重放</span></>
+                    : candidateLabel}
                   <span className="window-choice-arrow" aria-hidden="true">→</span>
                 </button>
                 {previewControls}

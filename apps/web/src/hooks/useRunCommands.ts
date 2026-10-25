@@ -140,9 +140,9 @@ export function useRunCommands({ runId, snapshot, refresh }: UseRunCommandsOptio
   }
 
   async function control(type: "pause" | "resume" | "abort") {
-    if (type === "abort" && !window.confirm("停止当前任务？已经完成的电脑操作无法撤销。")) return;
     const copy = type === "pause" ? "暂停" : type === "resume" ? "继续" : "停止";
-    const command = snapshot ? controlCommand(snapshot, type) : undefined;
+    const command = snapshot && snapshot.runId === runId && snapshot.status !== "finished"
+      ? controlCommand(snapshot, type) : undefined;
     if (!command) {
       setNotice({ text: "电脑当前不支持这项控制，或状态已经变化。", tone: "warning" });
       await refresh().catch(() => undefined);

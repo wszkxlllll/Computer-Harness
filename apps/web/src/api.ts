@@ -24,6 +24,12 @@ export { ApiError } from "./types";
 
 let phoneCsrfToken: string | undefined;
 let localCsrfToken: string | undefined;
+const PHONE_SESSION_TIMEOUT_MS = 15_000;
+const RUN_START_TIMEOUT_MS = 60_000;
+
+interface RequestOptions {
+  readonly timeoutAbortAsNetworkError?: boolean;
+}
 
 export function setPhoneCsrfToken(token: string | undefined): void {
   phoneCsrfToken = token;
@@ -37,6 +43,7 @@ async function request<T>(
   path: string,
   init: RequestInit = {},
   csrf: "phone" | "local" | "none" = "none",
+  options: RequestOptions = {},
 ): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
@@ -58,7 +65,12 @@ async function request<T>(
     throw new ApiError("电脑控制服务暂时无法连接。确认 Harness 正在运行后再试。", 0, "HOST_UNREACHABLE");
   }
 
-  const body = await response.json().catch(() => undefined) as {
+  const body = await response.json().catch(() => {
+    if (options.timeoutAbortAsNetworkError && init.signal?.aborted) {
+      throw new ApiError("电脑控制服务暂时无法连接。确认 Harness 正在运行后再试。", 0, "HOST_UNREACHABLE");
+    }
+    return undefined;
+  }) as {
     message?: string;
     error?: string | { message?: string; code?: string };
     code?: string;
@@ -376,23 +388,41 @@ function validateManagedBrowserProfileSettings(value: unknown): ManagedBrowserPr
   };
 }
 
-export function createRun(
+export async function createRun(
   goal: string,
   commandId: string,
   target: RunTarget,
   assistantPreferences?: RunAssistantPreferencesSnapshot,
   runNoticeContentEnabled?: boolean,
 ): Promise<{ runId: string; status: string }> {
-  return request("/api/runs", {
-    method: "POST",
-    body: JSON.stringify({
-      commandId,
-      goal,
-      target,
-      ...(assistantPreferences === undefined ? {} : { assistantPreferences }),
-      ...(runNoticeContentEnabled === undefined ? {} : { runNoticeContentEnabled }),
-    }),
-  }, "phone");
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new ApiError("启动请求等待超时，无法确认任务是否已经开始。请先查看任务列表或刷新页面，确认状态后再尝试同一任务。", 0, "RUN_START_OUTCOME_UNKNOWN"));
+      controller.abort();
+    }, RUN_START_TIMEOUT_MS);
+  });
+  try {
+    // The deadline covers both response headers and body. Aborting a POST does
+    // not prove it was rejected by the Host, so never retry it automatically.
+    return await Promise.race([
+      request<{ runId: string; status: string }>("/api/runs", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          commandId,
+          goal,
+          target,
+          ...(assistantPreferences === undefined ? {} : { assistantPreferences }),
+          ...(runNoticeContentEnabled === undefined ? {} : { runNoticeContentEnabled }),
+        }),
+      }, "phone"),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export async function listRuns(): Promise<RunSummary[]> {
@@ -442,8 +472,16 @@ export function getPairRequest(requestId: string): Promise<PairRequestStatus> {
   return request(`/api/pair/requests/${encodeURIComponent(requestId)}`);
 }
 
-export function getPhoneSession(): Promise<PairSession> {
-  return request("/api/session");
+export async function getPhoneSession(): Promise<PairSession> {
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), PHONE_SESSION_TIMEOUT_MS);
+  try {
+    return await request("/api/session", { signal: timeoutController.signal }, "none", {
+      timeoutAbortAsNetworkError: true,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export function getVoiceInputCapabilities(): Promise<VoiceInputCapabilities> {

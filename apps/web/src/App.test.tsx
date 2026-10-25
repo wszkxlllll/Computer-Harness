@@ -94,6 +94,29 @@ describe("App composition", () => {
     await waitFor(() => expect(document.activeElement).toBe(heading));
   });
 
+  it("ignores a late phone-session result after its gate generation is replaced", async () => {
+    let resolveOldSession!: (session: { csrfToken: string; expiresAt: string }) => void;
+    vi.mocked(getPhoneSession).mockClear();
+    vi.mocked(getPhoneSession)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOldSession = resolve; }))
+      .mockResolvedValueOnce({ csrfToken: "new-gate-session", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+
+    const view = render(<App />);
+    expect(screen.getByRole("status").textContent).toContain("正在连接你的电脑");
+    window.history.replaceState(null, "", "/run/replacement-gate");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    view.rerender(<App />);
+    expect(await screen.findByRole("heading", { name: "任务目标" })).toBeDefined();
+
+    await act(async () => {
+      resolveOldSession({ csrfToken: "stale-session", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("heading", { name: "任务目标" })).toBeDefined();
+    expect(getPhoneSession).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     [401, "先连接你的电脑"],
     [503, "电脑暂时没有响应"],

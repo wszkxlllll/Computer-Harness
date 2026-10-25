@@ -97,10 +97,17 @@ export class DefaultContextCompiler implements ContextCompiler {
           ...(pageUrlText === undefined ? [] : [pageUrlText]),
         ].join("\n");
     const observationMetadataTokens = observationMetadataText === undefined ? 0 : estimateTextTokens(observationMetadataText);
+    const observedGrounding = latestObservation?.grounding;
+    const groundingMatchesObservation = observedGrounding !== undefined && latestObservation !== undefined &&
+      latestObservation.runId === input.runId &&
+      observedGrounding.observationId === latestObservation.id &&
+      observedGrounding.computerSessionId === latestObservation.computerSessionId &&
+      sameObservationSurfaceRef(observedGrounding.surfaceRef, latestObservation.surfaceRef);
+    const groundingCatalog = groundingMatchesObservation ? observedGrounding : undefined;
     const windowSwitchStateText = formatWindowSwitchState(
       input.computerSession,
       input.windowSwitchState,
-      latestObservation?.grounding,
+      groundingCatalog,
       latestObservation?.viewport,
       latestObservation?.surfaceRef.kind,
     );
@@ -198,13 +205,6 @@ export class DefaultContextCompiler implements ContextCompiler {
     let monitorGuidanceText = rawMonitorGuidanceText;
     let monitorGuidanceIncluded = rawMonitorGuidanceText !== undefined;
     let monitorGuidanceOmittedReason: "budget" | undefined;
-    const observedGrounding = latestObservation?.grounding;
-    const groundingMatchesObservation = observedGrounding !== undefined && latestObservation !== undefined &&
-      latestObservation.runId === input.runId &&
-      observedGrounding.observationId === latestObservation.id &&
-      observedGrounding.computerSessionId === latestObservation.computerSessionId &&
-      sameObservationSurfaceRef(observedGrounding.surfaceRef, latestObservation.surfaceRef);
-    const groundingCatalog = groundingMatchesObservation ? observedGrounding : undefined;
     const groundingCandidate = groundingCatalog === undefined ? undefined : formatGroundingCatalog(groundingCatalog);
     const visibleTextCandidate = groundingCatalog?.visibleText === undefined ? undefined : formatVisibleText(groundingCatalog);
     let visibleTextIncluded = visibleTextCandidate !== undefined;

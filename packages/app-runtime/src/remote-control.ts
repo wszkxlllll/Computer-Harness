@@ -12,6 +12,8 @@ export interface RemoteWindowCandidate {
   readonly appName?: string;
   readonly title?: string;
   readonly relationship?: RemoteWindowCandidateRelationship;
+  /** This exact candidate restores the current Run-owned managed browser after a no-input foreground refusal. */
+  readonly restoreCurrentManagedBrowser?: true;
   /** True means selection is blocked until this exact candidate has been previewed. */
   readonly previewRequired?: boolean;
 }

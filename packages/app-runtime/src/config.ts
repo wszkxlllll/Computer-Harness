@@ -26,6 +26,25 @@ export type AppRuntimeModel = "glm-5.3-flash" | "qwen3.8-flash" | "deepseek-flas
 export const DEFAULT_GLM_REQUEST_TIMEOUT_MS = 90_000;
 export const MIN_GLM_REQUEST_TIMEOUT_MS = 1_000;
 export const MAX_GLM_REQUEST_TIMEOUT_MS = 240_000;
+export const DEFAULT_PROVIDER_RECOVERY_RUN_WINDOW_MS = 900_000;
+export const MAX_PROVIDER_RECOVERY_RUN_WINDOW_MS = 900_000;
+export type ProviderRecoveryMode = "off" | "ambiguous-headers-once-v1";
+
+export function parseProviderRecoverySettings(env: NodeJS.ProcessEnv): {
+  readonly providerRecovery: ProviderRecoveryMode;
+  readonly providerRecoveryRunWindowMs: number;
+} {
+  const rawMode = env.HARNESS_PROVIDER_RECOVERY ?? "off";
+  if (rawMode !== "off" && rawMode !== "ambiguous-headers-once-v1") {
+    throw new Error("HARNESS_PROVIDER_RECOVERY must be off or ambiguous-headers-once-v1");
+  }
+  const rawWindow = env.HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS;
+  const windowMs = rawWindow === undefined ? DEFAULT_PROVIDER_RECOVERY_RUN_WINDOW_MS : Number(rawWindow.trim());
+  if (!Number.isSafeInteger(windowMs) || windowMs < 1 || windowMs > MAX_PROVIDER_RECOVERY_RUN_WINDOW_MS) {
+    throw new Error(`HARNESS_PROVIDER_RECOVERY_RUN_WINDOW_MS must be an integer from 1 to ${MAX_PROVIDER_RECOVERY_RUN_WINDOW_MS} milliseconds`);
+  }
+  return { providerRecovery: rawMode, providerRecoveryRunWindowMs: windowMs };
+}
 
 export function validateGlmRequestTimeoutMs(value: number | undefined): void {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < MIN_GLM_REQUEST_TIMEOUT_MS || value > MAX_GLM_REQUEST_TIMEOUT_MS)) {
@@ -126,6 +145,10 @@ export interface ResolvedRunConfig {
   glmEndpoint?: string;
   /** Bounded live-interactive deadline for one GLM request. */
   glmRequestTimeoutMs?: number;
+  /** Opt-in, one-use outer-Run recovery for typed ambiguous pre-header timeouts. */
+  providerRecovery?: ProviderRecoveryMode;
+  /** Absolute eligibility window from this Run's monotonic start; never changes provider/R4 deadlines. */
+  providerRecoveryRunWindowMs?: number;
   deepseekEndpoint?: string;
   /** Wall-clock deadline for one DeepSeek request; defaults to 90000ms. */
   deepseekRequestTimeoutMs?: number;

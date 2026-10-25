@@ -95,6 +95,8 @@ export class WindowContractError extends Error {
 }
 
 const confirmedWindowsActivationRefusals = new WeakSet<WindowContractError>();
+// Proof is module-local: a public code string alone cannot authorize a retry.
+const confirmedRegisteredGeometryChanges = new WeakSet<WindowContractError>();
 
 /** Internal-only evidence that a desktop activation was explicitly refused by
  * the Windows foreground driver. This proof is deliberately not serialized in
@@ -173,25 +175,34 @@ export async function listWindowInventory(
   if (value?.degraded === true) throw new WindowContractError("WINDOW_TARGET_UNKNOWN", "configured CUA window target is degraded");
   const windows = parseWindows(result, osPlatform);
   const rawWindows = value?.windows;
-  const truncated = value?.truncated === true;
-  const negativeCompletenessEvidence = value?.complete === false || truncated;
+  const macEvidence = osPlatform === "darwin"
+    ? parseMacWindowInventoryEvidence(value, pid, onScreenOnly, windows)
+    : undefined;
+  const truncated = macEvidence?.truncated === true || value?.truncated === true;
+  const complete = osPlatform === "darwin"
+    ? macEvidence?.complete === true && value?.complete !== false && value?.truncated !== true
+    : value?.complete === true && !truncated && value.degraded !== true &&
+      Array.isArray(rawWindows) && rawWindows.length === windows.length;
+  const negativeCompletenessEvidence = osPlatform === "darwin"
+    ? macEvidence?.attested === true && !complete || truncated
+    : value?.complete === false || truncated;
   const completeAttestation = negativeCompletenessEvidence
     ? "negative"
-    : value !== undefined && Object.hasOwn(value, "complete") ? "explicit" : "missing";
-  const complete = value?.complete === true && !truncated && value.degraded !== true &&
-    Array.isArray(rawWindows) && rawWindows.length === windows.length;
+    : osPlatform === "darwin"
+      ? macEvidence?.attested === true ? "explicit" : "missing"
+      : value !== undefined && Object.hasOwn(value, "complete") ? "explicit" : "missing";
+  const legacyForegroundPid = osPlatform === "darwin" ? undefined : positiveSafeInteger(value?.foreground_pid ?? value?.foregroundPid);
+  const legacyForegroundWindowId = osPlatform === "darwin" ? undefined : positiveSafeInteger(value?.foreground_window_id ?? value?.foregroundWindowId);
+  const foregroundPid = macEvidence?.foreground?.pid ?? legacyForegroundPid;
+  const foregroundWindowId = macEvidence?.foreground?.windowId ?? legacyForegroundWindowId;
   const inventory: CuaWindowInventory = {
     windows,
     complete,
     completeAttestation,
     source: "cua_inventory",
     ...(truncated ? { truncated: true } : {}),
-    ...(positiveSafeInteger(value?.foreground_pid ?? value?.foregroundPid) === undefined
-      ? {}
-      : { foregroundPid: positiveSafeInteger(value?.foreground_pid ?? value?.foregroundPid)! }),
-    ...(positiveSafeInteger(value?.foreground_window_id ?? value?.foregroundWindowId) === undefined
-      ? {}
-      : { foregroundWindowId: positiveSafeInteger(value?.foreground_window_id ?? value?.foregroundWindowId)! }),
+    ...(foregroundPid === undefined ? {} : { foregroundPid }),
+    ...(foregroundWindowId === undefined ? {} : { foregroundWindowId }),
   };
   if (relationshipProbe === undefined || hasCompleteRelationshipFields(inventory)) return inventory;
   try {
@@ -202,6 +213,65 @@ export async function listWindowInventory(
     signal.throwIfAborted();
     return { ...inventory, complete: false };
   }
+}
+
+function parseMacWindowInventoryEvidence(
+  value: Record<string, unknown> | undefined,
+  requestedPid: number | undefined,
+  onScreenOnly: boolean,
+  windows: readonly CuaWindowInfo[],
+): {
+  readonly attested: boolean;
+  readonly complete: boolean;
+  readonly truncated: boolean;
+  readonly foreground?: { readonly pid: number; readonly windowId: number };
+} {
+  const evidence = value?.inventory;
+  if (!isRecord(evidence)) {
+    return { attested: false, complete: false, truncated: value?.truncated === true };
+  }
+  const scope = evidence.scope;
+  const rawWindows = value?.windows;
+  const rawWindowCount = Array.isArray(rawWindows) ? rawWindows.length : undefined;
+  const expectedPid = requestedPid ?? null;
+  const scopeMatches = evidence.version === "macos-window-inventory-v1" && isRecord(scope) &&
+    scope.layer === 0 && scope.pid === expectedPid && scope.on_screen_only === onScreenOnly;
+  const rowCount = nonNegativeSafeInteger(evidence.row_count);
+  const rawRowCount = nonNegativeSafeInteger(evidence.raw_row_count);
+  const malformedRowCount = nonNegativeSafeInteger(evidence.malformed_row_count);
+  const rowsTypedForScope = Array.isArray(rawWindows) && rawWindows.every((row) => {
+    if (!isRecord(row) || row.layer !== 0 || positiveSafeInteger(row.pid) === undefined ||
+        positiveSafeInteger(row.window_id) === undefined || parseGeometry(row.bounds) === undefined ||
+        typeof row.is_on_screen !== "boolean") return false;
+    if (requestedPid !== undefined && row.pid !== requestedPid) return false;
+    return !onScreenOnly || row.is_on_screen === true;
+  });
+  const uniqueRows = new Set(windows.map((window) => `${window.target.pid}:${window.target.windowId}`)).size === windows.length;
+  const truncated = evidence.truncated === true || value?.truncated === true;
+  const complete = scopeMatches && evidence.complete === true && evidence.read_status === "ok" && evidence.truncated === false &&
+    !truncated && malformedRowCount === 0 && rowCount !== undefined && rowCount === rawWindowCount &&
+    rawRowCount !== undefined && rawRowCount === rowCount && rowsTypedForScope && uniqueRows &&
+    windows.length === rawWindowCount;
+  const foregroundProof = evidence.foreground;
+  let foreground: { pid: number; windowId: number } | undefined;
+  if (complete && isRecord(foregroundProof) && foregroundProof.status === "verified") {
+    const pid = positiveSafeInteger(foregroundProof.pid);
+    const windowId = positiveSafeInteger(foregroundProof.window_id);
+    const matches = pid === undefined || windowId === undefined ? [] : windows.filter((window) =>
+      window.target.pid === pid && window.target.windowId === windowId && window.isOnScreen === true,
+    );
+    if (pid !== undefined && windowId !== undefined && matches.length === 1) foreground = { pid, windowId };
+  }
+  return {
+    attested: true,
+    complete,
+    truncated,
+    ...(foreground === undefined ? {} : { foreground }),
+  };
+}
+
+function nonNegativeSafeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function hasCompleteRelationshipFields(inventory: CuaWindowInventory): boolean {
@@ -268,17 +338,24 @@ async function captureRegisteredMacWindow(driver: CuaDriverLike, session: string
   if ((result.degraded || metadata?.degraded === true) && (typeof metadata?.degraded_reason !== "string" || !/^(?:ax_tree_empty|ax_window_unresolved)(?::|$)/u.test(metadata.degraded_reason))) {
     throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_DEGRADED", "registered window capture reported an unrecognized degradation; no unregistered fallback is permitted");
   }
-  const bounds = metadata?.window_bounds;
-  if (metadata?.pid !== binding.target.pid || metadata?.window_id !== binding.target.windowId || metadata?.screenshot_frame_valid !== true || !isRecord(bounds)
-    || bounds.x !== binding.bounds.x || bounds.y !== binding.bounds.y || bounds.width !== binding.bounds.width || bounds.height !== binding.bounds.height) {
+  const bounds = parseGeometry(metadata?.window_bounds);
+  if (metadata?.pid !== binding.target.pid || metadata?.window_id !== binding.target.windowId || metadata?.screenshot_frame_valid !== true || bounds === undefined) {
     throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_UNCONFIRMED", "registered screenshot identity or geometry does not match the verified window");
   }
   let parsed: ReturnType<typeof parseWindowCaptureImages>;
   try { parsed = parseWindowCaptureImages(result.images, "CUA registered window capture"); }
   catch { throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_SCHEMA", "registered window capture did not return one valid PNG; no unregistered fallback is permitted"); }
   if (metadata.screenshot_width !== parsed.dimensions.width || metadata.screenshot_height !== parsed.dimensions.height || metadata.screenshot_mime_type !== "image/png" || (metadata.screenshot_scale !== 1 && metadata.screenshot_scale !== 2)
-    || parsed.dimensions.width > binding.bounds.width * metadata.screenshot_scale || parsed.dimensions.height > binding.bounds.height * metadata.screenshot_scale) {
+    || parsed.dimensions.width > bounds.width * metadata.screenshot_scale || parsed.dimensions.height > bounds.height * metadata.screenshot_scale) {
     throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_UNCONFIRMED", "registered PNG dimensions or backing scale do not match its window metadata");
+  }
+  if (!sameWindowGeometry(bounds, binding.bounds)) {
+    if (!hasPngEnd(parsed.data)) {
+      throw new WindowContractError("WINDOW_CAPTURE_REGISTERED_UNCONFIRMED", "registered PNG envelope is incomplete; geometry change cannot authorize a retry");
+    }
+    const error = new WindowContractError("WINDOW_CAPTURE_REGISTERED_GEOMETRY_CHANGED", "registered window geometry changed after verification");
+    confirmedRegisteredGeometryChanges.add(error);
+    throw error;
   }
   // A fresh exact identity read catches move/resize between verification and
   // registered capture. It never captures a desktop or replays an action.
@@ -301,8 +378,11 @@ async function captureRegisteredMacWindow(driver: CuaDriverLike, session: string
  * most three schema-failure captures, one shared retry for an explicit UIA
  * provider timeout, and one same-target fallback. A timeout retry can happen
  * in either capture path, never both; the total backoff remains capped at
- * 300ms, and all work shares one 20-second deadline. No action path calls
- * this helper, and no other contract failure is retried.
+ * 300ms, and all work shares one 20-second deadline. One additional retry is
+ * reserved for a fully validated registered macOS geometry race. It shares
+ * the same deadline/backoff and does not enlarge the schema, timeout, or
+ * read-call budget. No action path calls this helper, and no other geometry
+ * mismatch authorizes that retry.
  */
 export async function captureWindowWithRetry(
   driver: CuaDriverLike,
@@ -324,6 +404,7 @@ export async function captureWindowWithRetry(
   let scheduledBackoffMs = 0;
   let schemaFailure: WindowContractError | undefined;
   let uiaTimeoutRetriesRemaining = WINDOW_CAPTURE_MAX_UIA_TIMEOUT_RETRIES;
+  let registeredGeometryRetriesRemaining = 1;
   let captureReadCalls = 0;
   let schemaAttempts = 0;
   // An expensive native visibility check must not repeat and consume the
@@ -372,6 +453,11 @@ export async function captureWindowWithRetry(
         return capture;
       } catch (error) {
         throwIfCaptureAborted();
+        if (error instanceof WindowContractError && confirmedRegisteredGeometryChanges.has(error) && registeredGeometryRetriesRemaining > 0) {
+          registeredGeometryRetriesRemaining -= 1;
+          await waitBeforeRetry(0);
+          continue;
+        }
         if (isUiaProviderTimeoutError(error) && uiaTimeoutRetriesRemaining > 0) {
           uiaTimeoutRetriesRemaining -= 1;
           await waitBeforeRetry(schemaAttempts);

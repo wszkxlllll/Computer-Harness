@@ -43,7 +43,7 @@ describe("app-runtime operation guidance", () => {
     expect(guidance?.id).toBe("text_document_save");
     expect(guidance?.text).toContain("长输入只看到尾部，不代表前缀丢失");
     expect(guidance?.text).toContain("菜单明确显示快捷键时优先使用");
-    expect(guidance?.text).toContain("文件名框被裁剪不代表路径丢失");
+    expect(guidance?.text).toContain("文件名框裁剪不等于路径丢失");
     expect(guidance?.text).not.toContain("Google Chrome");
   });
 
@@ -51,6 +51,7 @@ describe("app-runtime operation guidance", () => {
     const goal = "新建文档并保存，再比较查询结果。";
     const ambiguous = select({ goal, windowSwitchState: { currentWindow: { appName: "Unknown application" } } });
     const documentApp = select({ goal, windowSwitchState: { currentWindow: { appName: "Notepad" } } });
+    const textEditApp = select({ goal, windowSwitchState: { currentWindow: { appName: "TextEdit" } } });
     const researchApp = select({ goal, windowSwitchState: { currentWindow: { appName: "Google Chrome" } } });
     const activeDocumentPhase = select({
       goal,
@@ -68,9 +69,27 @@ describe("app-runtime operation guidance", () => {
 
     expect(ambiguous?.id).toBe("combined_task_guidance");
     expect(documentApp?.id).toBe("text_document_save");
+    expect(textEditApp?.id).toBe("text_document_save");
     expect(researchApp?.id).toBe("structured_extract");
     expect(activeDocumentPhase?.id).toBe("text_document_save");
     expect(ambiguousPlan?.id).toBe("combined_task_guidance");
+  });
+
+  it("keeps exact-text and TextEdit save-stage advice generic rather than rewriting the requested body", () => {
+    const withFinalLf = select({ goal: "Create and save a document containing exactly draft-body\n" });
+    const withoutFinalLf = select({ goal: "Create and save a document containing exactly draft-body, with no final LF." });
+    expect(withFinalLf).toEqual(withoutFinalLf);
+    expect(withFinalLf?.text).toContain("保留原文空白与末尾LF，不自行增删");
+    expect(withFinalLf?.text).toContain("分清前往文件夹、文件名和已保存标题");
+    expect(withFinalLf?.text).toContain("完整输入指定文件名及后缀，勿假定补全");
+    expect(withFinalLf?.text).toContain("核目录/全名再保存");
+    expect(withFinalLf?.text).toContain("内容正确≠精确路径");
+    expect(withFinalLf?.text).toContain("过渡不明时独立wait(0)一次，仍不明则报告未确认，不重复Enter");
+    expect(withFinalLf?.text).toContain("Cmd+S未必重开面板");
+    expect(withFinalLf?.text).toContain("标题不单独证明保存");
+    expect(withFinalLf?.text).toContain('macOS关闭用["CMD","W"]；["W"]只输入字符');
+    expect([...withFinalLf!.text].length).toBeLessThanOrEqual(325);
+    expect(withFinalLf?.text).not.toContain("draft-body");
   });
 
   it("keeps both task principles when a Goal matches both and app or phase metadata is unavailable", () => {
@@ -80,7 +99,7 @@ describe("app-runtime operation guidance", () => {
     });
 
     expect(guidance?.id).toBe("combined_task_guidance");
-    expect(guidance?.text).toContain("先观察并确认当前页面是空白还是已有内容");
+    expect(guidance?.text).toContain("编辑前核对空白/已有内容");
     expect(guidance?.text).toContain("长输入只看到尾部，不代表前缀丢失");
     expect(guidance?.text).toContain("只记录界面或来源明确给出的关系");
     expect(guidance?.text).toContain("价格与类别没有明确关联时分开列出或标为未知");

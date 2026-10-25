@@ -99,6 +99,10 @@ export interface RunControllerDependencies {
   policy: RuntimePolicy;
   /** Actual single-request HTTP deadline used to reserve a full recovery attempt. */
   providerAttemptReserveMs?: number;
+  /** Opt-in one-use recovery for an exact typed ambiguous pre-header Provider timeout. */
+  providerRecovery?: "off" | "ambiguous-headers-once-v1";
+  /** Absolute Run-start eligibility window for the recovery attempt. */
+  providerRecoveryRunWindowMs?: number;
   /** Optional hard wall-clock deadline measured from start(), not construction. */
   runTimeoutMs?: number;
   /** Begin terminate-only closing at this remaining wall clock; defaults to one HTTP deadline. */
@@ -352,6 +356,13 @@ export class RunController {
   private readonly toolRegistry: ToolRegistry;
   private readonly policy: RuntimePolicy;
   private readonly providerAttemptReserveMs: number;
+  private readonly providerRecovery: "off" | "ambiguous-headers-once-v1";
+  private readonly providerRecoveryRunWindowMs: number;
+  private providerRecoveryRunStartedAt: number | undefined;
+  private providerRecoveryUsed = false;
+  private providerRecoveryScheduled = false;
+  private providerRecoveryAttemptStarted = false;
+  private providerRemoteOutcomeUnknown = false;
   private readonly providerRetryWindowMs: number;
   private readonly runTimeoutMs: number | undefined;
   private readonly finishReserveMs: number;
@@ -438,6 +449,12 @@ export class RunController {
     if (!Number.isSafeInteger(this.providerAttemptReserveMs) || this.providerAttemptReserveMs <= 0) {
       throw new Error("providerAttemptReserveMs must be a positive safe integer");
     }
+    this.providerRecovery = dependencies.providerRecovery ?? "off";
+    this.providerRecoveryRunWindowMs = dependencies.providerRecoveryRunWindowMs ?? 900_000;
+    if (this.providerRecovery !== "off" && this.providerRecovery !== "ambiguous-headers-once-v1") throw new Error("providerRecovery must be off or ambiguous-headers-once-v1");
+    if (!Number.isSafeInteger(this.providerRecoveryRunWindowMs) || this.providerRecoveryRunWindowMs <= 0 || this.providerRecoveryRunWindowMs > 900_000) {
+      throw new Error("providerRecoveryRunWindowMs must be a positive safe integer no greater than 900000");
+    }
     this.providerRetryWindowMs = Math.min(Number.MAX_SAFE_INTEGER, this.providerAttemptReserveMs * (MAX_PROVIDER_RETRIES + 1) + providerRetryDelayMs(1));
     this.runTimeoutMs = dependencies.runTimeoutMs;
     this.finishReserveMs = dependencies.finishReserveMs ?? this.providerAttemptReserveMs;
@@ -505,6 +522,7 @@ export class RunController {
     }
     this.started = true;
     this.goal = goal;
+    this.providerRecoveryRunStartedAt = performance.now();
     if (this.runTimeoutMs !== undefined) {
       this.runDeadlineAt = Date.now() + this.runTimeoutMs;
       this.armRunDeadline();
@@ -774,7 +792,13 @@ export class RunController {
     const budget = this.policy.checkBudget(this.snapshot);
     if (!budget.allowed) return `model request budget does not allow recovery: ${budget.reason ?? "budget exhausted"}`;
     const requiredMs = delayMs + this.providerAttemptReserveMs;
-    const decisionRemainingMs = this.providerRetryWindowMs - (Date.now() - startedAt);
+    // Main's two-attempt window already covers slow format feedback. Preserve
+    // N9's one-millisecond strict-comparison headroom for explicit, non-ambiguous
+    // feedback only; transport/429 admission keeps the main window unchanged.
+    const feedbackHeadroom = providerErrorDetails(error).retryMode === "feedback"
+      && ambiguousHeadersRecoveryHint(error) === undefined ? 1 : 0;
+    const decisionWindowMs = Math.min(Number.MAX_SAFE_INTEGER, this.providerRetryWindowMs + feedbackHeadroom);
+    const decisionRemainingMs = decisionWindowMs - (Date.now() - startedAt);
     if (decisionRemainingMs <= requiredMs) return `decision recovery window insufficient: ${Math.max(0, decisionRemainingMs)}ms remaining, requires more than ${requiredMs}ms (${delayMs}ms delay + ${this.providerAttemptReserveMs}ms HTTP deadline)`;
     const wallClock = this.wallClockBudget();
     if (wallClock !== undefined && wallClock.remainingMs <= requiredMs) return `Run wall clock insufficient for recovery: ${wallClock.remainingMs}ms remaining, requires more than ${requiredMs}ms (${delayMs}ms delay + ${this.providerAttemptReserveMs}ms HTTP deadline)`;
@@ -890,6 +914,12 @@ export class RunController {
         }
         if (!this.isBoundWindowRecoveryActive()) await this.refreshAfterUserInput(session);
         this.throwIfAborted();
+        if (this.providerRecoveryScheduled && !this.providerRecoveryHasReserve()) {
+          await this.commitEvent({ type: "runtime.error", category: "provider", message: "ambiguous-header recovery window no longer has room for one configured Provider attempt" });
+          this.providerRecoveryScheduled = false;
+          outcome = "failed";
+          break;
+        }
         if (this.actionBudgetExhausted && this.actionBudgetCloseTurnsRemaining <= 0) {
           await this.commitEvent({
             type: "runtime.error",
@@ -940,6 +970,12 @@ export class RunController {
             }
             continue;
           }
+          if (this.providerRecoveryScheduled && !this.providerRecoveryHasReserve()) {
+            await this.commitEvent({ type: "runtime.error", category: "provider", message: "ambiguous-header recovery window expired before a fresh Provider decision" });
+            this.providerRecoveryScheduled = false;
+            outcome = "failed";
+            break;
+          }
           if (compiledClosing !== this.closingDecision()) continue;
           let requestContext = context;
           const decisionId = this.idFactory.eventId();
@@ -956,6 +992,15 @@ export class RunController {
           let closeTurnConsumed = false;
           turn = undefined;
           while (turn === undefined && !decisionInvalidated) {
+            this.throwIfAborted();
+            if (this.providerRecoveryScheduled && !this.providerRecoveryHasReserve()) {
+              await this.commitEvent({ type: "runtime.error", category: "provider", message: "ambiguous-header recovery window expired before the next Provider attempt" });
+              this.providerRecoveryScheduled = false;
+              outcome = "failed";
+              providerFailed = true;
+              decisionInvalidated = true;
+              break;
+            }
             // Closing may change during retry delay or asynchronous preparation.
             // Keep this decision/attempt count, but never reuse its old GUI tools.
             if (compiledClosing !== this.closingDecision()) {
@@ -990,6 +1035,14 @@ export class RunController {
                   if (this.isBoundWindowRecoveryActive()) await this.stopBoundWindowRecoveryAtManualBoundary();
                   else await this.refreshAfterUserInput(session);
                 }
+                decisionInvalidated = true;
+                break;
+              }
+              if (this.providerRecoveryScheduled && !this.providerRecoveryHasReserve()) {
+                await this.commitEvent({ type: "runtime.error", category: "provider", message: "ambiguous-header recovery window expired during Provider preparation" });
+                this.providerRecoveryScheduled = false;
+                outcome = "failed";
+                providerFailed = true;
                 decisionInvalidated = true;
                 break;
               }
@@ -1032,36 +1085,82 @@ export class RunController {
                   ...requestContext.contextBudget,
                   trace: { ...requestContext.contextBudget.trace, preparedRequest },
                 };
+            const isRecoveryAttempt = this.providerRecoveryScheduled;
             await this.commitEvent({
               type: "model.request.started",
               providerId: this.provider.id,
+              ...(isRecoveryAttempt ? { recoveryAttempt: "ambiguous-headers-once-v1" as const } : {}),
               requestId,
               decisionId,
               attempt,
               ...(preparedRequest === undefined ? {} : { preparedRequest }),
               ...(contextBudget === undefined ? {} : { contextBudget }),
             });
+            if (isRecoveryAttempt) this.providerRecoveryAttemptStarted = true;
+            this.providerRecoveryScheduled = false;
             try {
               turn = prepared !== undefined && generatePrepared !== undefined
                 ? await generatePrepared(prepared, { signal: this.abortController.signal, requestContext: providerRequestContext })
                 : await this.provider.generate(requestContext, { signal: this.abortController.signal, requestContext: providerRequestContext });
             } catch (error) {
               const details = providerErrorDetails(error);
+              const recoveryHint = ambiguousHeadersRecoveryHint(error);
+              if (recoveryHint !== undefined) this.providerRemoteOutcomeUnknown = true;
               const nextRetryCount = retryCount + 1;
               const retryAdvice = providerRetryAdvice(error, this.providerRetryWindowMs - this.providerAttemptReserveMs);
               const retryDelayMs = providerRetryDelayMs(nextRetryCount, retryAdvice.retryAfterMs);
-              const retryRejection = this.providerRetryRejectionReason(error, retryCount, retryWindowStartedAt, retryDelayMs)
-                ?? (retryAdvice.allowed ? undefined : "Provider retry advice does not allow recovery");
+              // Opted-in typed ambiguity starts a new decision only after a fresh
+              // observation; it must never fall through to a generic same-input retry.
+              const optedInTransportRecovery = this.providerRecovery === "ambiguous-headers-once-v1"
+                && recoveryHint === "ambiguous-headers-transport-v1";
+              const retryRejection = optedInTransportRecovery
+                ? "typed ambiguous-header transport failure requires a fresh recovery decision"
+                : this.providerRetryRejectionReason(error, retryCount, retryWindowStartedAt, retryDelayMs)
+                  ?? (retryAdvice.allowed ? undefined : "Provider retry advice does not allow recovery");
               const retry = retryRejection === undefined;
               await this.commitEvent({
                 type: "model.request.failed",
                 category: this.isAborted() ? "cancelled" : "provider",
-                message: providerFailureMessage(error, retryRejection, nextRetryCount),
+                message: `${providerFailureMessage(error, retryRejection, nextRetryCount)}${recoveryHint !== undefined ? "; remote outcome and usage are unknown" : ""}`,
                 requestId,
                 decisionId,
                 attempt,
                 ...details,
+                ...(recoveryHint === undefined ? {} : { recoveryHint }),
               });
+              const recoveryCandidate = this.providerRecovery === "ambiguous-headers-once-v1"
+                && !this.providerRecoveryUsed
+                && !retry
+                && !this.isBoundWindowRecoveryActive()
+                && !this.isAborted()
+                && recoveryHint !== undefined
+                && this.providerRecoveryHasReserve()
+                && this.snapshot.status === "running"
+                && this.snapshot.pendingApproval === undefined
+                && this.snapshot.pendingUserQuestion === undefined
+                && this.pendingApproval === undefined
+                && this.approvedPendingApproval === undefined
+                && this.pendingToolTurn === undefined
+                && this.pendingModelTurn === undefined
+                && this.snapshot.unresolvedActionId === undefined
+                && !this.actionBudgetExhausted;
+              if (recoveryCandidate) {
+                const recoveryEffects = await this.drainCommands();
+                const recoveryBudget = this.policy.checkBudget(this.snapshot);
+                if (!this.isAborted() && this.snapshot.status === "running" && !recoveryEffects.correction
+                    && this.snapshot.pendingApproval === undefined && this.pendingApproval === undefined
+                    && this.snapshot.pendingUserQuestion === undefined
+                    && this.approvedPendingApproval === undefined && this.pendingToolTurn === undefined
+                    && this.pendingModelTurn === undefined && this.snapshot.unresolvedActionId === undefined
+                    && !this.actionBudgetExhausted && recoveryBudget.allowed && this.providerRecoveryHasReserve()) {
+                  this.providerRecoveryUsed = true;
+                  this.providerRecoveryScheduled = true;
+                  // refreshAfterUserInput is intentionally conditional on this flag.
+                  this.pendingReobserve = true;
+                  decisionInvalidated = true;
+                  break;
+                }
+              }
               if (!retry) {
                 if (this.isBoundWindowRecoveryActive() && !this.isAborted()) {
                   await this.stopBoundWindowRecoveryAtManualBoundary();
@@ -1091,10 +1190,16 @@ export class RunController {
               }
             }
           }
+          if (providerFailed) {
+            break;
+          }
           if (decisionInvalidated) {
             continue;
           }
-          if (providerFailed || turn === undefined) {
+          if (turn === undefined) {
+            providerFailed = true;
+            outcome = this.snapshot.unresolvedActionId !== undefined ? "outcome_unknown" : "failed";
+            if (outcome === "failed") providerFailureSummary = this.providerFailureProgressSummary();
             break;
           }
 
@@ -1466,6 +1571,16 @@ export class RunController {
     await this.observeAndCommit(session);
   }
 
+  private providerRecoveryHasReserve(): boolean {
+    const startedAt = this.providerRecoveryRunStartedAt;
+    if (startedAt === undefined) return false;
+    const elapsed = performance.now() - startedAt;
+    const remaining = this.providerRecoveryRunWindowMs - elapsed;
+    const wallClock = this.wallClockBudget();
+    return Number.isFinite(elapsed) && elapsed >= 0 && remaining >= this.providerAttemptReserveMs
+      && (wallClock === undefined || wallClock.remainingMs > this.providerAttemptReserveMs);
+  }
+
   /** Shared reset after the private binding changes (or a confirmed popup is
    * ignored). Old frames, grounding and deferred model work cannot cross this
    * boundary. */
@@ -1539,6 +1654,10 @@ export class RunController {
   }
 
   private async applyCommand(command: RuntimeCommand): Promise<CommandEffects> {
+    if (this.providerRecoveryScheduled && (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause")) {
+      // Cancel the scheduled recovery at a human control boundary; the consumed latch is not restored.
+      this.providerRecoveryScheduled = false;
+    }
     // A correction/approval/explicit pause-resume changes the control
     // boundary.  Never carry a guidance or deferred-help proposal across it.
     if (command.kind === "user_input" || command.kind === "approval_resolution" || command.kind === "pause" || command.kind === "resume" || command.kind === "window_handoff" || command.kind === "ignore_new_window") {
@@ -1982,7 +2101,6 @@ export class RunController {
     }
     const matches = this.latestWindowOptions?.filter((option) => option.windowRef === windowRef) ?? [];
     if (matches.length !== 1) throw new Error("switch_window.windowRef was not returned by the latest list_windows call");
-    if (matches[0]?.isCurrent === true) throw new Error("switch_window cannot select the current window");
     return matches[0]!;
   }
 
@@ -2768,6 +2886,25 @@ export class RunController {
       return;
     }
     const action = candidate.action;
+    if (context.session.platform === "darwin" && this.latestObservation?.surfaceRef.kind === "desktop") {
+      const enterRefresh = this.needsConsecutiveActionRefresh(action, isUnmodifiedEnter);
+      const cmdShiftGRefresh = this.needsConsecutiveActionRefresh(action, isCmdShiftG);
+      const clickRefresh = this.needsConsecutiveActionRefresh(action, (previous): previous is Extract<ActionIntent, { kind: "click" }> =>
+        action.kind === "click" && previous?.kind === "click" &&
+        previous.point.x === action.point.x && previous.point.y === action.point.y);
+      if (enterRefresh || cmdShiftGRefresh || clickRefresh) {
+        // Only reject the repeated action: completion plus its first image
+        // does not prove no effect or that a transition has finished. Never resend
+        // this call; a new decision must use the independent observation.
+        await this.rejectToolCall(call.id, clickRefresh
+          ? "CLICK_REFRESH_REQUIRED: no input was sent. The previous click completed, but only its first post-action image is available; completion does not prove no effect. A fresh observation follows; inspect it before deciding on a new action. This rejected call will not be replayed."
+          : enterRefresh
+            ? "ENTER_REFRESH_REQUIRED: no input was sent. The previous Enter completed, but only its first post-action image is available. A fresh observation follows; reassess the current dialog before choosing a new action. This rejected call will not be replayed."
+            : "SHORTCUT_REFRESH_REQUIRED: no input was sent. The previous CMD+SHIFT+G completed, but only its first post-action image is available. A fresh observation follows; reassess the current screen before choosing a new action. This rejected call will not be replayed.");
+        await this.observeAndCommit(context.session);
+        return;
+      }
+    }
     const segmentBinding = this.matchCurrentExecutionSegmentAction(action);
     const activeSegment = this.snapshot.executionSegment;
     if (activeSegment?.status === "active" && segmentBinding === undefined) {
@@ -3166,6 +3303,32 @@ export class RunController {
       terminalActionEvent.eventId,
       postObservation,
     );
+  }
+
+  private needsConsecutiveActionRefresh(
+    action: ActionIntent,
+    matches: (candidate: ActionIntent | undefined) => candidate is Extract<ActionIntent, { kind: "keypress" | "click" }>,
+  ): boolean {
+    if (!matches(action) || action.basedOn !== this.latestObservation?.id) return false;
+    let observationCount = 0;
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index];
+      if (event?.type === "observation.created") {
+        observationCount += 1;
+      } else if (event?.type === "action.execution.started" || event?.type === "action.execution.failed") {
+        return false;
+      } else if (event?.type === "action.execution.completed") {
+        // Explicit wait or any independent re-observation satisfies the
+        // boundary. Failed/unknown receipts never acquire this refresh path.
+        if (observationCount !== 1 || event.receipt.status !== "completed") return false;
+        const previousAction = this.actionForId(event.receipt.actionId);
+        if (!matches(previousAction)) return false;
+        const before = this.events.find((item) => item.type === "observation.created" && item.observation.id === previousAction.basedOn);
+        return before?.type === "observation.created" && this.latestObservation !== undefined &&
+          sameSurfaceRef(before.observation.surfaceRef, this.latestObservation.surfaceRef);
+      }
+    }
+    return false;
   }
 
   private async commitMonitorTransition(
@@ -3575,6 +3738,13 @@ export class RunController {
     await this.commitEvent({
       type: "run.finished",
       outcome,
+      providerRecoveryState: {
+        mode: this.providerRecovery,
+        runWindowMs: this.providerRecoveryRunWindowMs,
+        latchConsumed: this.providerRecoveryUsed,
+        attemptStarted: this.providerRecoveryAttemptStarted,
+        remoteOutcomeUnknown: this.providerRemoteOutcomeUnknown,
+      },
       ...(summary === undefined ? {} : { summary }),
       ...(data.reportedStatus === undefined ? {} : { reportedStatus: data.reportedStatus }),
       ...(data.resultEvidence === undefined ? {} : { resultEvidence: data.resultEvidence }),
@@ -4052,6 +4222,19 @@ export class RunController {
   }
 }
 
+function isUnmodifiedEnter(action: ActionIntent | undefined): action is Extract<ActionIntent, { kind: "keypress" }> {
+  return action?.kind === "keypress" && action.keys.length === 1 && /^(?:ENTER|RETURN)$/iu.test(action.keys[0]?.trim() ?? "");
+}
+
+function isCmdShiftG(action: ActionIntent | undefined): action is Extract<ActionIntent, { kind: "keypress" }> {
+  if (action?.kind !== "keypress" || action.keys.length !== 3) return false;
+  const keys = new Set(action.keys.map((key) => {
+    const normalized = key.trim().toUpperCase();
+    return normalized === "META" ? "CMD" : normalized;
+  }));
+  return keys.size === 3 && keys.has("CMD") && keys.has("SHIFT") && keys.has("G");
+}
+
 function makeActionIntent(actionId: ActionId, basedOn: ObservationId | undefined, draft: GuiActionDraft): ActionIntent {
   if (draft.kind === "wait") {
     return { actionId, kind: "wait", durationMs: draft.durationMs };
@@ -4356,6 +4539,11 @@ function validateComputerWindowList(value: ComputerWindowList): ComputerWindowLi
         item.windowRef.trim().length === 0 || item.windowRef.length > 128 || typeof item.isCurrent !== "boolean") {
       throw new Error(`Computer window inventory option ${index} has an invalid windowRef/isCurrent`);
     }
+    for (const label of ["isOnScreen", "minimized"] as const) {
+      if (item[label] !== undefined && typeof item[label] !== "boolean") {
+        throw new Error(`Computer window inventory option ${index} has invalid ${label} metadata`);
+      }
+    }
     if ((item.firstObservedAfterAction !== undefined && typeof item.firstObservedAfterAction !== "boolean") ||
         (item.sourceActionId !== undefined && (typeof item.sourceActionId !== "string" || item.sourceActionId.trim().length === 0 || item.sourceActionId.length > 128)) ||
         (item.firstObservedAfterAction === true && item.sourceActionId === undefined) ||
@@ -4380,6 +4568,8 @@ function validateComputerWindowList(value: ComputerWindowList): ComputerWindowLi
       ...(item.appName === undefined ? {} : { appName: item.appName }),
       ...(item.title === undefined ? {} : { title: item.title }),
       isCurrent: item.isCurrent,
+      ...(item.isOnScreen === undefined ? {} : { isOnScreen: item.isOnScreen }),
+      ...(item.minimized === undefined ? {} : { minimized: item.minimized }),
       ...(item.firstObservedAfterAction === undefined ? {} : { firstObservedAfterAction: item.firstObservedAfterAction }),
       ...(item.sourceActionId === undefined ? {} : { sourceActionId: item.sourceActionId as ActionId }),
     };
@@ -4483,6 +4673,20 @@ function providerErrorDetails(error: unknown): { code?: string; retryable?: bool
       ? { retryMode: (candidate as { retryMode: "same_input" | "feedback" }).retryMode }
       : {}),
   };
+}
+
+function ambiguousHeadersRecoveryHint(error: unknown): "ambiguous-headers-timeout-v1" | "ambiguous-headers-transport-v1" | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const candidate = error as { retryable?: unknown; recoveryHint?: unknown };
+  const hint = candidate.recoveryHint;
+  if (hint === null || typeof hint !== "object") return undefined;
+  const typedHint = hint as { kind?: unknown; phase?: unknown; abortSource?: unknown; noResponse?: unknown; remoteOutcome?: unknown; transportCode?: unknown };
+  if (typedHint.phase !== "awaiting_headers" || typedHint.noResponse !== true || typedHint.remoteOutcome !== "unknown") return undefined;
+  if (typedHint.kind === "ambiguous-headers-timeout-v1"
+      && candidate.retryable === false && typedHint.abortSource === "local_request_timeout") return "ambiguous-headers-timeout-v1";
+  if (typedHint.kind === "ambiguous-headers-transport-v1"
+      && candidate.retryable === true && typedHint.abortSource === "transport_failure" && typedHint.transportCode === "ETIMEDOUT") return "ambiguous-headers-transport-v1";
+  return undefined;
 }
 
 function summarizeGuardAction(action: ActionIntent): import("@computer-harness/protocol").ActionGuardActionSummary {
@@ -4605,7 +4809,6 @@ function providerRetryAdvice(error: unknown, maxRetryDelayMs: number): { allowed
   }
   return defaultArkDelay;
 }
-
 
 function providerFailureMessage(error: unknown, retryRejection: string | undefined, attempt: number): string {
   const reason = errorMessage(error);

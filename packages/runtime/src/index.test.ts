@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
-import { GlmProviderError } from "../../provider-glm/src/index.js";
+import { FetchGlmHttpClient, GlmAdapter, GlmProviderError } from "../../provider-glm/src/index.js";
 import { BoundWindowMissingError } from "@computer-harness/protocol";
 import { DefaultContextCompiler } from "../../context/src/index.js";
 import type {
@@ -61,7 +62,8 @@ import {
   windowSwitchTools,
 } from "./index.js";
 import { currentObservationAssessmentBinding } from "./observation-assessment.js";
-import { reopenSavedDocumentTool } from "./computer-tools.js";
+import { createDefaultComputerTools, reopenSavedDocumentTool } from "./computer-tools.js";
+import { createDefaultToolRegistry } from "./control-tools.js";
 
 const runId = "runtime-test" as RunId;
 const sessionId = "fake-computer" as ComputerSessionId;
@@ -70,6 +72,39 @@ const desktopSurfaceRef: SurfaceRef = { surfaceId: "runtime-test-desktop" as Sur
 const nativePeerSurfaceRef: SurfaceRef = { surfaceId: "runtime-test-native-peer" as SurfaceId, generation: 1, kind: "native_window" };
 const recoveryTargetSurfaceRef: SurfaceRef = { surfaceId: "runtime-test-recovery-target" as SurfaceId, generation: 1, kind: "native_window" };
 const legacyUnknownSurfaceRef: SurfaceRef = { surfaceId: "legacy-unknown-runtime-fixture" as SurfaceId, generation: 0, kind: "unknown" };
+
+function recoveryFixturePng(seed: number): Uint8Array {
+  const crc32 = (bytes: Uint8Array): number => {
+    let crc = 0xffff_ffff;
+    for (const byte of bytes) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) === 0 ? 0 : 0xedb8_8320);
+    }
+    return (crc ^ 0xffff_ffff) >>> 0;
+  };
+  const chunk = (type: string, data: Uint8Array): Buffer => {
+    const typeBytes = Buffer.from(type, "ascii");
+    const result = Buffer.alloc(12 + data.byteLength);
+    result.writeUInt32BE(data.byteLength, 0);
+    typeBytes.copy(result, 4);
+    Buffer.from(data).copy(result, 8);
+    result.writeUInt32BE(crc32(result.subarray(4, 8 + data.byteLength)), 8 + data.byteLength);
+    return result;
+  };
+  const pixel = seed & 0xff;
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const scanline = Buffer.from([0, pixel, pixel ^ 0x5a, pixel ^ 0xa5, 0xff]);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(scanline)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
 
 class TestIds implements IdFactory {
   private count = 0;
@@ -869,6 +904,10 @@ async function makeController(
     windowSwitch?: "off" | "opened-windows-v1";
     recoverBoundWindowMissing?: boolean;
     providerAttemptReserveMs?: number;
+    providerRecovery?: "off" | "ambiguous-headers-once-v1";
+    providerRecoveryRunWindowMs?: number;
+    runTimeoutMs?: number;
+    finishReserveMs?: number;
     sourceLinkedFinish?: SourceLinkedFinishContract;
   } = {},
 ) {
@@ -903,6 +942,10 @@ async function makeController(
     ...(overrides.windowSwitch === undefined ? {} : { windowSwitch: overrides.windowSwitch }),
     ...(overrides.recoverBoundWindowMissing === undefined ? {} : { recoverBoundWindowMissing: overrides.recoverBoundWindowMissing }),
     ...(overrides.providerAttemptReserveMs === undefined ? {} : { providerAttemptReserveMs: overrides.providerAttemptReserveMs }),
+    ...(overrides.providerRecovery === undefined ? {} : { providerRecovery: overrides.providerRecovery }),
+    ...(overrides.providerRecoveryRunWindowMs === undefined ? {} : { providerRecoveryRunWindowMs: overrides.providerRecoveryRunWindowMs }),
+    ...(overrides.runTimeoutMs === undefined ? {} : { runTimeoutMs: overrides.runTimeoutMs }),
+    ...(overrides.finishReserveMs === undefined ? {} : { finishReserveMs: overrides.finishReserveMs }),
     ...(overrides.sourceLinkedFinish === undefined ? {} : { sourceLinkedFinish: overrides.sourceLinkedFinish }),
   });
   return { controller, computer: activeComputer, directory };
@@ -2256,6 +2299,426 @@ describe("RunController S2-2 happy path", () => {
     expect(events.filter((event) => event.type === "observation.created")).toHaveLength(0);
   });
 
+  describe.each([
+    { label: "Enter", keys: ["ENTER"], toolName: "keypress", effect: "navigate", rejectionPrefix: "ENTER_REFRESH_REQUIRED:" },
+    { label: "CMD+SHIFT+G", keys: ["CMD", "SHIFT", "G"], toolName: "hotkey", effect: "local_edit", rejectionPrefix: "SHORTCUT_REFRESH_REQUIRED:" },
+    { label: "single left click", keys: [], toolName: "click", effect: "local_edit", rejectionPrefix: "CLICK_REFRESH_REQUIRED:" },
+  ] as const)("consecutive $label refresh", ({ keys, toolName, effect, rejectionPrefix }) => {
+    // Synthetic Runtime/Context contract coverage, not a GUI stability test.
+    // Frame 2 is a changed but potentially transitional first post-action image,
+    // like A42's newly highlighted menu; frame 3 must reach a new decision.
+    const actionKind = toolName === "click" ? "click" : "keypress";
+    class ShortcutComputer extends FakeComputer {
+      public readonly actions: ActionIntent[] = [];
+      public observationAttempts = 0;
+
+      public constructor(private readonly failRefresh = false, platform: ComputerSession["platform"] = "darwin") {
+        super(false, platform);
+      }
+
+      public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+        this.observationAttempts += 1;
+        if (this.failRefresh && this.observationAttempts === 3) throw new Error("injected shortcut refresh capture failure");
+        return super.observe(session, observationId, signal);
+      }
+
+      public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal): Promise<import("@computer-harness/protocol").ActionReceipt> {
+        this.actions.push(action);
+        return super.execute(session, action, signal);
+      }
+    }
+
+    const shortcut = (id: string, callKeys: readonly string[] = keys): ModelTurn => ({
+      type: "tool_calls",
+      calls: [{ id: id as ToolCallId, name: toolName, arguments: toolName === "click" ? { x: 270, y: 151 } : { keys: [...callKeys] }, declaredEffect: { effects: [effect], target: "current dialog", summary: "Act on the observed current dialog" } }],
+    });
+    const finish: ModelTurn = { type: "finish", summary: "synthetic contract complete" };
+    const refreshRejections = (events: readonly RuntimeEvent[]) => events.filter((event) =>
+      event.type === "tool.call.rejected" && event.reason.startsWith(rejectionPrefix),
+    );
+    async function createShortcutRun(turns: ModelTurn[], computer = new ShortcutComputer(), onGenerate?: (count: number) => void, registry = createDefaultComputerTools()) {
+      const provider = new ScriptedProvider(turns, onGenerate);
+      const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(10, 10), {
+        contextCompiler: new DefaultContextCompiler(registry),
+        features: { planning: "off", memory: "off", batching: "same-control-input-v1", riskGuard: "layered", monitor: "shadow" },
+      });
+      return { ...created, provider, computer };
+    }
+
+    it("rejects the old repeated action after a changed first frame and sends the independent frame to a new decision", async () => {
+      const created = await createShortcutRun([
+        shortcut("confirm-go-to-folder"), shortcut("stale-second-enter"),
+        { type: "tool_calls", calls: [{ ...typeCall("fill-filename", "astra-a24-target.txt"), declaredEffect: { effects: ["local_edit"], target: "filename", summary: "Fill the target filename" } }] },
+        finish,
+      ]);
+      try {
+        await expect(created.controller.start("Confirm Go To Folder, inspect Save, then fill its filename")).resolves.toBe("succeeded");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        const observations = events.filter((event) => event.type === "observation.created");
+        const requests = events.filter((event) => event.type === "model.request.started");
+        const rejected = refreshRejections(events);
+        expect(created.computer.actions.map((action) => action.kind)).toEqual([actionKind, "type"]);
+        expect(created.computer.actions[1]).toMatchObject({ text: "astra-a24-target.txt", basedOn: observations[2]!.observation.id });
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0]).toMatchObject({ callId: "stale-second-enter" });
+        expect(events.some((event) => event.type === "action.proposed" && event.callId === "stale-second-enter")).toBe(false);
+        expect(observations).toHaveLength(4);
+        expect(created.provider.inputs).toHaveLength(4);
+        for (const [index, observation] of observations.entries()) {
+          const blocks = created.provider.inputs[index]!.messages.flatMap((message) => message.content);
+          expect(blocks.filter((block) => block.type === "image")).toEqual([
+            expect.objectContaining({ asset: observation.observation.screenshot }),
+          ]);
+          expect(await readFile(join(created.directory, "assets", observation.observation.screenshot.relativePath))).toEqual(Buffer.from([index + 1]));
+          expect(observation.sequence).toBeLessThan(requests[index]!.sequence);
+        }
+        expect(created.provider.inputs[2]!.messages.flatMap((message) => message.content)).toContainEqual(expect.objectContaining({
+          type: "tool_result", result: expect.objectContaining({ callId: "stale-second-enter", status: "rejected" }),
+        }));
+        expect(rejected[0]!.sequence).toBeLessThan(observations[2]!.sequence);
+        expect(created.controller.getSnapshot()).toMatchObject({ stepCount: 2, modelRequestCount: 4 });
+        expect(events.find((event) => event.type === "monitor.transition")).toMatchObject({ transition: "changed" });
+        if (toolName === "click") expect(rejected[0]).toMatchObject({ reason: expect.stringContaining("completion does not prove no effect") });
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("fails a refresh capture without reusing the old frame or replaying either shortcut", async () => {
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), finish], new ShortcutComputer(true));
+      try {
+        await expect(created.controller.start("Do not act after an unconfirmed refresh")).resolves.toBe("failed");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        const rejected = refreshRejections(events);
+        expect(created.computer.actions).toHaveLength(1);
+        expect(created.computer.observationAttempts).toBe(3);
+        expect(created.provider.inputs).toHaveLength(2);
+        expect(events.filter((event) => event.type === "observation.created")).toHaveLength(2);
+        expect(rejected).toHaveLength(1);
+        expect(events.filter((event) => event.sequence > rejected[0]!.sequence).some((event) =>
+          event.type === "action.execution.started" || event.type === "model.request.started" || event.type === "observation.created",
+        )).toBe(false);
+        expect(events.some((event) => event.type === "runtime.error" && event.message.includes("injected shortcut refresh capture failure"))).toBe(true);
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("does not add a refresh after a completed canonical wait(0)", async () => {
+      const created = await createShortcutRun([
+        shortcut("first-enter"),
+        { type: "tool_calls", calls: [{ id: "explicit-refresh" as ToolCallId, name: "wait", arguments: { durationMs: 0 }, declaredEffect: { effects: ["observe"], target: "current dialog", summary: "Read the current dialog again" } }] },
+        shortcut("enter-after-wait"), finish,
+      ]);
+      try {
+        await expect(created.controller.start("Observe explicitly between different dialog confirmations")).resolves.toBe("succeeded");
+        expect(created.computer.actions.map((action) => action.kind)).toEqual([actionKind, "wait", actionKind]);
+        expect(created.computer.actions[1]).toMatchObject({ durationMs: 0 });
+        expect(created.computer.observationAttempts).toBe(4);
+        expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        expect(created.controller.getSnapshot()).toMatchObject({ stepCount: 3, modelRequestCount: 4 });
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("allows a new shortcut decision bound to the independent frame without replay or a refresh loop", async () => {
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), shortcut("fresh-second-enter"), finish]);
+      try {
+        await expect(created.controller.start("Two distinct decisions may both require the same shortcut")).resolves.toBe("succeeded");
+        const events = created.controller.getEvents();
+        const observations = events.filter((event) => event.type === "observation.created");
+        expect(created.computer.actions).toHaveLength(2);
+        expect(created.computer.actions[1]).toMatchObject({
+          ...(toolName === "click" ? { point: { x: 270, y: 151 } } : { keys: [...keys] }),
+          basedOn: observations[2]!.observation.id,
+        });
+        expect(events.filter((event) => event.type === "action.proposed").map((event) => event.callId)).toEqual(["first-enter", "fresh-second-enter"]);
+        expect(refreshRejections(events)).toHaveLength(1);
+        expect(created.computer.observationAttempts).toBe(4);
+        expect(created.provider.inputs).toHaveLength(4);
+        expect(created.controller.getSnapshot()).toMatchObject({ stepCount: 2, modelRequestCount: 4 });
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("does not add a refresh when an independent observation already followed a user correction", async () => {
+      let correction: Promise<void> | undefined;
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("superseded-enter"), shortcut("fresh-enter"), finish], new ShortcutComputer(), (count) => {
+        if (count === 2) correction = created.controller.submitUserInput("The Go To sheet closed; inspect the current Save dialog.");
+      });
+      try {
+        await expect(created.controller.start("Reassess after a user correction")).resolves.toBe("succeeded");
+        await correction;
+        expect(created.computer.actions).toHaveLength(2);
+        expect(created.computer.observationAttempts).toBe(4);
+        expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        const proposed = created.controller.getEvents().filter((event) => event.type === "action.proposed");
+        expect(proposed.map((event) => event.callId)).toEqual(["first-enter", "fresh-enter"]);
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it.each(["win32", "linux", "native_window", "new_generation"] as const)("does not extend the boundary to %s", async (scope) => {
+      class OtherScopeComputer extends ShortcutComputer {
+        public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+          const capture = await super.observe(session, observationId, signal);
+          return {
+            ...capture,
+            surfaceRef: scope === "native_window" ? nativePeerSurfaceRef : scope === "new_generation" && this.observationAttempts > 1
+              ? { ...desktopSurfaceRef, generation: 2 }
+              : capture.surfaceRef,
+            ...(scope === "new_generation" && this.observationAttempts === 2 ? { surfaceTransitionReason: "generation_advanced" as const } : {}),
+          };
+        }
+      }
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("second-enter"), finish],
+        new OtherScopeComputer(false, scope === "win32" || scope === "linux" ? scope : "darwin"));
+      try {
+        await expect(created.controller.start("Preserve the existing behavior outside one Mac desktop Surface")).resolves.toBe("succeeded");
+        expect(created.computer.actions).toHaveLength(2);
+        expect(created.computer.observationAttempts).toBe(3);
+        expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it.each(["failed", "refused", "partial"] as const)("does not reinterpret a previous %s receipt as a completed shortcut", async (status) => {
+      class NonCompletedShortcutComputer extends ShortcutComputer {
+        public override async execute(session: ComputerSession, action: ActionIntent, signal: AbortSignal): Promise<import("@computer-harness/protocol").ActionReceipt> {
+          const receipt = await super.execute(session, action, signal);
+          return this.actions.length === 1 ? { actionId: action.actionId, status, message: "synthetic non-completed receipt" } : receipt;
+        }
+      }
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("second-enter"), finish], new NonCompletedShortcutComputer());
+      try {
+        await expect(created.controller.start("Respect the existing failed and unknown action boundary")).resolves.toBe(status === "partial" ? "outcome_unknown" : "succeeded");
+        expect(created.computer.actions).toHaveLength(status === "partial" ? 1 : 2);
+        expect(created.computer.observationAttempts).toBe(status === "partial" ? 1 : 3);
+        expect(created.provider.inputs).toHaveLength(status === "partial" ? 1 : 3);
+        expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("honors cancellation during refresh without another input, observation or model request", async () => {
+      let cancel: () => void = () => { throw new Error("controller not ready"); };
+      class CancelRefreshComputer extends ShortcutComputer {
+        public override async observe(session: ComputerSession, observationId: ObservationId, signal: AbortSignal) {
+          if (this.observationAttempts === 2) cancel();
+          return super.observe(session, observationId, signal);
+        }
+      }
+      const created = await createShortcutRun([shortcut("first-enter"), shortcut("stale-second-enter"), finish], new CancelRefreshComputer());
+      cancel = () => created.controller.cancel("cancel during the independent refresh");
+      try {
+        await expect(created.controller.start("Cancel safely at the observation boundary")).resolves.toBe("cancelled");
+        expect(created.computer.actions).toHaveLength(1);
+        expect(created.provider.inputs).toHaveLength(2);
+        const events = created.controller.getEvents();
+        expect(events.filter((event) => event.type === "observation.created")).toHaveLength(2);
+        expect(refreshRejections(events)).toHaveLength(1);
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "cancelled" });
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it.each(["guard", "action_budget"] as const)("preserves %s rejection before the refresh boundary", async (boundary) => {
+      const provider = new ScriptedProvider([shortcut("first-enter"), shortcut("denied-enter"), finish]);
+      const computer = new ShortcutComputer();
+      const registry = createDefaultComputerTools();
+      const actionPolicy: ActionPolicy = {
+        async evaluate(context) {
+          return {
+            decision: context.candidate.calls[0]?.id === "denied-enter" ? "deny" : "allow",
+            categories: [], reasonCode: "synthetic_guard", reason: "synthetic Guard decision", path: "local", policyVersion: "test-v1", modelRequestCount: 0,
+          };
+        },
+      };
+      const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(boundary === "action_budget" ? 1 : 10, 10), {
+        contextCompiler: new DefaultContextCompiler(registry),
+        ...(boundary === "guard" ? { actionPolicy } : {}),
+      });
+      try {
+        await expect(created.controller.start("Do not bypass existing Guard or action budget decisions")).resolves.toBe("succeeded");
+        expect(computer.actions).toHaveLength(1);
+        expect(computer.observationAttempts).toBe(2);
+        expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        expect(created.controller.getEvents().some((event) => event.type === "tool.call.rejected" && event.callId === "denied-enter")).toBe(true);
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    if (toolName === "click") {
+      const pointer = (id: string, kind: "click" | "double_click" | "right_click" = "click", point = { x: 270, y: 151 }): Extract<ModelTurn, { type: "tool_calls" }> => ({
+        type: "tool_calls",
+        calls: [{ id: id as ToolCallId, name: kind, arguments: { ...point }, declaredEffect: {
+          effects: ["local_edit"], target: "current observed control", summary: "Use the observed pointer action",
+        } }],
+      });
+
+      it.each([{ x: 270.000001, y: 151 }, { x: 270, y: 151.000001 }])("does not coalesce a different point ($x,$y)", async (point) => {
+        const created = await createShortcutRun([pointer("first-click"), pointer("different-point", "click", point), finish]);
+        try {
+          await expect(created.controller.start("Keep different pointer decisions outside the exact-point boundary")).resolves.toBe("succeeded");
+          expect(created.computer.actions).toHaveLength(2);
+          expect(created.computer.actions[1]).toMatchObject({ point });
+          expect(created.computer.observationAttempts).toBe(3);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+
+      it.each([
+        { first: "double_click", next: "double_click" },
+        { first: "right_click", next: "right_click" },
+        { first: "click", next: "double_click" },
+        { first: "click", next: "right_click" },
+        { first: "double_click", next: "click" },
+        { first: "right_click", next: "click" },
+      ] as const)("preserves distinct protocol pointer kinds: $first -> $next", async ({ first, next }) => {
+        const registry = createDefaultComputerTools();
+        const click = registry.get("click");
+        if (click?.category !== "computer") throw new Error("click fixture is unavailable");
+        // Test-only aliases exercise the existing protocol kinds; no production
+        // tool or schema is added to the Runtime registry.
+        for (const kind of ["double_click", "right_click"] as const) registry.register({
+          ...click, name: kind,
+          toAction(args, context) {
+            const draft = click.toAction(args, context);
+            if (draft.kind !== "click") throw new Error("expected a pointer fixture");
+            return { ...draft, kind };
+          },
+        });
+        const created = await createShortcutRun([pointer("first-pointer", first), pointer("next-pointer", next), finish], new ShortcutComputer(), undefined, registry);
+        try {
+          await expect(created.controller.start("Preserve double and right click behavior")).resolves.toBe("succeeded");
+          expect(created.computer.actions.map((action) => action.kind)).toEqual([first, next]);
+          expect(created.computer.observationAttempts).toBe(3);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+
+      it("does not dispatch or resume the old batch suffix after rejecting its repeated click", async () => {
+        const stale = pointer("stale-batch-click");
+        const provider = new ScriptedProvider([
+          pointer("first-click"),
+          { type: "tool_calls", calls: [...stale.calls, { ...typeCall("stale-batch-suffix", "must not dispatch"), declaredEffect: { effects: ["local_edit"], target: "current control", summary: "Old batch suffix" } }] },
+          { type: "tool_calls", calls: [{ ...typeCall("fresh-input", "new decision"), declaredEffect: { effects: ["local_edit"], target: "current control", summary: "Act after independent observation" } }] },
+          finish,
+        ]);
+        const computer = new ShortcutComputer();
+        const registry = createDefaultComputerTools();
+        const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(10, 10), {
+          batching: "same-control-input-v1", contextCompiler: new DefaultContextCompiler(registry),
+          features: { planning: "off", memory: "off", batching: "same-control-input-v1", riskGuard: "layered", monitor: "shadow" },
+        });
+        try {
+          await expect(created.controller.start("Reobserve before a new decision; never resume the rejected batch")).resolves.toBe("succeeded");
+          const events = created.controller.getEvents();
+          const observations = events.filter((event) => event.type === "observation.created");
+          expect(computer.actions.map((action) => action.kind)).toEqual(["click", "type"]);
+          expect(computer.actions[1]).toMatchObject({ text: "new decision", basedOn: observations[2]!.observation.id });
+          expect(events.filter((event) => event.type === "action.proposed").map((event) => event.callId)).toEqual(["first-click", "fresh-input"]);
+          expect(refreshRejections(events)).toHaveLength(1);
+          expect(events.some((event) => event.type === "tool.call.rejected" && event.callId === "stale-batch-suffix" &&
+            event.reason.includes("remaining calls were not executed"))).toBe(true);
+          expect(computer.observationAttempts).toBe(4);
+          expect(provider.inputs).toHaveLength(4);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+
+      it("does not force a refresh before a different GUI action", async () => {
+        const created = await createShortcutRun([
+          pointer("first-click"),
+          { type: "tool_calls", calls: [{ ...typeCall("different-input", "current field"), declaredEffect: { effects: ["local_edit"], target: "current input", summary: "Fill the observed input" } }] },
+          finish,
+        ]);
+        try {
+          await expect(created.controller.start("Preserve ordinary input after a clear observation")).resolves.toBe("succeeded");
+          expect(created.computer.actions.map((action) => action.kind)).toEqual(["click", "type"]);
+          expect(created.computer.observationAttempts).toBe(3);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+    }
+
+    if (toolName === "hotkey") {
+      it.each([
+        { repeatKeys: ["SHIFT", "G", "CMD"] },
+        { repeatKeys: ["g", "shift", "meta"] },
+      ])("normalizes only the same CMD+SHIFT+G chord: $repeatKeys", async ({ repeatKeys }) => {
+        const created = await createShortcutRun([shortcut("first-shortcut"), shortcut("normalized-repeat", repeatKeys), finish]);
+        try {
+          await expect(created.controller.start("Inspect before repeating the same Mac shortcut")).resolves.toBe("succeeded");
+          expect(created.computer.actions).toHaveLength(1);
+          expect(created.computer.observationAttempts).toBe(3);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(1);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+
+      it.each([
+        { firstKeys: ["CMD", "SHIFT", "G"], nextKeys: ["CMD", "G"] },
+        { firstKeys: ["CMD", "SHIFT", "G"], nextKeys: ["CTRL", "SHIFT", "G"] },
+        { firstKeys: ["CMD", "G"], nextKeys: ["CMD", "SHIFT", "G"] },
+        { firstKeys: ["CMD", "SHIFT", "G", "ALT"], nextKeys: ["CMD", "SHIFT", "G"] },
+      ])("does not treat nearby chords as the same shortcut: $firstKeys -> $nextKeys", async ({ firstKeys, nextKeys }) => {
+        const created = await createShortcutRun([shortcut("first-shortcut", firstKeys), shortcut("different-shortcut", nextKeys), finish]);
+        try {
+          await expect(created.controller.start("Keep other shortcuts outside this narrow boundary")).resolves.toBe("succeeded");
+          expect(created.computer.actions).toHaveLength(2);
+          expect(created.computer.observationAttempts).toBe(3);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+
+      it("does not force a refresh before a different GUI action", async () => {
+        const created = await createShortcutRun([
+          shortcut("first-shortcut"),
+          { type: "tool_calls", calls: [{ ...typeCall("different-input", "target-directory"), declaredEffect: { effects: ["local_edit"], target: "current input", summary: "Fill the observed input" } }] },
+          finish,
+        ]);
+        try {
+          await expect(created.controller.start("Preserve ordinary input after a clear observation")).resolves.toBe("succeeded");
+          expect(created.computer.actions.map((action) => action.kind)).toEqual(["keypress", "type"]);
+          expect(created.computer.observationAttempts).toBe(3);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(0);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+    } else if (toolName === "keypress") {
+      it("preserves the existing RETURN/ENTER equivalence", async () => {
+        const created = await createShortcutRun([shortcut("first-return", ["RETURN"]), shortcut("repeat-enter", ["ENTER"]), finish]);
+        try {
+          await expect(created.controller.start("Inspect before repeating a completed Return")).resolves.toBe("succeeded");
+          expect(created.computer.actions).toHaveLength(1);
+          expect(refreshRejections(created.controller.getEvents())).toHaveLength(1);
+        } finally {
+          await rm(created.directory, { recursive: true, force: true });
+        }
+      });
+    }
+  });
+
   it("persists observe → model → action → observe → finish and links the ToolCall", async () => {
     const provider = new ScriptedProvider([
       { type: "tool_calls", calls: [clickCall("call-1")] },
@@ -2398,6 +2861,159 @@ describe("RunController S2-2 happy path", () => {
     const { controller } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2));
     await expect(controller.start("do not loop")).resolves.toBe("budget_exhausted");
     expect(controller.getSnapshot()).toMatchObject({ modelRequestCount: 2, stepCount: 0, outcome: "budget_exhausted" });
+  });
+
+  describe("format feedback retry window", () => {
+    it.each(["valid", "repeated_bad", "cancel", "correct", "budget", "incomplete"] as const)(
+      "keeps strict GLM parsing and bounded recovery after one normal interact answer (%s)", async (scenario) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const bodies: Array<Record<string, unknown>> = [];
+      const planningExecutions: string[] = [];
+      let controller!: RunController;
+      let correction: Promise<void> | undefined;
+      const wireCall = (id: string, name: string, args: Record<string, unknown>) => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
+      const payload = (calls: unknown[], finishReason = "tool_calls") => ({ choices: [{ finish_reason: finishReason, message: { tool_calls: calls } }] });
+      // This deliberately invalid test value is not a reconstruction of A47's
+      // private raw payload, which was not retained in full.
+      const badBatch = payload([
+        wireCall("bad-plan", "task_update", { id: "bad-plan", summary: "must never execute" }),
+        wireCall("bad-click", "click", { x: 40, y: 50, _harnessEffect: "synthetic-invalid-value" }),
+      ]);
+      const registry = createDefaultToolRegistry();
+      registry.register({
+        name: "task_update", description: "Synthetic Planning execution counter.", category: "side",
+        inputSchema: { type: "object", properties: { id: { type: "string" }, summary: { type: "string" } }, required: ["id", "summary"], additionalProperties: false },
+        validate: () => undefined,
+        execute: async (args) => { planningExecutions.push((args as { id: string }).id); return { applied: true }; },
+      });
+      const provider = new GlmAdapter({
+        apiKey: "OFFLINE_TEST_API_KEY_MARKER", endpoint: "https://offline-fixture.invalid/chat",
+        profile: { name: "glm-5.3-flash", thinking: "high", coordinateMode: "actual_pixels", maxOutputTokens: 8192 },
+        assetReader: { async read(_asset, signal) { signal.throwIfAborted(); return new Uint8Array([1]); } },
+        httpClient: { async post(_url, body, _headers, signal) {
+          signal.throwIfAborted();
+          bodies.push(structuredClone(body));
+          if (bodies.length === 1) return payload([wireCall("ask-once", "interact", { text: "Which synthetic local time should I acknowledge?" })]);
+          if (bodies.length === 2 || scenario === "repeated_bad" && bodies.length === 3) {
+            vi.setSystemTime(Date.now() + 43_378);
+            return scenario === "incomplete" ? payload([], "length") : badBatch;
+          }
+          if (bodies.length === 3) {
+            expect(planningExecutions).toEqual([]);
+            return payload([wireCall("valid-plan", "task_update", { id: "valid-plan", summary: "Acknowledge the supplied time" })]);
+          }
+          return payload([wireCall("finish-once", "terminate", { status: "success", text: "The synthetic time was acknowledged and the valid Planning fixture updated once; no GUI input was sent." })]);
+        } },
+      });
+      const computer = new FakeComputer();
+      const created = await makeController(provider, computer, registry, new DefaultRuntimePolicy(10, scenario === "budget" ? 2 : 6), {
+        contextCompiler: new DefaultContextCompiler(registry), providerAttemptReserveMs: 90_000,
+        features: { planning: "tasks-v1", memory: "off", batching: "same-control-input-v1", riskGuard: "layered", monitor: "off" },
+        onEventCommitted(event) {
+          if (event.type !== "model.request.failed" || event.attempt !== 1) return;
+          if (scenario === "cancel") controller.cancel("cancel at the format-feedback barrier");
+          if (scenario === "correct") correction = controller.submitUserInput("Use corrected synthetic time 16:00 instead.");
+        },
+      });
+      controller = created.controller;
+      const running = controller.start("Ask for a synthetic local time, acknowledge the answer, and update the test Planning counter without GUI input.");
+      try {
+        await waitUntil(() => controller.getSnapshot().status === "waiting_user");
+        const requestId = controller.getSnapshot().pendingUserInputRequestId;
+        await controller.submitUserInput("Use synthetic local time 15:30.", requestId);
+        // Main refuses an exhausted budget at feedback admission, before an
+        // attempted retry can reach the loop's budget_exhausted branch.
+        const expected = scenario === "repeated_bad" || scenario === "incomplete" || scenario === "budget" ? "failed"
+          : scenario === "cancel" ? "cancelled" : "succeeded";
+        await expect(running).resolves.toBe(expected);
+        await correction;
+        const events = controller.getEvents();
+        const requests = events.filter((event): event is Extract<RuntimeEvent, { type: "model.request.started" }> => event.type === "model.request.started");
+        const failures = events.filter((event) => event.type === "model.request.failed");
+        const valid = scenario === "valid" || scenario === "correct";
+        const count = valid ? 4 : scenario === "repeated_bad" ? 3 : 2;
+        expect(bodies).toHaveLength(count);
+        expect(requests).toHaveLength(count);
+        expect(controller.getSnapshot().modelRequestCount).toBe(count);
+        expect(events.filter((event) => event.type === "user.input.requested")).toHaveLength(1);
+        expect(events.filter((event) => event.type === "user.input.received")).toHaveLength(scenario === "correct" ? 2 : 1);
+        expect(planningExecutions).toEqual(valid ? ["valid-plan"] : []);
+        expect(computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+        expect(events.some((event) => event.type === "tool.call.received" && ["bad-plan", "bad-click"].includes(event.call.id))).toBe(false);
+        expect(events.some((event) => event.type === "action.proposed")).toBe(false);
+        expect(failures[0]).toMatchObject({ code: scenario === "incomplete" ? "GLM_INCOMPLETE_RESPONSE" : "GLM_INVALID_TOOL_CALL", retryable: scenario !== "incomplete", retryMode: "feedback" });
+        if (scenario === "valid" || scenario === "repeated_bad") {
+          expect(requests[2]).toMatchObject({ decisionId: requests[1]!.decisionId, attempt: 2 });
+          expect(requests[2]!.requestId).not.toBe(requests[1]!.requestId);
+          expect(requests[2]!.preparedRequest?.payloadHash).not.toBe(requests[1]!.preparedRequest?.payloadHash);
+          expect(JSON.stringify(bodies[2])).toContain("previous model response was rejected before any tool was executed");
+          expect(JSON.stringify(bodies[2])).toContain("_harnessEffect must be an object");
+          expect(JSON.stringify(bodies[2])).not.toContain("bad-click");
+        }
+        if (scenario === "correct") {
+          expect(requests[2]).toMatchObject({ attempt: 1 });
+          expect(requests[2]!.decisionId).not.toBe(requests[1]!.decisionId);
+          expect(JSON.stringify(bodies[2])).toContain("16:00");
+          expect(JSON.stringify(bodies[2])).not.toContain("previous model response was rejected before any tool was executed");
+        }
+        if (scenario === "budget") {
+          expect(failures[0]).toMatchObject({ message: expect.stringContaining("model request budget does not allow recovery") });
+          expect(requests.map((event) => event.attempt)).toEqual([1, 1]);
+          expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed" });
+        }
+        expect(failures).toHaveLength(scenario === "repeated_bad" ? 2 : 1);
+      } finally {
+        if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+        await running.catch(() => undefined);
+        await rm(created.directory, { recursive: true, force: true });
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      { label: "A49-sized slow format response", reserve: 90_000, elapsed: 45_317, mode: "feedback", retryable: true, admitted: true },
+      { label: "full 90s initial attempt", reserve: 90_000, elapsed: 90_000, mode: "feedback", retryable: true, admitted: true },
+      { label: "strict 90s boundary", reserve: 90_000, elapsed: 90_001, mode: "feedback", retryable: true, admitted: false },
+      { label: "full 240s initial attempt", reserve: 240_000, elapsed: 240_000, mode: "feedback", retryable: true, admitted: true },
+      { label: "strict 240s boundary", reserve: 240_000, elapsed: 240_001, mode: "feedback", retryable: true, admitted: false },
+      { label: "safe-integer overflow refused", reserve: Number.MAX_SAFE_INTEGER, elapsed: 0, mode: "feedback", retryable: true, admitted: false },
+      // Integration keeps main's newer two-attempt transport window. N9's
+      // narrower legacy transport expectations are superseded by that policy.
+      { label: "same-input keeps main two-attempt window", reserve: 90_000, elapsed: 43_378, mode: "same_input", retryable: true, admitted: true },
+      { label: "implicit mode keeps main two-attempt window", reserve: 90_000, elapsed: 43_378, mode: undefined, retryable: true, admitted: true },
+      { label: "nonretryable remains terminal", reserve: 90_000, elapsed: 43_378, mode: "feedback", retryable: false, admitted: false },
+      { label: "recovery-off ambiguity keeps main generic window", reserve: 90_000, elapsed: 43_378, mode: "feedback", retryable: true, admitted: true, ambiguous: true },
+    ] as const)("preserves finite admission bounds: $label", async ({ reserve, elapsed, mode, retryable, admitted, ...testCase }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      let calls = 0;
+      const provider: ProviderAdapter = {
+        id: "synthetic-feedback-window",
+        async generate(_input, { signal }) {
+          signal.throwIfAborted();
+          calls += 1;
+          if (calls === 1) {
+            vi.setSystemTime(Date.now() + elapsed);
+            throw Object.assign(new Error("synthetic response-format rejection"), {
+              code: "SYNTHETIC_FORMAT_ERROR", retryable, ...(mode === undefined ? {} : { retryMode: mode }),
+              ...("ambiguous" in testCase && testCase.ambiguous ? { code: "GLM_NETWORK_ERROR", recoveryHint: {
+                kind: "ambiguous-headers-transport-v1", phase: "awaiting_headers", abortSource: "transport_failure", transportCode: "ETIMEDOUT", noResponse: true, remoteOutcome: "unknown",
+              } } : {}),
+            });
+          }
+          return { type: "finish", summary: "The synthetic format correction completed without GUI input." };
+        },
+      };
+      const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 3), { providerAttemptReserveMs: reserve });
+      try {
+        await expect(created.controller.start("exercise finite feedback admission without GUI")).resolves.toBe(admitted ? "succeeded" : "failed");
+        expect(calls).toBe(admitted ? 2 : 1);
+        expect(created.controller.getSnapshot().modelRequestCount).toBe(calls);
+        expect(created.computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+      } finally {
+        await rm(created.directory, { recursive: true, force: true });
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("admits retry only when the remaining retry window strictly exceeds delay plus configured reserve", async () => {
@@ -3682,6 +4298,616 @@ describe("RunController S2-4 failure boundaries", () => {
     } finally { await rm(created.directory, { recursive: true, force: true }); }
   });
 
+  it("opt-in ambiguous-header recovery reobserves after a completed click and never replays it", async () => {
+    const inputs: ModelInput[] = [];
+    const compiler = new TestContextCompiler(clickRegistry());
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "typed-timeout-provider",
+      async generate(input, options) {
+        options.signal.throwIfAborted();
+        inputs.push(input);
+        calls += 1;
+        if (calls === 1) return { type: "tool_calls", calls: [clickCall("before-ambiguous-timeout")] };
+        if (calls === 2) throw new GlmProviderError("local pre-header timeout; remote outcome unknown", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+        return { type: "finish", summary: "finished after fresh observation" };
+      },
+    };
+    const { controller, computer, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 900_000, providerAttemptReserveMs: 90_000, contextCompiler: compiler,
+    });
+    const recoveryOutcome = await controller.start("click once, then recover from an ambiguous header timeout");
+    expect(recoveryOutcome).toBe("succeeded");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    const failedIndex = events.findIndex((event) => event.type === "model.request.failed");
+    const recoveryStartedIndex = events.findIndex((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1");
+    const freshObservationIndex = events.findIndex((event, index) => index > failedIndex && event.type === "observation.created");
+    const failed = events[failedIndex];
+    const recoveryStarted = events[recoveryStartedIndex];
+    const freshObservation = events[freshObservationIndex];
+    expect(failed).toMatchObject({ recoveryHint: "ambiguous-headers-timeout-v1" });
+    expect(recoveryStartedIndex).toBeGreaterThan(freshObservationIndex);
+    expect(failed?.type).toBe("model.request.failed");
+    expect(recoveryStarted?.type).toBe("model.request.started");
+    if (failed?.type === "model.request.failed" && recoveryStarted?.type === "model.request.started") {
+      expect(recoveryStarted.decisionId).not.toBe(failed.decisionId);
+    }
+    expect(freshObservation?.type).toBe("observation.created");
+    if (freshObservation?.type === "observation.created") expect(compiler.inputs.at(-1)?.latestObservation?.id).toBe(freshObservation.observation.id);
+    expect(recoveryStarted).toMatchObject({ recoveryAttempt: "ambiguous-headers-once-v1", attempt: 1 });
+    expect(calls).toBe(3);
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(3);
+    expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+    expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBeGreaterThanOrEqual(3);
+    expect(inputs).toHaveLength(3);
+    expect(events.filter((event) => event.type === "model.request.failed")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "run.finished",
+      providerRecoveryState: { mode: "ambiguous-headers-once-v1", runWindowMs: 900_000, latchConsumed: true, attemptStarted: true, remoteOutcomeUnknown: true },
+    });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("opts in to one fresh decision for a typed header transport timeout", async () => {
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "typed-transport-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted();
+        calls += 1;
+        if (calls === 1) throw new GlmProviderError("transport timed out before headers", "GLM_NETWORK_ERROR", true, "same_input", {
+          kind: "ambiguous-headers-transport-v1", phase: "awaiting_headers", abortSource: "transport_failure", noResponse: true, transportCode: "ETIMEDOUT", remoteOutcome: "unknown",
+        });
+        return { type: "finish", summary: "fresh decision completed" };
+      },
+    };
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 900_000, providerAttemptReserveMs: 90_000,
+    });
+    await expect(controller.start("recover once from a typed header transport timeout")).resolves.toBe("succeeded");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    const failed = events.find((event) => event.type === "model.request.failed");
+    const recoveryStarted = events.find((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1");
+    const freshObservationIndex = events.findIndex((event, index) => failed !== undefined && index > events.indexOf(failed) && event.type === "observation.created");
+    expect(failed).toMatchObject({ retryable: true, recoveryHint: "ambiguous-headers-transport-v1" });
+    expect(recoveryStarted).toBeDefined();
+    expect(freshObservationIndex).toBeGreaterThan(events.indexOf(failed!));
+    expect(events.indexOf(recoveryStarted!)).toBeGreaterThan(freshObservationIndex);
+    expect(calls).toBe(2);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "succeeded", providerRecoveryState: { latchConsumed: true, attemptStarted: true, remoteOutcomeUnknown: true } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("keeps legacy same-input retry for a typed transport timeout when recovery is off", async () => {
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "typed-transport-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted();
+        calls += 1;
+        if (calls === 1) throw new GlmProviderError("legacy retry fixture", "GLM_NETWORK_ERROR", true, "same_input", {
+          kind: "ambiguous-headers-transport-v1", phase: "awaiting_headers", abortSource: "transport_failure", noResponse: true, transportCode: "ETIMEDOUT", remoteOutcome: "unknown",
+        });
+        return { type: "finish", summary: "legacy retry completed" };
+      },
+    };
+    const { controller, directory } = await makeController(provider);
+    await expect(controller.start("preserve the generic retry when opt-in is off")).resolves.toBe("succeeded");
+    expect(calls).toBe(2);
+    expect(controller.getEvents().filter((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toHaveLength(0);
+    expect(controller.getEvents().find((event) => event.type === "model.request.failed")).toMatchObject({ retryable: true, recoveryHint: "ambiguous-headers-transport-v1" });
+    expect(controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { mode: "off", latchConsumed: false, attemptStarted: false, remoteOutcomeUnknown: true } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("shares the one-use latch across local and transport hints without a generic fallback", async () => {
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "mixed-header-hints-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted();
+        calls += 1;
+        if (calls === 1) throw new GlmProviderError("local header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+        throw new GlmProviderError("transport header timeout", "GLM_NETWORK_ERROR", true, "same_input", {
+          kind: "ambiguous-headers-transport-v1", phase: "awaiting_headers", abortSource: "transport_failure", noResponse: true, transportCode: "ETIMEDOUT", remoteOutcome: "unknown",
+        });
+      },
+    };
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 5), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 900_000, providerAttemptReserveMs: 90_000,
+    });
+    await expect(controller.start("a second typed hint must not fall back to generic retry")).resolves.toBe("failed");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(calls).toBe(2);
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "model.request.failed").map((event) => event.type === "model.request.failed" ? event.recoveryHint : undefined)).toEqual([
+      "ambiguous-headers-timeout-v1", "ambiguous-headers-transport-v1",
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", providerRecoveryState: { latchConsumed: true, attemptStarted: true, remoteOutcomeUnknown: true } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  describe("real GLM Fetch adapter composition", () => {
+    const jsonResponse = (payload: unknown): Response => ({ ok: true, status: 200, json: async () => payload }) as Response;
+    const clickPayload = {
+      choices: [{ finish_reason: "tool_calls", message: { tool_calls: [{ id: "wire-click-once", function: { name: "click", arguments: "{\"x\":40,\"y\":50}" } }] } }],
+      usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+    };
+    const finishPayload = {
+      choices: [{ finish_reason: "stop", message: { content: "offline fixture finished" } }],
+      usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+    };
+    const adapter = (requestTimeoutMs: number) => new GlmAdapter({
+      apiKey: "OFFLINE_TEST_API_KEY_MARKER",
+      profile: "glm-5.3-flash",
+      endpoint: "https://offline-fixture.invalid/chat",
+      assetReader: {
+        async read(asset, signal) {
+          signal.throwIfAborted();
+          const seed = [...asset.relativePath].reduce((value, character) => (value * 33 + character.charCodeAt(0)) >>> 0, 5381);
+          return recoveryFixturePng(seed);
+        },
+      },
+      httpClient: new FetchGlmHttpClient({ requestTimeoutMs }),
+    });
+    const startEvents = (events: RuntimeEvent[]) => events.filter((event): event is Extract<RuntimeEvent, { type: "model.request.started" }> => event.type === "model.request.started");
+
+    it.each(["local_deadline", "transport_etimedout"] as const)("composes %s recovery through fresh observation and a newly prepared request", async (failureKind) => {
+      const originalFetch = globalThis.fetch;
+      const requestBodies: string[] = [];
+      let fetchCalls = 0;
+      const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls += 1;
+        requestBodies.push(String(init?.body ?? ""));
+        if (fetchCalls === 1) return jsonResponse(clickPayload);
+        if (fetchCalls === 2 && failureKind === "local_deadline") {
+          return new Promise<never>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal === undefined || signal === null) { reject(new Error("missing fixture AbortSignal")); return; }
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        if (fetchCalls === 2) throw Object.assign(new TypeError("controlled header transport timeout"), { cause: { code: "ETIMEDOUT" } });
+        return jsonResponse(finishPayload);
+      }) as unknown as typeof fetch;
+      vi.stubGlobal("fetch", fetchMock);
+      const computer = new FakeComputer();
+      let created: Awaited<ReturnType<typeof makeController>> | undefined;
+      try {
+        created = await makeController(adapter(20), computer, clickRegistry(), new DefaultRuntimePolicy(10, 5), {
+          providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 900_000, providerAttemptReserveMs: 90_000,
+        });
+        await expect(created.controller.start("real adapter and runtime offline composition")).resolves.toBe("succeeded");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        const starts = startEvents(events);
+        const failedIndex = events.findIndex((event) => event.type === "model.request.failed");
+        const failed = events[failedIndex];
+        const freshIndex = events.findIndex((event, index) => index > failedIndex && event.type === "observation.created");
+        const recoveryStartIndex = events.findIndex((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1");
+        const recoveryStart = events[recoveryStartIndex];
+        expect(fetchCalls).toBe(3);
+        expect(failed).toMatchObject({ retryable: failureKind === "transport_etimedout", recoveryHint: failureKind === "transport_etimedout" ? "ambiguous-headers-transport-v1" : "ambiguous-headers-timeout-v1" });
+        expect(freshIndex).toBeGreaterThan(failedIndex);
+        expect(recoveryStartIndex).toBeGreaterThan(freshIndex);
+        expect(starts).toHaveLength(3);
+        expect(starts[1]?.decisionId).not.toBe(starts[2]?.decisionId);
+        expect(starts[1]?.preparedRequest?.payloadHash).not.toBe(starts[2]?.preparedRequest?.payloadHash);
+        expect(requestBodies[1]).not.toBe(requestBodies[2]);
+        expect(events.filter((event) => event.type === "action.execution.completed")).toHaveLength(1);
+        expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+        const responses = events.filter((event) => event.type === "model.response.received");
+        expect(responses).toHaveLength(2);
+        expect(responses.reduce((total, event) => total + (event.type === "model.response.received" ? event.turn.usage.totalTokens ?? 0 : 0), 0)).toBe(25);
+        const response = events.find((event) => event.type === "model.response.received" && event.turn.type === "finish");
+        expect(response).toMatchObject({ type: "model.response.received", turn: { type: "finish", usage: { inputTokens: 11, outputTokens: 4, totalTokens: 15 } } });
+        expect(failed).not.toHaveProperty("usage");
+        expect(events.some((event) => event.type === "model.request.failed" && "usage" in event)).toBe(false);
+        expect(JSON.stringify(events)).not.toContain("OFFLINE_TEST_API_KEY_MARKER");
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: true, attemptStarted: true, remoteOutcomeUnknown: true } });
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+        if (created !== undefined) await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("uses generic same-input retry in recovery-off mode with the real fetch adapter", async () => {
+      const originalFetch = globalThis.fetch;
+      const requestBodies: string[] = [];
+      let fetchCalls = 0;
+      vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls += 1;
+        requestBodies.push(String(init?.body ?? ""));
+        if (fetchCalls === 1) throw Object.assign(new TypeError("controlled header transport timeout"), { cause: { code: "ETIMEDOUT" } });
+        return jsonResponse(finishPayload);
+      }) as unknown as typeof fetch);
+      const computer = new FakeComputer();
+      const created = await makeController(adapter(500), computer, clickRegistry(), new DefaultRuntimePolicy(10, 3), { providerRecovery: "off" });
+      try {
+        await expect(created.controller.start("legacy mode-off retry integration")).resolves.toBe("succeeded");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        const starts = startEvents(events);
+        expect(fetchCalls).toBe(2);
+        expect(starts).toHaveLength(2);
+        expect(starts[0]?.decisionId).toBe(starts[1]?.decisionId);
+        expect(starts[0]?.preparedRequest?.payloadHash).toBe(starts[1]?.preparedRequest?.payloadHash);
+        expect(requestBodies[0]).toBe(requestBodies[1]);
+        expect(events.some((event) => event.type === "observation.created" && events.indexOf(event) > events.findIndex((item) => item.type === "model.request.failed"))).toBe(false);
+        expect(events.find((event) => event.type === "model.request.failed")).toMatchObject({ retryable: true, recoveryHint: "ambiguous-headers-transport-v1" });
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { mode: "off", latchConsumed: false, attemptStarted: false, remoteOutcomeUnknown: true } });
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("does not promote a body timeout and preserves same-input retry", async () => {
+      const originalFetch = globalThis.fetch;
+      const requestBodies: string[] = [];
+      let fetchCalls = 0;
+      vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls += 1;
+        requestBodies.push(String(init?.body ?? ""));
+        if (fetchCalls === 1) return jsonResponse(clickPayload);
+        if (fetchCalls === 2) return { ok: true, status: 200, json: async () => { throw Object.assign(new TypeError("controlled body timeout"), { cause: { code: "ETIMEDOUT" } }); } } as Response;
+        return jsonResponse(finishPayload);
+      }) as unknown as typeof fetch);
+      const computer = new FakeComputer();
+      const created = await makeController(adapter(500), computer, clickRegistry(), new DefaultRuntimePolicy(10, 5), { providerRecovery: "ambiguous-headers-once-v1" });
+      try {
+        await expect(created.controller.start("body error stays outside ambiguous header recovery")).resolves.toBe("succeeded");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        const starts = startEvents(events);
+        const failedIndex = events.findIndex((event) => event.type === "model.request.failed");
+        const failed = events[failedIndex];
+        expect(fetchCalls).toBe(3);
+        expect(failed).toMatchObject({ retryable: true });
+        expect(failed?.type === "model.request.failed" ? failed.recoveryHint : undefined).toBeUndefined();
+        expect(starts).toHaveLength(3);
+        expect(starts[1]?.decisionId).toBe(starts[2]?.decisionId);
+        expect(starts[1]?.preparedRequest?.payloadHash).toBe(starts[2]?.preparedRequest?.payloadHash);
+        expect(requestBodies[1]).toBe(requestBodies[2]);
+        expect(events.filter((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toHaveLength(0);
+        expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("does not run recovery after the real request budget is exhausted", async () => {
+      const originalFetch = globalThis.fetch;
+      let fetchCalls = 0;
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) return jsonResponse(clickPayload);
+        throw Object.assign(new TypeError("controlled header transport timeout"), { cause: { code: "ETIMEDOUT" } });
+      }) as unknown as typeof fetch);
+      const computer = new FakeComputer();
+      const created = await makeController(adapter(500), computer, clickRegistry(), new DefaultRuntimePolicy(10, 2), {
+        providerRecovery: "ambiguous-headers-once-v1", providerAttemptReserveMs: 90_000,
+      });
+      try {
+        await expect(created.controller.start("model request budget boundary")).resolves.toBe("failed");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        expect(fetchCalls).toBe(2);
+        expect(startEvents(events)).toHaveLength(2);
+        expect(events.some((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toBe(false);
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: false, attemptStarted: false } });
+        expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("shares the one-use latch across real local-timeout and transport failures", async () => {
+      const originalFetch = globalThis.fetch;
+      let fetchCalls = 0;
+      vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) return jsonResponse(clickPayload);
+        if (fetchCalls === 2) {
+          return new Promise<never>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal === undefined || signal === null) { reject(new Error("missing fixture AbortSignal")); return; }
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        throw Object.assign(new TypeError("controlled second header transport timeout"), { cause: { code: "ETIMEDOUT" } });
+      }) as unknown as typeof fetch);
+      const computer = new FakeComputer();
+      const created = await makeController(adapter(20), computer, clickRegistry(), new DefaultRuntimePolicy(10, 5), {
+        providerRecovery: "ambiguous-headers-once-v1", providerAttemptReserveMs: 90_000,
+      });
+      try {
+        await expect(created.controller.start("real adapter shared one-use boundary")).resolves.toBe("failed");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        const hints = events.flatMap((event) => event.type === "model.request.failed" && event.recoveryHint !== undefined ? [event.recoveryHint] : []);
+        expect(fetchCalls).toBe(3);
+        expect(startEvents(events)).toHaveLength(3);
+        expect(events.filter((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toHaveLength(1);
+        expect(hints).toEqual(["ambiguous-headers-timeout-v1", "ambiguous-headers-transport-v1"]);
+        expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "failed", providerRecoveryState: { latchConsumed: true, attemptStarted: true, remoteOutcomeUnknown: true } });
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+
+    it("does not classify an external Run abort as transport recovery", async () => {
+      const originalFetch = globalThis.fetch;
+      let controller: RunController | undefined;
+      let fetchCalls = 0;
+      vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls += 1;
+        return new Promise<never>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal === undefined || signal === null) { reject(new Error("missing fixture AbortSignal")); return; }
+          setTimeout(() => controller?.cancel("controlled external cancellation"), 0);
+          signal.addEventListener("abort", () => reject(Object.assign(new TypeError("aborted fetch"), { cause: { code: "ETIMEDOUT" } })), { once: true });
+        });
+      }) as unknown as typeof fetch);
+      const created = await makeController(adapter(500), new FakeComputer(), clickRegistry(), new DefaultRuntimePolicy(10, 4), { providerRecovery: "ambiguous-headers-once-v1" });
+      controller = created.controller;
+      try {
+        await expect(controller.start("abort boundary composition")).resolves.toBe("cancelled");
+        const events = await readRuntimeEvents(join(created.directory, "trajectory.jsonl"));
+        expect(fetchCalls).toBe(1);
+        expect(events.some((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toBe(false);
+        expect(events.some((event) => event.type === "model.request.failed" && event.recoveryHint !== undefined)).toBe(false);
+        expect(events.at(-1)).toMatchObject({ type: "run.finished", outcome: "cancelled", providerRecoveryState: { latchConsumed: false, attemptStarted: false } });
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+        await rm(created.directory, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("keeps ambiguous-header recovery off by default", async () => {
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "typed-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted(); calls += 1;
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const { controller, directory } = await makeController(provider);
+    await expect(controller.start("do not recover unless opted in")).resolves.toBe("failed");
+    expect(calls).toBe(1);
+    expect(controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { mode: "off", latchConsumed: false, attemptStarted: false, remoteOutcomeUnknown: true } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not schedule recovery when the existing request budget has no next slot", async () => {
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "typed-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted(); calls += 1;
+        if (calls === 1) return { type: "tool_calls", calls: [clickCall("budget-before-timeout")] };
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const { controller, computer, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 2), {
+      providerRecovery: "ambiguous-headers-once-v1", providerAttemptReserveMs: 90_000,
+    });
+    await expect(controller.start("do not bypass the request budget")).resolves.toBe("failed");
+    expect(calls).toBe(2);
+    expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+    expect(controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: false, attemptStarted: false } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("consumes only one recovery decision even if that fresh request also has an ambiguous timeout", async () => {
+    let calls = 0;
+    const provider: ProviderAdapter = {
+      id: "typed-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted(); calls += 1;
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const { controller, directory } = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerAttemptReserveMs: 90_000,
+    });
+    await expect(controller.start("one recovery decision only")).resolves.toBe("failed");
+    const events = await readRuntimeEvents(join(directory, "trajectory.jsonl"));
+    expect(calls).toBe(2);
+    expect(events.filter((event) => event.type === "model.request.started")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: true, attemptStarted: true, remoteOutcomeUnknown: true } });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("gives cancellation priority over scheduling a recovery decision", async () => {
+    let calls = 0;
+    let controller: RunController | undefined;
+    const provider: ProviderAdapter = {
+      id: "typed-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted(); calls += 1;
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerAttemptReserveMs: 90_000,
+      onEventCommitted(event) { if (event.type === "model.request.failed") controller?.cancel("cancel wins recovery"); },
+    });
+    controller = created.controller;
+    await expect(controller.start("cancel before recovery scheduling")).resolves.toBe("cancelled");
+    expect(calls).toBe(1);
+    expect(controller.getEvents().some((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1")).toBe(false);
+    expect(controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: false, attemptStarted: false } });
+    await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("does not escape the absolute window when fresh observation consumes the remaining reserve", async () => {
+    let now = 0;
+    let failed = false;
+    let calls = 0;
+    const clockSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const provider: ProviderAdapter = {
+      id: "typed-timeout-provider",
+      async generate(_input, options) {
+        options.signal.throwIfAborted(); calls += 1;
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 90_001, providerAttemptReserveMs: 90_000,
+      onEventCommitted(event) {
+        if (event.type === "model.request.failed") failed = true;
+        if (failed && event.type === "observation.created") now = 20_000;
+      },
+    });
+    try {
+      await expect(created.controller.start("expire recovery reserve during fresh observation")).resolves.toBe("failed");
+      expect(calls).toBe(1);
+      expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.message.includes("recovery window"))).toBe(true);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: true, attemptStarted: false, remoteOutcomeUnknown: true } });
+    } finally {
+      clockSpy.mockRestore();
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["at_failure", "after_observation", "after_preparation"] as const)("keeps the hard Run clock authoritative over ambiguous-header recovery (%s)", async (boundary) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let generated = 0;
+    let prepared = 0;
+    let failed = false;
+    const provider: ProviderAdapter = {
+      id: "hard-clock-recovery-provider",
+      async prepare(_input, options) {
+        options.signal.throwIfAborted();
+        prepared += 1;
+        if (boundary === "after_preparation" && prepared === 2) vi.setSystemTime(Date.now() + 10_000);
+        return { providerId: "hard-clock-recovery-provider", payloadHash: `clock-${prepared}` };
+      },
+      async generate() { throw new Error("fixture must use prepared requests"); },
+      async generatePrepared(_request, options) {
+        options.signal.throwIfAborted();
+        generated += 1;
+        if (boundary === "at_failure") vi.setSystemTime(Date.now() + 10_000);
+        throw new GlmProviderError("typed pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 900_000,
+      providerAttemptReserveMs: 90_000, runTimeoutMs: 100_000, finishReserveMs: 1_000,
+      onEventCommitted(event) {
+        if (event.type === "model.request.failed") failed = true;
+        if (boundary === "after_observation" && failed && event.type === "observation.created") vi.setSystemTime(Date.now() + 10_000);
+      },
+    });
+    try {
+      await expect(created.controller.start("preserve the hard clock during opt-in recovery")).resolves.toBe("failed");
+      expect(generated).toBe(1);
+      expect(prepared).toBe(boundary === "after_preparation" ? 2 : 1);
+      expect(created.controller.getEvents().filter((event) => event.type === "model.request.started")).toHaveLength(1);
+      expect(created.controller.getEvents().some((event) => event.type === "model.request.started" && event.recoveryAttempt !== undefined)).toBe(false);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: boundary !== "at_failure", attemptStarted: false, remoteOutcomeUnknown: true } });
+      expect(created.computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+    } finally {
+      await rm(created.directory, { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+
+  it("checks the full reserve again after fresh Provider preparation", async () => {
+    let now = 0;
+    let generated = 0;
+    const clockSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const provider: ProviderAdapter = {
+      id: "prepared-typed-timeout-provider",
+      async prepare(_input, options) {
+        options.signal.throwIfAborted();
+        if (++prepareCalls === 2) now = 20_000;
+        return { providerId: "prepared-typed-timeout-provider", payloadHash: `p-${prepareCalls}`, estimate: { estimatedTextTokens: 1, imageCount: 0, estimationMethod: "context_report" } };
+      },
+      async generate() { throw new Error("generate should use prepared request"); },
+      async generatePrepared(_request, options) {
+        options.signal.throwIfAborted(); generated += 1;
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    let prepareCalls = 0;
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 90_001, providerAttemptReserveMs: 90_000,
+    });
+    try {
+      await expect(created.controller.start("expire recovery reserve after prepare")).resolves.toBe("failed");
+      expect(prepareCalls).toBe(2);
+      expect(generated).toBe(1);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", providerRecoveryState: { latchConsumed: true, attemptStarted: false } });
+    } finally {
+      clockSpy.mockRestore();
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("gives cancellation priority when fresh preparation also exhausts recovery reserve", async () => {
+    let now = 0;
+    let prepareCalls = 0;
+    let generated = 0;
+    let controller: RunController | undefined;
+    const clockSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const provider: ProviderAdapter = {
+      id: "prepared-typed-timeout-provider",
+      async prepare(_input, options) {
+        options.signal.throwIfAborted();
+        prepareCalls += 1;
+        if (prepareCalls === 2) {
+          now = 20_000;
+          controller?.cancel("cancel takes priority over exhausted recovery reserve");
+        }
+        return { providerId: "prepared-typed-timeout-provider", payloadHash: `p-${prepareCalls}`, estimate: { estimatedTextTokens: 1, imageCount: 0, estimationMethod: "context_report" } };
+      },
+      async generate() { throw new Error("generate should use prepared request"); },
+      async generatePrepared(_request, options) {
+        options.signal.throwIfAborted(); generated += 1;
+        throw new GlmProviderError("local pre-header timeout", "GLM_REQUEST_TIMEOUT", false, "feedback", {
+          kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown",
+        });
+      },
+    };
+    const created = await makeController(provider, undefined, clickRegistry(), new DefaultRuntimePolicy(10, 4), {
+      providerRecovery: "ambiguous-headers-once-v1", providerRecoveryRunWindowMs: 90_001, providerAttemptReserveMs: 90_000,
+    });
+    controller = created.controller;
+    try {
+      await expect(created.controller.start("cancel while fresh preparation exhausts recovery reserve")).resolves.toBe("cancelled");
+      expect(prepareCalls).toBe(2);
+      expect(generated).toBe(1);
+      expect(created.controller.getEvents().some((event) => event.type === "runtime.error" && event.message.includes("recovery window"))).toBe(false);
+      expect(created.controller.getEvents().at(-1)).toMatchObject({ type: "run.finished", outcome: "cancelled", providerRecoveryState: { latchConsumed: true, attemptStarted: false } });
+    } finally {
+      clockSpy.mockRestore();
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
   it("retries retryable Provider response errors with an explicit reason before any action", async () => {
     let requests = 0;
     const inputs: ModelInput[] = [];
@@ -4394,6 +5620,59 @@ describe("RunController S2-4 failure boundaries", () => {
     expect(events.some((event) => event.type === "runtime.error" && event.category === "partial_side_effect")).toBe(true);
     expect(events.some((event) => event.type === "run.finished" && event.outcome === "outcome_unknown")).toBe(true);
     await rm(created.directory, { recursive: true, force: true });
+  });
+
+  it("places incomplete native typing behind a fresh-screen user boundary without replay", async () => {
+    class UnresolvedIncompleteTypeComputer extends FakeComputer {
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return {
+          actionId: action.actionId,
+          status: "partial" as const,
+          driverCode: "ACTION_OUTCOME_UNKNOWN",
+          message: "Native typing delivered 8 of 21 requested characters. Inspect the screen; do not repeat.",
+        };
+      }
+      public async detectNewWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return [] as readonly ComputerWindowCandidate[];
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        return [] as readonly ComputerWindowCandidate[];
+      }
+    }
+    const computer = new UnresolvedIncompleteTypeComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [typeCall("incomplete-type-action")] },
+      { type: "finish", summary: "operator confirmed the screen", reportedStatus: "success" },
+    ]);
+    const { controller, directory } = await makeController(
+      provider,
+      computer,
+      batchRegistry(),
+      new DefaultRuntimePolicy(),
+      { windowHandoff: "confirm-v1" },
+    );
+    const running = controller.start("type text safely");
+    try {
+      await waitUntil(() => controller.getSnapshot().status === "waiting_user" || controller.getSnapshot().status === "finished");
+      expect(controller.getSnapshot().status, JSON.stringify(controller.getEvents())).toBe("waiting_user");
+      expect(controller.getSnapshot().pendingUserQuestion).toContain("不要重复刚才的操作");
+      expect(provider.inputs).toHaveLength(1);
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+      expect(controller.getEvents().some((event) => event.type === "user.input.requested" && /不要重复/u.test(event.question))).toBe(true);
+
+      await controller.submitUserInput("I checked the screen; continue safely.");
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.calls.filter((call) => call === "execute:type")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("test cleanup");
+      await running.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("continues from a freshly re-observed exact native Surface after generic foreground reconfirmation", async () => {
@@ -5483,6 +6762,78 @@ describe("RunController model-directed window switching", () => {
     arguments: { windowRef },
   });
 
+  it("continues after explicit restoration of the current owned browser without replaying the refused action", async () => {
+    class OwnedBrowserRestoreComputer extends NativeWindowObservationComputer {
+      public readonly candidate: ComputerWindowCandidate = {
+        pid: 901, windowId: 1901, appName: "Harness-managed browser", title: "Run-owned browser window",
+        handoffToken: "restore-current-token", restoreCurrentManagedBrowser: true,
+      };
+      public restoreCalls = 0;
+      public override async execute(_session: ComputerSession, action: ActionIntent, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push(`execute:${action.kind}`);
+        return { actionId: action.actionId, status: "refused" as const, driverCode: "WINDOW_FOREGROUND_MISMATCH", message: "no input was sent" };
+      }
+      public async listWindowHandoffCandidates(_session: ComputerSession, signal: AbortSignal) {
+        signal.throwIfAborted();
+        this.calls.push("listCurrentOwnedBrowserRestore");
+        return [this.candidate];
+      }
+      public async handoffWindow(_session: ComputerSession, candidate: ComputerWindowCandidate, signal: AbortSignal) {
+        signal.throwIfAborted();
+        expect(candidate).toEqual(this.candidate);
+        this.restoreCalls += 1;
+        this.calls.push("restoreCurrentOwnedBrowser");
+        return this.session;
+      }
+    }
+
+    const computer = new OwnedBrowserRestoreComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [clickCall("owned-browser-refused-once")] },
+      { type: "finish", summary: "continued after exact browser restoration" },
+    ]);
+    let controller!: RunController;
+    let resolveWaitingWindow!: (event: Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>) => void;
+    const waitingWindowCommitted = new Promise<Extract<RuntimeEvent, { type: "computer.window.handoff.requested" }>>((resolve) => {
+      resolveWaitingWindow = resolve;
+    });
+    const created = await makeController(provider, computer, windowSwitchRegistry(), new DefaultRuntimePolicy(), {
+      windowHandoff: "confirm-v1",
+      windowSwitch: "opened-windows-v1",
+      onEventCommitted(event) {
+        if (event.type === "computer.window.handoff.requested" && event.reasonCode === "foreground_mismatch" &&
+            controller.getSnapshot().status === "waiting_window") resolveWaitingWindow(event);
+      },
+    });
+    controller = created.controller;
+    const running = controller.start("continue only after explicit restoration of this Run's browser");
+    try {
+      await Promise.race([
+        waitingWindowCommitted,
+        running.then((outcome) => { throw new Error(`run reached ${outcome} before explicit restore confirmation`); }),
+      ]);
+      const waiting = controller.getSnapshot();
+      expect(waiting.status).toBe("waiting_window");
+      expect(waiting.pendingWindowHandoff?.reasonCode).toBe("foreground_mismatch");
+      const candidates = await controller.listWindowHandoffCandidates(new AbortController().signal);
+      expect(candidates).toEqual([computer.candidate]);
+      await controller.handoffWindow(candidates[0]!, waiting.pendingWindowHandoff!.sourceActionId);
+      await expect(running).resolves.toBe("succeeded");
+      expect(computer.restoreCalls).toBe(1);
+      expect(computer.calls.filter((call) => call === "execute:click")).toHaveLength(1);
+      expect(computer.calls.filter((call) => call.startsWith("observe:")).length).toBe(2);
+      expect(provider.inputs).toHaveLength(2);
+      expect(controller.getEvents().filter((event) => event.type === "computer.window.handoff.completed")).toHaveLength(1);
+      expect(controller.getEvents().filter((event) => event.type === "action.execution.started")).toHaveLength(1);
+      expect(controller.getEvents().filter((event) => event.type === "action.execution.failed")).toHaveLength(1);
+    } finally {
+      if (controller.getSnapshot().status !== "finished") controller.cancel("fixture cleanup");
+      await running.catch(() => undefined);
+      await rm(created.directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves ordinary explicit recovery when the post-action inventory first discovers the bound window vanished", async () => {
     class VanishedWindowComputer extends NativeWindowObservationComputer {
       public actionId!: ActionId;
@@ -5610,6 +6961,131 @@ describe("RunController model-directed window switching", () => {
           guidance: expect.stringContaining("does not prove creation, ownership, foreground, or relation"),
         },
       });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("passes an incomplete inventory with no known omitted candidates through list_windows", async () => {
+    class IncompleteInventoryComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        return {
+          options: [
+            { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true },
+            { windowRef: "opaque-target", appName: "TextEdit", title: "Open", isCurrent: false },
+          ],
+          truncated: true,
+          omittedCount: 0,
+        };
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new IncompleteInventoryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("incomplete-inventory")] },
+      { type: "finish", summary: "inventory was incomplete; no known candidates were omitted" },
+    ]);
+    const contextCompiler = new TestContextCompiler(registry);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      contextCompiler,
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("inspect the available windows")).resolves.toBe("succeeded");
+      const result = controller.getEvents().find((event): event is Extract<RuntimeEvent, { type: "tool.call.completed" }> =>
+        event.type === "tool.call.completed" && event.result.callId === ("incomplete-inventory" as ToolCallId));
+      expect(result?.result.output).toEqual({
+        windows: [
+          { windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true },
+          { windowRef: "opaque-target", appName: "TextEdit", title: "Open", isCurrent: false },
+        ],
+        truncated: true,
+        omittedCount: 0,
+      });
+      expect(contextCompiler.inputs.at(-1)?.windowSwitchState).toMatchObject({
+        truncated: true,
+        omittedCount: 0,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "isOnScreen", value: "false" },
+    { label: "isOnScreen", value: 0 },
+    { label: "isOnScreen", value: null },
+    { label: "minimized", value: "true" },
+    { label: "minimized", value: 1 },
+    { label: "minimized", value: null },
+  ])("rejects non-boolean window $label metadata ($value) without GUI input", async ({ label, value }) => {
+    class MalformedVisibilityComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        return {
+          options: [{ windowRef: "invalid-visibility", isCurrent: false, [label]: value } as unknown as ComputerWindowOption],
+          truncated: false,
+          omittedCount: 0,
+        };
+      }
+    }
+    const registry = windowSwitchRegistry();
+    const computer = new MalformedVisibilityComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("invalid-visibility")] },
+      { type: "finish", summary: "did not act on malformed inventory" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("inspect window visibility without input")).resolves.toBe("succeeded");
+      expect(controller.getEvents().some((event) => event.type === "tool.call.failed" &&
+        event.result.callId === ("invalid-visibility" as ToolCallId) &&
+        event.result.error.message === `Computer window inventory option 0 has invalid ${label} metadata`)).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.completed" &&
+        event.result.callId === ("invalid-visibility" as ToolCallId))).toBe(false);
+      expect(computer.calls.some((call) => call.startsWith("execute:"))).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { label: "known omissions without truncation", truncated: false, omittedCount: 1 },
+    { label: "negative omitted count", truncated: true, omittedCount: -1 },
+  ])("rejects malformed inventory truncation metadata: $label", async ({ truncated, omittedCount }) => {
+    class MalformedInventoryComputer extends WindowSwitchComputer {
+      public override async listWindows(_session: ComputerSession, signal: AbortSignal): Promise<ComputerWindowList> {
+        signal.throwIfAborted();
+        this.inventoryCalls += 1;
+        return {
+          options: [{ windowRef: "opaque-current", appName: "Editor", title: "Draft", isCurrent: true }],
+          truncated,
+          omittedCount,
+        };
+      }
+    }
+
+    const registry = windowSwitchRegistry();
+    const computer = new MalformedInventoryComputer();
+    const provider = new ScriptedProvider([
+      { type: "tool_calls", calls: [listWindowsCall("malformed-inventory")] },
+      { type: "finish", summary: "the malformed inventory was rejected" },
+    ]);
+    const { controller, directory } = await makeController(provider, computer, registry, new DefaultRuntimePolicy(), {
+      windowSwitch: "opened-windows-v1",
+    });
+    try {
+      await expect(controller.start("inspect the available windows")).resolves.toBe("succeeded");
+      expect(controller.getEvents().some((event) => event.type === "tool.call.failed" &&
+        event.result.callId === ("malformed-inventory" as ToolCallId) &&
+        event.result.error.message === "Computer window candidate projection has invalid truncation metadata")).toBe(true);
+      expect(controller.getEvents().some((event) => event.type === "tool.call.completed" &&
+        event.result.callId === ("malformed-inventory" as ToolCallId))).toBe(false);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

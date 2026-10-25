@@ -206,6 +206,18 @@ export class RemoteRunApiError extends Error {
   }
 }
 
+/** Host-local diagnostics only; no request secrets or private computer fields. */
+export interface RemoteRunStartedReceipt {
+  readonly commandId: string;
+  readonly runId: string;
+  readonly target: { readonly mode: RemoteRunTarget["mode"]; readonly switchWindows: boolean };
+  readonly effective: {
+    readonly windowSwitch: NonNullable<RunHandle["config"]["windowSwitch"]>;
+    readonly grounding: NonNullable<RunHandle["config"]["grounding"]>;
+    readonly windowHandoff: NonNullable<RunHandle["config"]["windowHandoff"]>;
+  };
+}
+
 export interface ApplicationRemoteRunApiOptions {
   readonly session: ApplicationSession;
   readonly capabilities: RemoteRunCapabilities;
@@ -224,6 +236,8 @@ export interface ApplicationRemoteRunApiOptions {
   readonly runNotices?: { readonly enabled: boolean; readonly dynamicContentEnabled?: boolean };
   /** Optional explicit semantic selector for initial target matching; never used to perform GUI actions. */
   readonly windowSelector?: WindowSelectionStrategy;
+  /** Diagnostics cannot change a created Run's result or trigger another start. */
+  readonly onRunStarted?: (receipt: RemoteRunStartedReceipt) => void | Promise<void>;
 }
 
 /** Adapts ApplicationSession and its committed feed into a redacted remote view. */
@@ -245,6 +259,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
   private readonly readManagedBrowserStartupUrls: typeof readManagedBrowserStartupUrls;
   private readonly runNotices: ApplicationRemoteRunApiOptions["runNotices"];
   private readonly windowSelector: ApplicationRemoteRunApiOptions["windowSelector"];
+  private readonly onRunStarted: ApplicationRemoteRunApiOptions["onRunStarted"];
   private startInProgress = false;
   private windowPreviewInProgress = false;
 
@@ -263,6 +278,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     this.readManagedBrowserStartupUrls = options.readManagedBrowserStartupUrls ?? readManagedBrowserStartupUrls;
     this.runNotices = options.runNotices?.enabled === true ? options.runNotices : undefined;
     this.windowSelector = options.windowSelector;
+    this.onRunStarted = options.onRunStarted;
     if (this.managedBrowserProfile !== undefined &&
         (!/^[A-Za-z0-9._-]{1,64}$/u.test(this.managedBrowserProfile.profileLabel) || this.managedBrowserProfile.profileRoot.trim().length === 0)) {
       throw new Error("managed browser readiness requires a bounded profile label and explicit Host-owned profile root");
@@ -387,7 +403,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     }
     const previewToken = randomBytes(24).toString("base64url");
     const previewExpiresAt = this.now() + WINDOW_PREVIEW_PROOF_TTL_MS;
-    record.candidates.set(candidateToken, { ...candidate, previewToken, previewExpiresAt });
+    record.candidates.set(candidateToken, { ...candidate, candidate: after, previewToken, previewExpiresAt });
     return projectWindowCandidatePreview(preview, previewToken, new Date(previewExpiresAt).toISOString(), projectWindowRelationship(record, after));
     } finally {
       this.windowPreviewInProgress = false;
@@ -563,8 +579,33 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
     // Reserve the idempotency key synchronously before fresh discovery yields.
     this.startRequests.set(key, { goal: cleanGoal, targetFingerprint, assistantPreferencesFingerprint, runNoticeContentEnabled: runNoticeContentEnabledInput, promise });
     void this.resolveTargetAndCreateRun(deviceId, cleanGoal, target, selectedTarget, assistantPreferences, runNoticeContentEnabledInput, managedBrowserDefaultSession)
-      .then(resolvePromise, rejectPromise);
+      .then((snapshot) => {
+        this.notifyRunStarted(cleanCommandId, target, snapshot);
+        resolvePromise(snapshot);
+      }, rejectPromise);
     return promise;
+  }
+
+  private notifyRunStarted(commandId: string, target: RemoteRunTarget, snapshot: RemoteRunSnapshot): void {
+    const record = this.runs.get(snapshot.runId);
+    if (this.onRunStarted === undefined || record === undefined) return;
+    const config = record.handle.config;
+    const receipt: RemoteRunStartedReceipt = {
+      commandId,
+      runId: snapshot.runId,
+      target: { mode: target.mode, switchWindows: target.switchWindows === true },
+      effective: {
+        windowSwitch: config.windowSwitch ?? "off",
+        grounding: config.grounding ?? "off",
+        windowHandoff: config.windowHandoff ?? "off",
+      },
+    };
+    try {
+      // This is observational. A broken diagnostic sink must never turn an
+      // already-created Run into a reported start failure or an unhandled
+      // rejection, including for an asynchronous sink.
+      void Promise.resolve(this.onRunStarted(receipt)).catch(() => undefined);
+    } catch { /* preserve the successful start and its idempotency record */ }
   }
 
   private async resolveTargetAndCreateRun(
@@ -915,6 +956,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         featureOverrides = {
           windowTarget: null,
           grounding: "hybrid-catalog-v1",
+          windowHandoff: "off",
           managedBrowserUrl: target.url,
           managedBrowserProfileMode: "persistent",
           managedBrowserProfileLabel: this.managedBrowserProfile.profileLabel,
@@ -925,6 +967,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
         featureOverrides = {
           windowTarget: null,
           grounding: "hybrid-catalog-v1",
+          windowHandoff: "off",
           managedBrowserUrl: target.url,
           managedBrowserProfileMode: "ephemeral",
           windowSwitch,
@@ -1373,6 +1416,7 @@ export class ApplicationRemoteRunApi implements RemoteRunApi {
             ...(appName === undefined ? {} : { appName }),
             ...(title === undefined ? {} : { title }),
             ...(relationship === undefined ? {} : { relationship }),
+            ...(entry.candidate.restoreCurrentManagedBrowser === true ? { restoreCurrentManagedBrowser: true as const } : {}),
             ...(entry.previewRequired ? { previewRequired: true } : {}),
           };
         });
@@ -1510,6 +1554,7 @@ function projectRuntimeEvent(event: RuntimeEvent, reply: string | undefined): Re
         category: safeIssueCategory(event.category),
         ...(code === undefined ? {} : { code }),
         ...(event.retryable === undefined ? {} : { retryable: event.retryable }),
+        ...(event.recoveryHint === undefined ? {} : { recoveryHint: event.recoveryHint }),
       };
     }
     case "action.proposed":
@@ -1871,12 +1916,13 @@ function windowDiscoveryError(error: unknown, message: string): RemoteRunApiErro
 }
 
 function sameWindowIdentity(
-  left: { readonly pid: number; readonly windowId: number; readonly appName?: string },
-  right: { readonly pid: number; readonly windowId: number; readonly appName?: string },
+  left: { readonly pid: number; readonly windowId: number; readonly appName?: string; readonly restoreCurrentManagedBrowser?: true },
+  right: { readonly pid: number; readonly windowId: number; readonly appName?: string; readonly restoreCurrentManagedBrowser?: true },
 ): boolean {
   const leftAppName = boundedText(left.appName, 256)?.normalize("NFKC").toLocaleLowerCase();
   const rightAppName = boundedText(right.appName, 256)?.normalize("NFKC").toLocaleLowerCase();
   return left.pid === right.pid && left.windowId === right.windowId &&
+    left.restoreCurrentManagedBrowser === right.restoreCurrentManagedBrowser &&
     (leftAppName === undefined || rightAppName === undefined || leftAppName === rightAppName);
 }
 

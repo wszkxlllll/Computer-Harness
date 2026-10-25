@@ -49,6 +49,17 @@ function desktopProjection(catalog: GroundingCatalog | undefined): string {
 }
 
 describe("runtime projections for action effects and desktop grounding", () => {
+  it("keeps the Run-bound current marker distinct from physical foreground", () => {
+    const text = formatWindowSwitchState(session(), {
+      currentWindow: { appName: "TextEdit", title: "Untitled" },
+      options: [{ windowRef: "bound-textedit", appName: "TextEdit", title: "Untitled", isCurrent: true }],
+    }, undefined, viewport, "desktop") ?? "";
+    expect(text).toContain("windowRef=bound-textedit [current]");
+    expect(text).toContain("means the Run-bound target, not proof that the window is physically in the foreground");
+    expect(text).toContain("do not treat the current marker as focus confirmation");
+  });
+
+
   it("requires same-Run evidence before claiming a requested mutation was completed", () => {
     const text = composeSystemPrompt("Base prompt", {
       planning: "off",
@@ -74,6 +85,23 @@ describe("runtime projections for action effects and desktop grounding", () => {
     expect(text).toContain("A screenshot that does not show an approval cannot establish that approval was unnecessary or did not occur");
     expect(text).toContain("unless explicit Runtime evidence says so, do not state whether approval occurred");
     expect(text).not.toContain("Never imply approval/safety");
+  });
+
+  it("distinguishes a confirmed new local save from protected or uncertain save consequences", () => {
+    const text = composeSystemPrompt("Base prompt", {
+      planning: "off",
+      memory: "off",
+      batching: "off",
+      riskGuard: "layered",
+    });
+    expect(text).toContain("Declare effects from the action's actual consequences, not a button label");
+    expect(text).toContain("Saving to a new local task file at the user's explicitly requested path is local_edit only when the destination is confirmed, the file is new");
+    expect(text).toContain("there is no overwrite, upload, sync, sharing or sending");
+    expect(text).toContain("external_commitment means an outward commitment, such as placing an order, accepting a contract or starting a subscription");
+    expect(text).toContain("A Save label alone does not establish local_edit");
+    expect(text).toContain("overwriting an unrelated file, uploading/syncing/sharing, or an uncertain destination requires the applicable protected effect");
+    expect(text).toContain("such as destructive, sensitive_disclosure or external_commitment");
+    expect(text).toContain("or unknown when the consequences are uncertain; never hide these consequences as local_edit");
   });
 
   it("classifies Planning and Memory as schema-only non-Computer tools for effect metadata", () => {

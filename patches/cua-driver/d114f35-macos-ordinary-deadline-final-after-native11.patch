@@ -1,0 +1,3890 @@
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+@@ -78,6 +78,11 @@
+         element: AXUIElementRef,
+         attribute: CFStringRef,
+         value: *mut CFTypeRef,
++    ) -> AXError;
++    pub fn AXUIElementGetAttributeValueCount(
++        element: AXUIElementRef,
++        attribute: CFStringRef,
++        count: *mut isize,
+     ) -> AXError;
+     pub fn AXUIElementCopyAttributeNames(
+         element: AXUIElementRef,
+@@ -256,6 +261,50 @@
+     Ok(names)
+ }
+ 
++/// Copy a complete AX attribute-name list only when its cardinality is within
++/// the caller's explicit bound. This is separate from the legacy helper so
++/// its existing callers retain their original behavior.
++///
++/// # Safety
++/// `element` must remain valid for the duration of the AX call.
++pub unsafe fn copy_attribute_names_bounded(
++    element: AXUIElementRef,
++    max_names: usize,
++) -> Result<Vec<String>, AXError> {
++    let mut value: CFArrayRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeNames(element, &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value as CFTypeRef);
++        }
++        return Err(if error == kAXErrorSuccess {
++            kAXErrorFailure
++        } else {
++            error
++        });
++    }
++    if core_foundation::base::CFGetTypeID(value as CFTypeRef) != CFArray::<CFTypeRef>::type_id() {
++        CFRelease(value as CFTypeRef);
++        return Err(kAXErrorFailure);
++    }
++    let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value);
++    if array.len() < 0 || array.len() as usize > max_names {
++        return Err(kAXErrorFailure);
++    }
++    let mut names = Vec::with_capacity(array.len() as usize);
++    for index in 0..array.len() {
++        let Some(item_ref) = array.get(index) else {
++            return Err(kAXErrorFailure);
++        };
++        let item = *item_ref;
++        if item.is_null() || core_foundation::base::CFGetTypeID(item) != CFStr::type_id() {
++            return Err(kAXErrorFailure);
++        }
++        names.push(CFStr::wrap_under_get_rule(item as _).to_string());
++    }
++    Ok(names)
++}
++
+ /// Copy a required AX string attribute and preserve missing/type/read failures.
+ ///
+ /// # Safety
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/ordinary_sharing_control.rs
+@@ -7,9 +7,9 @@
+ #![allow(non_upper_case_globals)]
+ 
+ use super::bindings::{
+-    kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess, AXUIElementCopyAttributeValue,
+-    AXUIElementCreateApplication, AXUIElementGetPid, AXUIElementGetTypeID, AXUIElementRef,
+-    AXUIElementSetMessagingTimeout,
++    copy_attribute_names_bounded, kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess,
++    AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementGetAttributeValueCount,
++    AXUIElementGetPid, AXUIElementGetTypeID, AXUIElementRef, AXUIElementSetMessagingTimeout,
+ };
+ use core_foundation::{
+     array::CFArray,
+@@ -22,8 +22,10 @@
+ 
+ const MAX_WINDOWS: usize = 32;
+ const MAX_NODES: usize = 2;
++const MAX_ATTRIBUTE_NAMES: usize = 64;
+ const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.025;
+ const EXPECTED_CONTROL: &str = "WindowSharingSessionButton";
++const K_AX_ERROR_ILLEGAL_ARGUMENT: i32 = -25201;
+ 
+ thread_local! {
+     static AX_DEADLINE: RefCell<Option<Instant>> = const { RefCell::new(None) };
+@@ -87,6 +89,60 @@
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "snake_case")]
++pub(crate) enum InspectionPass {
++    Initial,
++    Recheck,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum InspectionStage {
++    Preflight,
++    CreateApplication,
++    ReadAxWindows,
++    MatchCandidateIdentity,
++    ReadRootAttributes,
++    ReadChildAttributes,
++    ReadFocusEvidence,
++    ReadDialogEvidence,
++    ReadRootTail,
++    SemanticClassification,
++}
++
++#[derive(Debug, Clone, Copy)]
++struct StageTrace {
++    stage: InspectionStage,
++    status: &'static str,
++}
++
++impl StageTrace {
++    fn new() -> Self {
++        Self {
++            stage: InspectionStage::Preflight,
++            status: "not_started",
++        }
++    }
++
++    fn begin(&mut self, stage: InspectionStage, deadline: Instant) -> bool {
++        if Instant::now() >= deadline {
++            return false;
++        }
++        self.stage = stage;
++        self.status = "started";
++        true
++    }
++
++    fn complete(&mut self, deadline: Instant) -> bool {
++        if Instant::now() >= deadline {
++            return false;
++        }
++        self.status = "completed";
++        true
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
+ enum Classification {
+     SharingControl,
+     Ordinary,
+@@ -104,6 +160,7 @@
+ #[serde(rename_all = "snake_case")]
+ enum Reason {
+     ExactNarrowSharingControl,
++    ExactDialogControlChildStateNotSupported,
+     IncompleteSnapshot,
+     TooManyWindows,
+     AxWindowsUnavailable,
+@@ -150,6 +207,8 @@
+     root_subrole_status: &'static str,
+     exact_child_count: Option<usize>,
+     child_role_status: &'static str,
++    child_modal_status: &'static str,
++    child_main_status: &'static str,
+     semantic_source: SemanticSource,
+     focused_window_status: &'static str,
+     focused_element_status: &'static str,
+@@ -157,15 +216,21 @@
+     relation_status: &'static str,
+     fresh_tail_status: &'static str,
+     point_occlusion_policy: &'static str,
++    inspection_pass: InspectionPass,
++    last_stage: InspectionStage,
++    last_stage_status: &'static str,
++    elapsed_ms: u64,
++    diagnostic_only_partial: bool,
+ }
+ 
+ impl ClassificationDiagnostic {
+     pub(crate) fn is_sharing_control(&self) -> bool {
+-        self.classification == Classification::SharingControl
++        !self.diagnostic_only_partial && self.classification == Classification::SharingControl
+     }
+ 
+     pub(crate) fn is_excluded(&self) -> bool {
+-        self.classification == Classification::SharingControl
++        !self.diagnostic_only_partial
++            && self.classification == Classification::SharingControl
+             && self.decision == Decision::ExcludedFromOrdinaryRank
+             && self.fresh_tail_status == "matched"
+     }
+@@ -187,6 +252,8 @@
+             root_subrole_status: "not_checked",
+             exact_child_count: None,
+             child_role_status: "not_checked",
++            child_modal_status: "not_checked",
++            child_main_status: "not_checked",
+             semantic_source: SemanticSource::None,
+             focused_window_status: "not_checked",
+             focused_element_status: "not_checked",
+@@ -194,6 +261,11 @@
+             relation_status: "not_checked",
+             fresh_tail_status: "not_checked",
+             point_occlusion_policy: "retained",
++            inspection_pass: InspectionPass::Initial,
++            last_stage: InspectionStage::Preflight,
++            last_stage_status: "not_started",
++            elapsed_ms: 0,
++            diagnostic_only_partial: false,
+         }
+     }
+ }
+@@ -249,6 +321,35 @@
+     front_process_matches_target: Option<bool>,
+     focus_window_target: u32,
+     semantic_source: SemanticSource,
++    exact_dialog: Option<ExactDialogEvidence>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct DirectCgidObservation {
++    api_status: Option<i32>,
++    value: Option<u32>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct AttributeCountObservation {
++    api_status: Option<i32>,
++    value: Option<usize>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ParentShapeEvidence {
++    pid: Checked<i32>,
++    role: Checked<String>,
++    direct_cgid: DirectCgidObservation,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ExactDialogEvidence {
++    root_parent: Checked<ParentShapeEvidence>,
++    child_direct_cgid: DirectCgidObservation,
++    child_children_count: AttributeCountObservation,
++    strict_root_content: Checked<bool>,
++    strict_child_content: Checked<bool>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -260,6 +361,8 @@
+     root_subrole_status: &'static str,
+     exact_child_count: Option<usize>,
+     child_role_status: &'static str,
++    child_modal_status: &'static str,
++    child_main_status: &'static str,
+     focused_window_status: &'static str,
+     focused_element_status: &'static str,
+     front_process_status: &'static str,
+@@ -280,6 +383,8 @@
+             _ => None,
+         },
+         child_role_status: e.child.role.status(),
++        child_modal_status: e.child.modal.status(),
++        child_main_status: e.child.main.status(),
+         focused_window_status: e.focused_window.status(),
+         focused_element_status: e.focused_element_window.status(),
+         front_process_status: match e.front_process_matches_target {
+@@ -300,6 +405,176 @@
+     matches!(value, Checked::Value(false))
+ }
+ 
++unsafe fn read_direct_cgid_observation(element: AXUIElementRef) -> DirectCgidObservation {
++    if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++        return DirectCgidObservation {
++            api_status: None,
++            value: None,
++        };
++    }
++    let mut id = 0_u32;
++    let status = super::bindings::_AXUIElementGetWindow(element, &mut id);
++    DirectCgidObservation {
++        api_status: Some(status),
++        value: (status == kAXErrorSuccess && id > 0).then_some(id),
++    }
++}
++
++unsafe fn read_attribute_count_observation(
++    element: AXUIElementRef,
++    attribute: &str,
++) -> AttributeCountObservation {
++    if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++        return AttributeCountObservation {
++            api_status: None,
++            value: None,
++        };
++    }
++    let attribute = CFString::new(attribute);
++    let mut count = -1_isize;
++    let status =
++        AXUIElementGetAttributeValueCount(element, attribute.as_concrete_TypeRef(), &mut count);
++    AttributeCountObservation {
++        api_status: Some(status),
++        value: (status == kAXErrorSuccess && count >= 0).then_some(count as usize),
++    }
++}
++
++unsafe fn read_parent_shape(element: AXUIElementRef) -> Checked<ParentShapeEvidence> {
++    let parent = match read_element(element, "AXParent") {
++        Checked::Value(parent) => parent,
++        Checked::Missing => return Checked::Missing,
++        Checked::Unsupported => return Checked::Unsupported,
++        Checked::ReadError => return Checked::ReadError,
++        Checked::WrongType => return Checked::WrongType,
++        Checked::Truncated => return Checked::Truncated,
++    };
++    if !set_short_timeout(parent.0) {
++        return Checked::ReadError;
++    }
++    Checked::Value(ParentShapeEvidence {
++        pid: read_pid(parent.0),
++        role: read_string(parent.0, "AXRole"),
++        direct_cgid: read_direct_cgid_observation(parent.0),
++    })
++}
++
++unsafe fn forbidden_content_present_strict(
++    element: AXUIElementRef,
++    allowed_visible_child: Option<AXUIElementRef>,
++) -> Checked<bool> {
++    if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++        return Checked::Truncated;
++    }
++    let names =
++        project_attribute_names_result(copy_attribute_names_bounded(element, MAX_ATTRIBUTE_NAMES));
++    if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++        return Checked::Truncated;
++    }
++    const SCALAR_CONTENT_ATTRS: [&str; 5] = [
++        "AXValue",
++        "AXText",
++        "AXSelectedText",
++        "AXSelectedTextRange",
++        "AXPlaceholderValue",
++    ];
++    for attr in SCALAR_CONTENT_ATTRS {
++        match project_name_presence(&names, attr) {
++            Checked::Value(true) => return Checked::Value(true),
++            Checked::Value(false) => {}
++            other => return other,
++        }
++    }
++    for attr in ["AXVisibleChildren", "AXContents", "AXSheets"] {
++        if !matches!(project_name_presence(&names, attr), Checked::Value(true)) {
++            match project_name_presence(&names, attr) {
++                Checked::Value(false) => continue,
++                other => return other,
++            }
++        }
++        if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++            return Checked::Truncated;
++        }
++        let read = match copy_value(element, attr) {
++            Ok(value) => {
++                if CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
++                    CFRelease(value);
++                    return Checked::WrongType;
++                }
++                let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
++                if array.len() < 0 || array.len() > 2 {
++                    return Checked::Truncated;
++                }
++                let mut exact_allowed_items = Vec::with_capacity(array.len() as usize);
++                for item in array.iter() {
++                    let item = *item;
++                    if item.is_null() || CFGetTypeID(item) != AXUIElementGetTypeID() {
++                        return Checked::WrongType;
++                    }
++                    exact_allowed_items.push(
++                        attr == "AXVisibleChildren"
++                            && allowed_visible_child.is_some_and(|child| {
++                                core_foundation::base::CFEqual(item, child as CFTypeRef) != 0
++                            }),
++                    );
++                }
++                project_collection_items(attr, &exact_allowed_items)
++            }
++            Err(other) => return other.map(|()| false),
++        };
++        if matches!(deadline_remaining(), Some(remaining) if remaining.is_zero()) {
++            return Checked::Truncated;
++        }
++        match project_collection_content(attr, read) {
++            Checked::Value(false) => {}
++            Checked::Value(true) => return Checked::Value(true),
++            other => return other,
++        }
++    }
++    Checked::Value(false)
++}
++
++fn project_name_presence(names: &Checked<Vec<String>>, attribute: &str) -> Checked<bool> {
++    match names {
++        Checked::Value(names) => Checked::Value(names.iter().any(|name| name == attribute)),
++        Checked::Missing => Checked::Missing,
++        Checked::Unsupported => Checked::Unsupported,
++        Checked::ReadError => Checked::ReadError,
++        Checked::WrongType => Checked::WrongType,
++        Checked::Truncated => Checked::Truncated,
++    }
++}
++
++fn project_attribute_names_result(result: Result<Vec<String>, i32>) -> Checked<Vec<String>> {
++    match result {
++        Ok(names) if names.len() <= MAX_ATTRIBUTE_NAMES => Checked::Value(names),
++        Ok(_) => Checked::Truncated,
++        Err(kAXErrorNoValue) => Checked::Missing,
++        Err(kAXErrorAttributeUnsupported) => Checked::Unsupported,
++        Err(_) => Checked::ReadError,
++    }
++}
++
++fn project_collection_content(_attribute: &str, result: Checked<bool>) -> Checked<bool> {
++    // A successful collection read reaches this projection as content=true
++    // only when nonempty/unauthorized; NoValue and all errors stay unknown.
++    result
++}
++
++fn project_collection_items(
++    attribute: &str,
++    items_are_exact_allowed_child: &[bool],
++) -> Checked<bool> {
++    if attribute == "AXVisibleChildren"
++        && items_are_exact_allowed_child.len() == 1
++        && items_are_exact_allowed_child[0]
++    {
++        Checked::Value(false)
++    } else {
++        Checked::Value(!items_are_exact_allowed_child.is_empty())
++    }
++}
++
+ fn optional_false(value: &Checked<bool>) -> bool {
+     matches!(
+         value,
+@@ -338,6 +613,15 @@
+ }
+ 
+ fn classify(e: &CandidateEvidence) -> Classified {
++    if matches!(e.root.subrole, Checked::Value(ref value) if value == "AXDialog") {
++        return classify_exact_dialog(e);
++    }
++    classify_unsupported_subrole(e)
++}
++
++// Keep the pre-existing Unsupported-subrole contract isolated from the new
++// exact AXDialog compatibility branch.
++fn classify_unsupported_subrole(e: &CandidateEvidence) -> Classified {
+     let unknown = |reason| result(e, Classification::Unknown, reason);
+     let ordinary = |reason| result(e, Classification::Ordinary, reason);
+     if !e.snapshot_complete {
+@@ -421,6 +705,123 @@
+         Reason::ExactNarrowSharingControl,
+     );
+     accepted.semantic_source = semantic;
++    accepted
++}
++
++fn classify_exact_dialog(e: &CandidateEvidence) -> Classified {
++    let unknown = |reason| result(e, Classification::Unknown, reason);
++    let ordinary = |reason| result(e, Classification::Ordinary, reason);
++    let Some(shape) = e.exact_dialog.as_ref() else {
++        return unknown(Reason::AttributeReadUnknown);
++    };
++    if !e.snapshot_complete || !matches!(e.ax_windows_count, Checked::Value(1)) {
++        return unknown(if e.snapshot_complete {
++            Reason::AxWindowNotUnique
++        } else {
++            Reason::IncompleteSnapshot
++        });
++    }
++    if !matches!(e.root.pid, Checked::Value(pid) if pid == e.pid)
++        || !matches!(e.root.cgid, Checked::Value(cgid) if cgid == e.cgid)
++        || !matches!(e.child.pid, Checked::Value(pid) if pid == e.pid)
++        || !matches!(e.child.cgid, Checked::ReadError)
++        || shape.child_direct_cgid.api_status != Some(K_AX_ERROR_ILLEGAL_ARGUMENT)
++        || shape.child_direct_cgid.value.is_some()
++    {
++        return unknown(Reason::IdentityMismatch);
++    }
++    if !matches!(e.root.role, Checked::Value(ref role) if role == "AXWindow")
++        || !matches!(e.root.subrole, Checked::Value(ref subrole) if subrole == "AXDialog")
++    {
++        return ordinary(Reason::RootRoleMismatch);
++    }
++    if !read_required_false(&e.root.modal)
++        || !read_required_false(&e.root.main)
++        || !read_required_false(&e.root.focused)
++        || !read_required_false(&e.child.focused)
++        || !matches!(e.child.modal, Checked::Value(false) | Checked::Unsupported)
++        || !matches!(e.child.main, Checked::Value(false) | Checked::Unsupported)
++    {
++        return ordinary(Reason::ModalOrMainOrFocused);
++    }
++    if !matches!(e.root.children, Checked::Value(1))
++        || !matches!(e.child.role, Checked::Value(ref role) if role == "AXButton")
++    {
++        return unknown(Reason::RootChildrenNotExact);
++    }
++    if shape.child_children_count.api_status != Some(kAXErrorSuccess)
++        || shape.child_children_count.value != Some(0)
++    {
++        return unknown(Reason::ChildHasChildren);
++    }
++    if !matches!(e.root.forbidden_content, Checked::Value(false))
++        || !matches!(shape.strict_root_content, Checked::Value(false))
++        || !matches!(shape.strict_child_content, Checked::Value(false))
++    {
++        return match (
++            &e.root.forbidden_content,
++            &Checked::Value(false),
++            &shape.strict_root_content,
++            &shape.strict_child_content,
++        ) {
++            (Checked::Value(true), _, _, _)
++            | (_, Checked::Value(true), _, _)
++            | (_, _, Checked::Value(true), _)
++            | (_, _, _, Checked::Value(true)) => ordinary(Reason::ContentAttributePresent),
++            _ => unknown(Reason::AttributeReadUnknown),
++        };
++    }
++    let semantic = match semantic_source(e) {
++        Ok(source) => source,
++        Err(reason @ Reason::SemanticMismatch) => return ordinary(reason),
++        Err(reason) => return unknown(reason),
++    };
++    if e.semantic_source != SemanticSource::None && e.semantic_source != semantic {
++        return unknown(Reason::SemanticMismatch);
++    }
++    let root_parent_ok = match &shape.root_parent {
++        Checked::Value(parent) => {
++            matches!(parent.pid, Checked::Value(pid) if pid == e.pid)
++                && matches!(parent.role, Checked::Value(ref role) if role == "AXApplication")
++                && parent.direct_cgid.api_status == Some(K_AX_ERROR_ILLEGAL_ARGUMENT)
++                && parent.direct_cgid.value.is_none()
++        }
++        _ => false,
++    };
++    if !root_parent_ok
++        || !matches!(
++            &e.root.parent_relation,
++            Checked::Value(relation)
++                if relation.pid == e.pid && matches!(relation.cgid, Checked::ReadError)
++        )
++        || !matches!(e.root.window_relation, Checked::Unsupported)
++        || !matches!(
++            e.child.window_relation,
++            Checked::Missing | Checked::Unsupported
++        )
++        || !relation_matches(&e.child.parent_relation, e.pid, Some(e.cgid), true)
++    {
++        return unknown(Reason::RelationUnknown);
++    }
++    if !matches!(e.focused_window, Checked::Value(id) if id == e.focus_window_target)
++        || !matches!(e.focused_element_window, Checked::Value(id) if id == e.focus_window_target)
++        || e.focus_window_target == e.cgid
++    {
++        return unknown(Reason::FocusOrForegroundMismatch);
++    }
++    if e.front_process_matches_target != Some(true) {
++        return unknown(Reason::FocusOrForegroundUnknown);
++    }
++    let reason = if matches!(e.child.modal, Checked::Unsupported)
++        || matches!(e.child.main, Checked::Unsupported)
++    {
++        Reason::ExactDialogControlChildStateNotSupported
++    } else {
++        Reason::ExactNarrowSharingControl
++    };
++    let mut accepted = result(e, Classification::SharingControl, reason);
++    accepted.semantic_source = semantic;
++    accepted.relation_status = "exact_dialog_direct_cgid_illegal_argument_compatibility";
+     accepted
+ }
+ 
+@@ -728,6 +1129,47 @@
+                 .collect::<Vec<_>>()
+ }
+ 
++fn exact_dialog_signature_matches(
++    prior: &ClassificationDiagnostic,
++    rechecked: &ClassificationDiagnostic,
++    pid: i32,
++    cgid: u32,
++) -> bool {
++    prior.candidate_pid == pid
++        && rechecked.candidate_pid == pid
++        && prior.candidate_cgid == cgid
++        && rechecked.candidate_cgid == cgid
++        && prior.classification == Classification::SharingControl
++        && rechecked.classification == Classification::SharingControl
++        && prior.snapshot_status == "complete"
++        && rechecked.snapshot_status == "complete"
++        && prior.ax_windows_status == "value"
++        && rechecked.ax_windows_status == "value"
++        && prior.exact_ax_window_count == Some(1)
++        && rechecked.exact_ax_window_count == Some(1)
++        && prior.root_role_status == "value"
++        && rechecked.root_role_status == "value"
++        && prior.root_subrole_status == "value"
++        && rechecked.root_subrole_status == "value"
++        && prior.exact_child_count == Some(1)
++        && rechecked.exact_child_count == Some(1)
++        && prior.child_role_status == "value"
++        && rechecked.child_role_status == "value"
++        && prior.child_modal_status == rechecked.child_modal_status
++        && prior.child_main_status == rechecked.child_main_status
++        && matches!(prior.child_modal_status, "value" | "unsupported")
++        && matches!(prior.child_main_status, "value" | "unsupported")
++        && prior.semantic_source != SemanticSource::None
++        && prior.semantic_source == rechecked.semantic_source
++        && prior.focused_window_status == "value"
++        && rechecked.focused_window_status == "value"
++        && prior.focused_element_status == "value"
++        && rechecked.focused_element_status == "value"
++        && prior.front_process_status == "matches_target"
++        && rechecked.front_process_status == "matches_target"
++        && prior.relation_status == rechecked.relation_status
++}
++
+ fn diagnostic_from_evidence(
+     e: &CandidateEvidence,
+     classified: Classified,
+@@ -756,6 +1198,8 @@
+         root_subrole_status: classified.root_subrole_status,
+         exact_child_count: classified.exact_child_count,
+         child_role_status: classified.child_role_status,
++        child_modal_status: classified.child_modal_status,
++        child_main_status: classified.child_main_status,
+         semantic_source: classified.semantic_source,
+         focused_window_status: classified.focused_window_status,
+         focused_element_status: classified.focused_element_status,
+@@ -763,6 +1207,11 @@
+         relation_status: classified.relation_status,
+         fresh_tail_status,
+         point_occlusion_policy: "retained",
++        inspection_pass: InspectionPass::Initial,
++        last_stage: InspectionStage::SemanticClassification,
++        last_stage_status: "completed",
++        elapsed_ms: 0,
++        diagnostic_only_partial: false,
+     }
+ }
+ 
+@@ -794,7 +1243,19 @@
+     cgid: u32,
+     focus_window_target: u32,
+     snapshot_complete: bool,
++    trace: &mut StageTrace,
++    deadline: Instant,
+ ) -> Result<CandidateEvidence, ClassificationDiagnostic> {
++    if !trace.begin(InspectionStage::CreateApplication, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            None,
++        ));
++    }
+     let app = AXUIElementCreateApplication(pid);
+     if app.is_null() {
+         return Err(early_unknown(
+@@ -814,6 +1275,16 @@
+             Reason::AttributeReadUnknown,
+             snapshot_complete,
+             "timeout_setup_failed",
++            None,
++        ));
++    }
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::ReadAxWindows, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
+             None,
+         ));
+     }
+@@ -841,6 +1312,17 @@
+         }
+     };
+     let window_count = windows.len();
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::MatchCandidateIdentity, deadline)
++    {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            Some(window_count),
++        ));
++    }
+     let mut matches = Vec::new();
+     let mut identity_unknown = false;
+     for (index, element) in windows.iter().enumerate() {
+@@ -885,6 +1367,21 @@
+             Some(window_count),
+         ));
+     }
++
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::ReadRootAttributes, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            Some(window_count),
++        ));
++    }
++    let root_role = read_string(root.0, "AXRole");
++    let root_subrole = read_string(root.0, "AXSubrole");
++    let exact_dialog_candidate = matches!(&root_role, Checked::Value(value) if value == "AXWindow")
++        && matches!(&root_subrole, Checked::Value(value) if value == "AXDialog");
+ 
+     let root_children = read_element_array(root.0, "AXChildren", MAX_NODES);
+     let (root_child_count, child) = match root_children {
+@@ -915,13 +1412,29 @@
+         parent_relation: Checked::ReadError,
+     };
+     let child_element_for_root = child.as_ref().map(|element| element.0);
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::ReadChildAttributes, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            Some(window_count),
++        ));
++    }
+     let child_evidence = if let Some(child) = child.as_ref() {
+         if !set_short_timeout(child.0) {
+             default_child
+         } else {
+-            let child_children = read_element_array(child.0, "AXChildren", 1);
+-            // Mapping consumes and drops copied descendants immediately.
+-            let child_count = child_children.map(|children| children.len());
++            let child_count = if exact_dialog_candidate {
++                // The exact-dialog path uses the count API below and does not
++                // copy or enumerate this child's descendants.
++                Checked::ReadError
++            } else {
++                let child_children = read_element_array(child.0, "AXChildren", 1);
++                // Mapping consumes and drops copied descendants immediately.
++                child_children.map(|children| children.len())
++            };
+             ChildEvidence {
+                 pid: read_pid(child.0),
+                 cgid: read_cgid(child.0),
+@@ -930,7 +1443,11 @@
+                 main: read_bool(child.0, "AXMain"),
+                 focused: read_bool(child.0, "AXFocused"),
+                 children: child_count,
+-                forbidden_content: forbidden_content_present(child.0, None),
++                forbidden_content: if exact_dialog_candidate {
++                    Checked::ReadError
++                } else {
++                    forbidden_content_present(child.0, None)
++                },
+                 identifier: read_string(child.0, "AXIdentifier"),
+                 title: read_string(child.0, "AXTitle"),
+                 description: read_string(child.0, "AXDescription"),
+@@ -942,6 +1459,16 @@
+         default_child
+     };
+ 
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::ReadFocusEvidence, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            Some(window_count),
++        ));
++    }
+     let focused_window = match read_element(app.0, "AXFocusedWindow") {
+         Checked::Value(element) => {
+             if set_short_timeout(element.0) {
+@@ -987,30 +1514,68 @@
+     let front_process_matches_target =
+         crate::input::skylight::front_process_matches(pid, focus_window_target);
+ 
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::ReadDialogEvidence, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            Some(window_count),
++        ));
++    }
++    let exact_dialog = if exact_dialog_candidate {
++        child.as_ref().map(|child| ExactDialogEvidence {
++            root_parent: read_parent_shape(root.0),
++            child_direct_cgid: read_direct_cgid_observation(child.0),
++            child_children_count: read_attribute_count_observation(child.0, "AXChildren"),
++            strict_root_content: forbidden_content_present_strict(root.0, child_element_for_root),
++            // This strict gate checks content/visible-content collections but
++            // deliberately does not read AXChildren; that leaf fact comes only
++            // from the count API above.
++            strict_child_content: forbidden_content_present_strict(child.0, None),
++        })
++    } else {
++        None
++    };
++
++    if !trace.complete(deadline) || !trace.begin(InspectionStage::ReadRootTail, deadline) {
++        return Err(early_unknown(
++            pid,
++            cgid,
++            Reason::DeadlineExceeded,
++            snapshot_complete,
++            "deadline",
++            Some(window_count),
++        ));
++    }
++    let root_tail = RootEvidence {
++        pid: read_pid(root.0),
++        cgid: read_cgid(root.0),
++        role: root_role,
++        subrole: root_subrole,
++        modal: read_bool(root.0, "AXModal"),
++        main: read_bool(root.0, "AXMain"),
++        focused: read_bool(root.0, "AXFocused"),
++        children: root_child_count,
++        forbidden_content: forbidden_content_present(root.0, child_element_for_root),
++        window_relation: read_relation(root.0, "AXWindow"),
++        parent_relation: read_relation(root.0, "AXParent"),
++    };
++    let _root_tail_completed_before_deadline = trace.complete(deadline);
+     Ok(CandidateEvidence {
+         pid,
+         cgid,
+         snapshot_complete,
+         ax_windows_count: Checked::Value(1),
+-        root: RootEvidence {
+-            pid: read_pid(root.0),
+-            cgid: read_cgid(root.0),
+-            role: read_string(root.0, "AXRole"),
+-            subrole: read_string(root.0, "AXSubrole"),
+-            modal: read_bool(root.0, "AXModal"),
+-            main: read_bool(root.0, "AXMain"),
+-            focused: read_bool(root.0, "AXFocused"),
+-            children: root_child_count,
+-            forbidden_content: forbidden_content_present(root.0, child_element_for_root),
+-            window_relation: read_relation(root.0, "AXWindow"),
+-            parent_relation: read_relation(root.0, "AXParent"),
+-        },
++        root: root_tail,
+         child: child_evidence,
+         focused_window,
+         focused_element_window: focused_element,
+         front_process_matches_target,
+         focus_window_target,
+         semantic_source: SemanticSource::None,
++        exact_dialog,
+     })
+ }
+ 
+@@ -1020,41 +1585,92 @@
+     focus_window_target: u32,
+     snapshot_complete: bool,
+     deadline: Instant,
++    inspection_pass: InspectionPass,
+ ) -> ClassificationDiagnostic {
+-    if Instant::now() >= deadline {
+-        return early_unknown(
++    let started_at = Instant::now();
++    let mut trace = StageTrace::new();
++    let mut diagnostic = if started_at >= deadline {
++        early_unknown(
+             pid,
+             cgid,
+             Reason::DeadlineExceeded,
+             snapshot_complete,
+             "deadline",
+             None,
+-        );
+-    }
+-    let evidence = use_deadline(deadline, || unsafe {
+-        candidate_evidence(pid, cgid, focus_window_target, snapshot_complete)
+-    });
+-    match evidence {
+-        Ok(mut evidence) => {
+-            if Instant::now() >= deadline {
+-                return early_unknown(
+-                    pid,
+-                    cgid,
+-                    Reason::DeadlineExceeded,
+-                    snapshot_complete,
+-                    "deadline",
+-                    None,
+-                );
++        )
++    } else {
++        let evidence = use_deadline(deadline, || unsafe {
++            candidate_evidence(
++                pid,
++                cgid,
++                focus_window_target,
++                snapshot_complete,
++                &mut trace,
++                deadline,
++            )
++        });
++        match evidence {
++            Ok(mut evidence) => {
++                if Instant::now() >= deadline {
++                    evidence.semantic_source = SemanticSource::None;
++                    let mut value = diagnostic_from_evidence(
++                        &evidence,
++                        classify(&evidence),
++                        "not_checked_deadline",
++                    );
++                    value.classification = Classification::Unknown;
++                    value.decision = Decision::Retained;
++                    value.reason = Reason::DeadlineExceeded;
++                    value.last_stage = trace.stage;
++                    value.last_stage_status = if trace.status == "completed" {
++                        "completed_after_deadline"
++                    } else {
++                        trace.status
++                    };
++                    value.diagnostic_only_partial = true;
++                    value
++                } else {
++                    if !trace.begin(InspectionStage::SemanticClassification, deadline) {
++                        early_unknown(
++                            pid,
++                            cgid,
++                            Reason::DeadlineExceeded,
++                            snapshot_complete,
++                            "deadline",
++                            None,
++                        )
++                    } else {
++                        evidence.semantic_source = match semantic_source(&evidence) {
++                            Ok(source) => source,
++                            Err(_) => SemanticSource::None,
++                        };
++                        let classified = classify(&evidence);
++                        let mut value =
++                            diagnostic_from_evidence(&evidence, classified, "not_yet_reconciled");
++                        let completed = trace.complete(deadline);
++                        if !completed {
++                            value.classification = Classification::Unknown;
++                            value.decision = Decision::Retained;
++                            value.reason = Reason::DeadlineExceeded;
++                            value.diagnostic_only_partial = true;
++                        }
++                        value
++                    }
++                }
+             }
+-            evidence.semantic_source = match semantic_source(&evidence) {
+-                Ok(source) => source,
+-                Err(_) => SemanticSource::None,
+-            };
+-            let classified = classify(&evidence);
+-            diagnostic_from_evidence(&evidence, classified, "not_yet_reconciled")
+-        }
+-        Err(value) => value,
+-    }
++            Err(value) => value,
++        }
++    };
++    diagnostic.inspection_pass = inspection_pass;
++    diagnostic.last_stage = trace.stage;
++    diagnostic.last_stage_status = trace.status;
++    if diagnostic.reason == Reason::DeadlineExceeded && trace.stage != InspectionStage::Preflight {
++        diagnostic.classification = Classification::Unknown;
++        diagnostic.decision = Decision::Retained;
++        diagnostic.diagnostic_only_partial = true;
++    }
++    diagnostic.elapsed_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
++    diagnostic
+ }
+ 
+ pub(crate) fn confirm_fresh_candidate(
+@@ -1083,8 +1699,13 @@
+         value.fresh_tail_status = "deadline";
+         return value;
+     }
++    let exact_dialog_involved =
++        prior.root_subrole_status == "value" || rechecked.root_subrole_status == "value";
++    let exact_dialog_mismatch =
++        exact_dialog_involved && !exact_dialog_signature_matches(prior, rechecked, pid, cgid);
+     if prior.classification != Classification::SharingControl
+         || rechecked.classification != Classification::SharingControl
++        || exact_dialog_mismatch
+         || !same_snapshot_rows(before, after)
+         || after_focus_matches != Some(true)
+         || after_focused_window != Some(focus_window_target)
+@@ -1170,6 +1791,133 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[test]
++    fn expired_stage_trace_freezes_at_last_real_stage() {
++        let deadline = Instant::now() + std::time::Duration::from_millis(5);
++        let mut trace = StageTrace::new();
++        assert!(trace.begin(InspectionStage::ReadChildAttributes, deadline));
++        assert!(trace.complete(deadline));
++        std::thread::sleep(std::time::Duration::from_millis(10));
++        assert!(!trace.begin(InspectionStage::ReadDialogEvidence, deadline));
++        assert_eq!(trace.stage, InspectionStage::ReadChildAttributes);
++        assert_eq!(trace.status, "completed");
++    }
++
++    #[test]
++    fn diagnostic_only_partial_can_never_exclude_or_classify_control() {
++        let mut value =
++            ClassificationDiagnostic::unknown(25280, 7418, Reason::DeadlineExceeded, "complete");
++        value.classification = Classification::SharingControl;
++        value.decision = Decision::ExcludedFromOrdinaryRank;
++        value.fresh_tail_status = "matched";
++        value.diagnostic_only_partial = true;
++        assert!(!value.is_sharing_control());
++        assert!(!value.is_excluded());
++        assert_eq!(value.decision, Decision::ExcludedFromOrdinaryRank);
++        assert_eq!(value.reason, Reason::DeadlineExceeded);
++    }
++
++    #[test]
++    fn exact_content_name_reader_projection_requires_complete_typed_names() {
++        let clean_names = Checked::Value(vec!["AXRole".to_owned(), "AXTitle".to_owned()]);
++        assert_eq!(
++            project_name_presence(&clean_names, "AXText"),
++            Checked::Value(false)
++        );
++        assert_eq!(
++            project_name_presence(&clean_names, "AXTitle"),
++            Checked::Value(true)
++        );
++        assert_eq!(
++            project_name_presence(&clean_names, "AXValue"),
++            Checked::Value(false)
++        );
++        for names in [
++            Checked::Missing,
++            Checked::Unsupported,
++            Checked::ReadError,
++            Checked::WrongType,
++            Checked::Truncated,
++        ] {
++            assert_eq!(
++                project_name_presence(&names, "AXText").status(),
++                names.status()
++            );
++        }
++        // A listed forbidden scalar is sufficient to reject; no value read is
++        // needed, so NoValue/Unsupported cannot be misread as absence.
++        assert_eq!(
++            project_name_presence(&Checked::Value(vec!["AXValue".into()]), "AXValue"),
++            Checked::Value(true)
++        );
++        assert_eq!(
++            project_attribute_names_result(Ok(vec!["AXRole".into()])),
++            Checked::Value(vec!["AXRole".into()])
++        );
++        assert_eq!(
++            project_attribute_names_result(Ok(vec!["AXRole".into(); MAX_ATTRIBUTE_NAMES + 1])),
++            Checked::Truncated
++        );
++        assert_eq!(
++            project_attribute_names_result(Err(kAXErrorNoValue)),
++            Checked::Missing
++        );
++        assert_eq!(
++            project_attribute_names_result(Err(kAXErrorAttributeUnsupported)),
++            Checked::Unsupported
++        );
++        assert_eq!(
++            project_attribute_names_result(Err(kAXErrorSuccess)),
++            Checked::ReadError
++        );
++        // An attribute omitted from a successful full list proves absence;
++        // once listed, collection reads must independently be typed.
++        for status in [
++            Checked::Missing,
++            Checked::Unsupported,
++            Checked::ReadError,
++            Checked::WrongType,
++            Checked::Truncated,
++        ] {
++            assert_eq!(
++                project_collection_content("AXContents", status.clone()),
++                status
++            );
++        }
++        assert_eq!(
++            project_collection_content("AXContents", Checked::Value(false)),
++            Checked::Value(false)
++        );
++        assert_eq!(
++            project_collection_content("AXContents", Checked::Value(true)),
++            Checked::Value(true)
++        );
++        assert_eq!(
++            project_collection_items("AXContents", &[]),
++            Checked::Value(false)
++        );
++        assert_eq!(
++            project_collection_items("AXContents", &[true]),
++            Checked::Value(true)
++        );
++        assert_eq!(
++            project_collection_items("AXVisibleChildren", &[]),
++            Checked::Value(false)
++        );
++        assert_eq!(
++            project_collection_items("AXVisibleChildren", &[true]),
++            Checked::Value(false)
++        );
++        assert_eq!(
++            project_collection_items("AXVisibleChildren", &[false]),
++            Checked::Value(true)
++        );
++        assert_eq!(
++            project_collection_items("AXVisibleChildren", &[true, true]),
++            Checked::Value(true)
++        );
++    }
+ 
+     fn good() -> CandidateEvidence {
+         CandidateEvidence {
+@@ -1222,6 +1970,49 @@
+             front_process_matches_target: Some(true),
+             focus_window_target: 7,
+             semantic_source: SemanticSource::Identifier,
++            exact_dialog: None,
++        }
++    }
++
++    fn dialog_good() -> CandidateEvidence {
++        let mut e = good();
++        e.root.subrole = Checked::Value("AXDialog".into());
++        e.root.window_relation = Checked::Unsupported;
++        e.root.parent_relation = Checked::Value(Relation {
++            pid: 42,
++            cgid: Checked::ReadError,
++        });
++        e.child.cgid = Checked::ReadError;
++        e.child.window_relation = Checked::Unsupported;
++        e.child.modal = Checked::Unsupported;
++        e.child.main = Checked::Unsupported;
++        e.exact_dialog = Some(ExactDialogEvidence {
++            root_parent: Checked::Value(ParentShapeEvidence {
++                pid: Checked::Value(42),
++                role: Checked::Value("AXApplication".into()),
++                direct_cgid: DirectCgidObservation {
++                    api_status: Some(K_AX_ERROR_ILLEGAL_ARGUMENT),
++                    value: None,
++                },
++            }),
++            child_direct_cgid: DirectCgidObservation {
++                api_status: Some(K_AX_ERROR_ILLEGAL_ARGUMENT),
++                value: None,
++            },
++            child_children_count: AttributeCountObservation {
++                api_status: Some(kAXErrorSuccess),
++                value: Some(0),
++            },
++            strict_root_content: Checked::Value(false),
++            strict_child_content: Checked::Value(false),
++        });
++        e
++    }
++
++    fn dialog_root_parent_mut(e: &mut CandidateEvidence) -> &mut ParentShapeEvidence {
++        match &mut e.exact_dialog.as_mut().unwrap().root_parent {
++            Checked::Value(parent) => parent,
++            _ => panic!("dialog fixture has exact root parent"),
+         }
+     }
+ 
+@@ -1264,6 +2055,190 @@
+         let value = classify(&good());
+         assert_eq!(value.classification, Classification::SharingControl);
+         assert_eq!(value.reason, Reason::ExactNarrowSharingControl);
++    }
++
++    #[test]
++    fn exact_dialog_shape_is_positive_but_preserves_unsupported_child_state_fact() {
++        let e = dialog_good();
++        let value = classify(&e);
++        assert_ne!(
++            classify_unsupported_subrole(&e).classification,
++            Classification::SharingControl
++        );
++        assert_eq!(value.classification, Classification::SharingControl);
++        assert_eq!(
++            value.reason,
++            Reason::ExactDialogControlChildStateNotSupported
++        );
++        assert_eq!(
++            value.relation_status,
++            "exact_dialog_direct_cgid_illegal_argument_compatibility"
++        );
++
++        let mut e = dialog_good();
++        e.child.modal = Checked::Value(false);
++        e.child.main = Checked::Value(false);
++        assert_eq!(classify(&e).reason, Reason::ExactNarrowSharingControl);
++    }
++
++    #[test]
++    fn exact_dialog_child_modal_main_unsupported_is_not_false_and_other_states_reject() {
++        for value in [
++            Checked::Value(true),
++            Checked::Missing,
++            Checked::ReadError,
++            Checked::WrongType,
++            Checked::Truncated,
++        ] {
++            let mut e = dialog_good();
++            e.child.modal = value.clone();
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++            let mut e = dialog_good();
++            e.child.main = value;
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        for which in 0..4 {
++            let mut e = dialog_good();
++            match which {
++                0 => e.root.modal = Checked::Unsupported,
++                1 => e.root.main = Checked::Unsupported,
++                2 => e.root.focused = Checked::Unsupported,
++                _ => e.child.focused = Checked::Unsupported,
++            }
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++    }
++
++    #[test]
++    fn exact_dialog_direct_cgid_error_is_raw_exact_and_never_normalized_to_absence() {
++        for status in [-25200, -25202, -25204, -25205, -25212, -1] {
++            let mut e = dialog_good();
++            e.exact_dialog
++                .as_mut()
++                .unwrap()
++                .child_direct_cgid
++                .api_status = Some(status);
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++            let mut e = dialog_good();
++            dialog_root_parent_mut(&mut e).direct_cgid.api_status = Some(status);
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        for observation in [
++            DirectCgidObservation {
++                api_status: None,
++                value: None,
++            },
++            DirectCgidObservation {
++                api_status: Some(kAXErrorSuccess),
++                value: None,
++            },
++        ] {
++            let mut e = dialog_good();
++            e.exact_dialog.as_mut().unwrap().child_direct_cgid = observation.clone();
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++            let mut e = dialog_good();
++            dialog_root_parent_mut(&mut e).direct_cgid = observation;
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        let mut e = dialog_good();
++        e.exact_dialog.as_mut().unwrap().child_direct_cgid.value = Some(99);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        dialog_root_parent_mut(&mut e).direct_cgid.value = Some(99);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++    }
++
++    #[test]
++    fn exact_dialog_requires_exact_parent_chain_and_axwindow_exception_shape() {
++        let mut e = dialog_good();
++        dialog_root_parent_mut(&mut e).pid = Checked::Value(7);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        dialog_root_parent_mut(&mut e).role = Checked::Value("AXWindow".into());
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        for status in [
++            Checked::Missing,
++            Checked::Unsupported,
++            Checked::ReadError,
++            Checked::WrongType,
++        ] {
++            let mut e = dialog_good();
++            e.exact_dialog.as_mut().unwrap().root_parent = status;
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        for relation in [Checked::Missing, Checked::ReadError, Checked::WrongType] {
++            let mut e = dialog_good();
++            e.root.window_relation = relation;
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        let mut e = dialog_good();
++        e.child.parent_relation = Checked::Unsupported;
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        e.child.parent_relation = Checked::Value(Relation {
++            pid: 7,
++            cgid: Checked::Value(88),
++        });
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        e.child.window_relation = Checked::Value(Relation {
++            pid: 42,
++            cgid: Checked::Value(88),
++        });
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++    }
++
++    #[test]
++    fn exact_dialog_count_content_semantic_and_foreground_fail_closed() {
++        for count in [
++            AttributeCountObservation {
++                api_status: Some(kAXErrorNoValue),
++                value: None,
++            },
++            AttributeCountObservation {
++                api_status: Some(kAXErrorAttributeUnsupported),
++                value: None,
++            },
++            AttributeCountObservation {
++                api_status: Some(kAXErrorSuccess),
++                value: None,
++            },
++            AttributeCountObservation {
++                api_status: Some(kAXErrorSuccess),
++                value: Some(1),
++            },
++            AttributeCountObservation {
++                api_status: None,
++                value: None,
++            },
++        ] {
++            let mut e = dialog_good();
++            e.exact_dialog.as_mut().unwrap().child_children_count = count;
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        for value in [
++            Checked::Value(true),
++            Checked::Unsupported,
++            Checked::ReadError,
++            Checked::WrongType,
++        ] {
++            let mut e = dialog_good();
++            e.exact_dialog.as_mut().unwrap().strict_child_content = value;
++            assert_ne!(classify(&e).classification, Classification::SharingControl);
++        }
++        let mut e = dialog_good();
++        e.exact_dialog.as_mut().unwrap().strict_root_content = Checked::Unsupported;
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        e.child.identifier = Checked::Value("ordinary dialog".into());
++        e.child.title = Checked::Value(EXPECTED_CONTROL.into());
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        e.focused_window = Checked::Value(88);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
++        let mut e = dialog_good();
++        e.front_process_matches_target = Some(false);
++        assert_ne!(classify(&e).classification, Classification::SharingControl);
+     }
+ 
+     #[test]
+@@ -1365,7 +2340,7 @@
+ 
+     #[test]
+     fn deadline_and_malformed_global_snapshot_do_not_exclude() {
+-        let expired = inspect_candidate(42, 88, 7, true, Instant::now());
++        let expired = inspect_candidate(42, 88, 7, true, Instant::now(), InspectionPass::Initial);
+         assert_eq!(expired.reason, Reason::DeadlineExceeded);
+         let partial = snapshot(vec![row(7, 0), row(88, 1)], 1);
+         assert!(sharing_candidate_ids(&partial, 42, 7).is_empty());
+@@ -1403,4 +2378,64 @@
+         assert_eq!(final_value.reason, Reason::FreshTailMismatch);
+         assert!(!final_value.is_excluded());
+     }
+-}
++
++    #[test]
++    fn exact_dialog_fresh_tail_requires_same_typed_branch_signature() {
++        let before = snapshot(vec![row(7, 0), row(88, 1)], 0);
++        let after = snapshot(vec![row(7, 0), row(88, 1)], 0);
++        let diagnostic =
++            |e: &CandidateEvidence| diagnostic_from_evidence(e, classify(e), "not_yet_reconciled");
++        let confirm = |prior: &ClassificationDiagnostic, next: &ClassificationDiagnostic| {
++            confirm_fresh_candidate(
++                prior,
++                next,
++                42,
++                88,
++                7,
++                &before,
++                &after,
++                Some(true),
++                Some(7),
++                Instant::now() + std::time::Duration::from_secs(1),
++            )
++        };
++
++        let old_branch = diagnostic(&good());
++        let dialog_branch = diagnostic(&dialog_good());
++        assert_eq!(
++            confirm(&old_branch, &old_branch).fresh_tail_status,
++            "matched"
++        );
++        assert_eq!(
++            confirm(&dialog_branch, &dialog_branch).fresh_tail_status,
++            "matched"
++        );
++        assert_eq!(
++            confirm(&old_branch, &dialog_branch).reason,
++            Reason::FreshTailMismatch
++        );
++        assert_eq!(
++            confirm(&dialog_branch, &old_branch).reason,
++            Reason::FreshTailMismatch
++        );
++
++        let mut changed_semantics = dialog_good();
++        changed_semantics.child.identifier = Checked::Unsupported;
++        changed_semantics.child.title = Checked::Unsupported;
++        changed_semantics.child.description = Checked::Value(EXPECTED_CONTROL.into());
++        changed_semantics.semantic_source = SemanticSource::Description;
++        let changed_semantics = diagnostic(&changed_semantics);
++        assert_eq!(
++            confirm(&dialog_branch, &changed_semantics).reason,
++            Reason::FreshTailMismatch
++        );
++
++        let mut changed_state = dialog_good();
++        changed_state.child.modal = Checked::Value(false);
++        let changed_state = diagnostic(&changed_state);
++        assert_eq!(
++            confirm(&dialog_branch, &changed_state).reason,
++            Reason::FreshTailMismatch
++        );
++    }
++}
+--- a/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
+@@ -18,7 +18,8 @@
+ //! - https://docs.rs/screencapturekit/6.0.1/screencapturekit/
+ //!
+ //! Compatibility fallback: `screencapture -l <windowID> -x -o <file>` when
+-//! the native path errors or returns empty bytes.
++//! the native path errors or returns empty bytes. The shell phase has its own
++//! bounded deadline and never uses `Command::output()`.
+ //!
+ //! ## Display capture
+ //!
+@@ -27,8 +28,11 @@
+ 
+ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+ use std::collections::HashMap;
++use std::fs::{File, OpenOptions};
+ use std::hash::Hash;
+-use std::process::Command;
++use std::io::Read;
++use std::os::unix::fs::OpenOptionsExt;
++use std::process::{Child, Command, ExitStatus, Stdio};
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{mpsc, Mutex, OnceLock};
+ use std::time::{Duration, Instant};
+@@ -171,6 +175,7 @@
+ struct SecureCapturePath {
+     directory: std::path::PathBuf,
+     file: std::path::PathBuf,
++    stderr_file: std::path::PathBuf,
+ }
+ 
+ impl SecureCapturePath {
+@@ -184,13 +189,19 @@
+         ));
+         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+         let file = directory.join(file_name);
+-        Ok(Self { directory, file })
++        let stderr_file = directory.join("stderr.txt");
++        Ok(Self {
++            directory,
++            file,
++            stderr_file,
++        })
+     }
+ }
+ 
+ impl Drop for SecureCapturePath {
+     fn drop(&mut self) {
+         let _ = std::fs::remove_file(&self.file);
++        let _ = std::fs::remove_file(&self.stderr_file);
+         let _ = std::fs::remove_dir(&self.directory);
+     }
+ }
+@@ -232,35 +243,121 @@
+ fn screenshot_window_bytes_shell(window_id: u32) -> anyhow::Result<Vec<u8>> {
+     let capture = SecureCapturePath::new("window.png")?;
+     let tmp_path = capture.file.to_string_lossy().into_owned();
+-
+-    let output = Command::new("screencapture")
+-        .args([
+-            "-l",
+-            &window_id.to_string(),
+-            "-x", // no sound
+-            "-o", // no shadow
+-            &tmp_path,
+-        ])
+-        .output()?;
+-
++    let window_id_arg = window_id.to_string();
++    let mut command = Command::new("/usr/sbin/screencapture");
++    command.args(["-l", window_id_arg.as_str(), "-x", "-o", tmp_path.as_str()]);
++    capture_shell_output(command, &capture, &format!("window {window_id}"))
++}
++
++/// Bound only the fixed shell-capture phase. Window capture still has its
++/// existing ScreenCaptureKit phase before this one; this is not a Run deadline.
++const SHELL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
++const MAX_SHELL_CAPTURE_STDERR_BYTES: u64 = 4096;
++const SHELL_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
++
++#[derive(Debug)]
++struct BoundedCommandOutput {
++    status: ExitStatus,
++    stderr: Vec<u8>,
++    stderr_truncated: bool,
++}
++
++fn bounded_command_stderr(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, bool)> {
++    let file = File::open(path)?;
++    let file_len = file.metadata()?.len();
++    let mut stderr = Vec::with_capacity(MAX_SHELL_CAPTURE_STDERR_BYTES as usize);
++    file.take(MAX_SHELL_CAPTURE_STDERR_BYTES)
++        .read_to_end(&mut stderr)?;
++    Ok((stderr, file_len > MAX_SHELL_CAPTURE_STDERR_BYTES))
++}
++
++fn kill_and_reap_child(child: &mut Child) -> anyhow::Result<ExitStatus> {
++    // `kill` may report that the child exited in the race with the deadline;
++    // wait remains the authoritative ownership/reaping step.
++    let kill_result = child.kill();
++    child.wait().map_err(|wait_error| {
++        anyhow::anyhow!(
++            "failed to reap owned screencapture child after kill {kill_result:?}: {wait_error}"
++        )
++    })
++}
++
++fn run_bounded_capture_command(
++    mut command: Command,
++    stderr_path: &std::path::Path,
++    timeout: Duration,
++) -> anyhow::Result<BoundedCommandOutput> {
++    let stderr_file = OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .mode(0o600)
++        .open(stderr_path)?;
++    command
++        .stdout(Stdio::null())
++        .stderr(Stdio::from(stderr_file));
++    let started = Instant::now();
++    let mut child = command
++        .spawn()
++        .map_err(|error| anyhow::anyhow!("screencapture launch failed: {error}"))?;
++
++    let status = loop {
++        match child.try_wait() {
++            Ok(Some(status)) => break status,
++            Ok(None) if started.elapsed() >= timeout => {
++                match kill_and_reap_child(&mut child) {
++                    Ok(status) => anyhow::bail!(
++                        "screencapture timed out after {} ms; termination was requested and owned child was reaped (status {status})",
++                        timeout.as_millis()
++                    ),
++                    Err(cleanup_error) => anyhow::bail!(
++                        "screencapture timed out after {} ms; owned child cleanup failed: {cleanup_error:#}",
++                        timeout.as_millis()
++                    ),
++                }
++            }
++            Ok(None) => std::thread::sleep(SHELL_CAPTURE_POLL_INTERVAL),
++            Err(error) => {
++                let cleanup = kill_and_reap_child(&mut child);
++                anyhow::bail!("screencapture wait failed: {error}; child cleanup: {cleanup:?}");
++            }
++        }
++    };
++
++    let (stderr, stderr_truncated) = bounded_command_stderr(stderr_path)?;
++    Ok(BoundedCommandOutput {
++        status,
++        stderr,
++        stderr_truncated,
++    })
++}
++
++fn capture_shell_output(
++    command: Command,
++    capture: &SecureCapturePath,
++    subject: &str,
++) -> anyhow::Result<Vec<u8>> {
++    let output = run_bounded_capture_command(command, &capture.stderr_file, SHELL_CAPTURE_TIMEOUT)?;
+     if !output.status.success() {
+         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
++        let truncation = if output.stderr_truncated {
++            " [stderr truncated]"
++        } else {
++            ""
++        };
+         if stderr.is_empty() {
+             anyhow::bail!(
+-                "screencapture failed for window {window_id} with status {}",
++                "screencapture failed for {subject} with status {}{truncation}",
+                 output.status
+             );
+         }
+         anyhow::bail!(
+-            "screencapture failed for window {window_id} with status {}: {stderr}",
++            "screencapture failed for {subject} with status {}: {stderr}{truncation}",
+             output.status
+         );
+     }
+-
+     let bytes = std::fs::read(&capture.file)?;
+-
+     if bytes.is_empty() {
+-        anyhow::bail!("screencapture produced empty output for window {window_id}");
++        anyhow::bail!("screencapture produced empty output for {subject}");
+     }
+     Ok(bytes)
+ }
+@@ -349,7 +446,8 @@
+ const WINDOW_PLAN_CACHE_TTL: Duration = Duration::from_secs(2);
+ const WINDOW_PLAN_CACHE_CAPACITY: usize = 32;
+ /// Keep native capture below the public observation deadline after the AX
+-/// walk's own 20-second bound. The shell fallback retains its prior behavior.
++/// walk's own 20-second bound. The shell fallback has a separate 2-second
++/// phase deadline after this native phase completes or times out.
+ const WINDOW_CAPTURE_NATIVE_TIMEOUT: Duration = Duration::from_secs(3);
+ 
+ /// Permit at most one ScreenCaptureKit worker. If an Apple completion callback
+@@ -758,31 +856,9 @@
+ pub fn screenshot_display_bytes() -> anyhow::Result<Vec<u8>> {
+     let capture = SecureCapturePath::new("display.png")?;
+     let tmp_path = capture.file.to_string_lossy().into_owned();
+-
+-    let output = Command::new("screencapture")
+-        .args(["-x", &tmp_path])
+-        .output()?;
+-
+-    if !output.status.success() {
+-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+-        if stderr.is_empty() {
+-            anyhow::bail!(
+-                "screencapture failed for main display with status {}",
+-                output.status
+-            );
+-        }
+-        anyhow::bail!(
+-            "screencapture failed for main display with status {}: {stderr}",
+-            output.status
+-        );
+-    }
+-
+-    let bytes = std::fs::read(&capture.file)?;
+-
+-    if bytes.is_empty() {
+-        anyhow::bail!("screencapture produced empty output for main display");
+-    }
+-    Ok(bytes)
++    let mut command = Command::new("/usr/sbin/screencapture");
++    command.args(["-x", tmp_path.as_str()]);
++    capture_shell_output(command, &capture, "main display")
+ }
+ 
+ /// Capture the main display and return (base64-encoded PNG, width, height).
+@@ -913,6 +989,108 @@
+ 
+         assert!(error.contains("native denied"), "{error}");
+         assert!(error.contains("fallback denied"), "{error}");
++    }
++
++    #[test]
++    fn bounded_shell_runner_preserves_success_and_caps_stderr_retention() {
++        let capture =
++            SecureCapturePath::new("runner-output").expect("private test capture directory");
++        let stderr_path = capture.stderr_file.clone();
++        let mut command = Command::new("/bin/sh");
++        command.args([
++            "-c",
++            "printf 'ignored stdout'; i=0; while [ $i -lt 9000 ]; do printf x >&2; i=$((i + 1)); done",
++        ]);
++
++        let output = run_bounded_capture_command(command, &stderr_path, Duration::from_secs(2))
++            .expect("controlled child should finish successfully");
++        assert!(output.status.success());
++        assert_eq!(output.stderr.len(), MAX_SHELL_CAPTURE_STDERR_BYTES as usize);
++        assert!(output.stderr_truncated);
++    }
++
++    #[test]
++    fn bounded_shell_runner_preserves_nonzero_status_and_bounded_error_text() {
++        let capture =
++            SecureCapturePath::new("runner-output").expect("private test capture directory");
++        let stderr_path = capture.directory.join("stderr.txt");
++        let mut command = Command::new("/bin/sh");
++        command.args(["-c", "printf 'bounded diagnostic' >&2; exit 17"]);
++
++        let output = run_bounded_capture_command(command, &stderr_path, Duration::from_secs(2))
++            .expect("nonzero status is still a completed process result");
++        assert_eq!(output.status.code(), Some(17));
++        assert_eq!(
++            String::from_utf8_lossy(&output.stderr),
++            "bounded diagnostic"
++        );
++        assert!(!output.stderr_truncated);
++    }
++
++    #[test]
++    fn bounded_shell_runner_times_out_kills_and_reaps_its_owned_child() {
++        let capture =
++            SecureCapturePath::new("runner-output").expect("private test capture directory");
++        let pid_path = capture.directory.join("child.pid");
++        let stderr_path = capture.directory.join("stderr.txt");
++        let mut command = Command::new("/bin/sh");
++        command
++            .args([
++                "-c",
++                "printf '%s' $$ > \"$1\"; while :; do printf x >&2; done",
++                "test-shell",
++            ])
++            .arg(&pid_path);
++
++        let error = run_bounded_capture_command(command, &stderr_path, Duration::from_millis(100))
++            .expect_err("infinite fixture must hit its phase deadline");
++        assert!(
++            error.to_string().contains("timed out after 100 ms"),
++            "{error}"
++        );
++        let child_pid: i32 = std::fs::read_to_string(&pid_path)
++            .expect("fixture wrote its pid")
++            .parse()
++            .expect("fixture pid is numeric");
++        let alive = unsafe { libc::kill(child_pid, 0) } == 0;
++        assert!(
++            !alive,
++            "owned fixture child must be gone after kill and wait"
++        );
++        assert!(
++            stderr_path.exists(),
++            "secure capture directory remains owned until caller cleanup"
++        );
++        let directory = capture.directory.clone();
++        std::fs::remove_file(&pid_path)
++            .expect("remove owned fixture pid file before owner cleanup");
++        drop(capture);
++        assert!(
++            !directory.exists(),
++            "dropping the capture owner removes all temporary files"
++        );
++    }
++
++    #[test]
++    fn bounded_shell_runner_spawn_error_keeps_private_file_cleanup_with_owner() {
++        let capture =
++            SecureCapturePath::new("runner-output").expect("private test capture directory");
++        let directory = capture.directory.clone();
++        let stderr_path = capture.stderr_file.clone();
++        let command = Command::new("/definitely-not-a-real-capture-command");
++
++        let error = run_bounded_capture_command(command, &stderr_path, Duration::from_secs(2))
++            .expect_err("nonexistent fixture executable must fail to spawn");
++        assert!(error.to_string().contains("launch failed"), "{error}");
++        assert!(
++            directory.exists(),
++            "caller still owns the secure temp path while handling error"
++        );
++        drop(capture);
++        assert!(
++            !directory.exists(),
++            "spawn failure temp files are removed with their owner"
++        );
+     }
+ 
+     #[test]
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/bring_to_front.rs
+@@ -66,6 +66,19 @@
+     frontmost_ordinary_window_id: Option<u32>,
+     target_visible_ordinary: bool,
+     frontmost_row_diagnostic: FrontmostRowDiagnostic,
++    ordinary_window_classifications:
++        Vec<crate::ax::ordinary_sharing_control::ClassificationDiagnostic>,
++    verification_stable: bool,
++    verification_poll_count: u32,
++    verification_elapsed_ms: u64,
++    verification_deadline_reached: bool,
++    prior_observation_diagnostic_only: Option<PriorObservationDiagnostic>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++struct PriorObservationDiagnostic {
++    poll_count: u32,
++    elapsed_ms: u64,
+     ordinary_window_classifications:
+         Vec<crate::ax::ordinary_sharing_control::ClassificationDiagnostic>,
+ }
+@@ -172,7 +185,8 @@
+     }
+ 
+     fn exact_postcondition(&self, pid: i32, window_id: u32) -> bool {
+-        self.process_activated(pid)
++        self.verification_stable
++            && self.process_activated(pid)
+             && self.exact_window_focused(window_id)
+             && self.exact_window_frontmost_ordinary(window_id)
+     }
+@@ -230,8 +244,14 @@
+     let candidates = sharing::sharing_candidate_ids(&snapshot, pid, window_id);
+     let mut first_pass = Vec::with_capacity(candidates.len());
+     for candidate_cgid in candidates {
+-        let first =
+-            sharing::inspect_candidate(pid, candidate_cgid, window_id, snapshot_complete, deadline);
++        let first = sharing::inspect_candidate(
++            pid,
++            candidate_cgid,
++            window_id,
++            snapshot_complete,
++            deadline,
++            sharing::InspectionPass::Initial,
++        );
+         first_pass.push((candidate_cgid, first));
+     }
+ 
+@@ -248,6 +268,7 @@
+                     window_id,
+                     snapshot_complete,
+                     deadline,
++                    sharing::InspectionPass::Recheck,
+                 ),
+             ));
+         }
+@@ -320,28 +341,97 @@
+             window_id,
+         ),
+         ordinary_window_classifications,
++        verification_stable: false,
++        verification_poll_count: 0,
++        verification_elapsed_ms: 0,
++        verification_deadline_reached: false,
++        prior_observation_diagnostic_only: None,
+     }
+ }
+ 
+ fn wait_for_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
+     let deadline = Instant::now() + VERIFY_TIMEOUT;
++    wait_for_exact_window_with(
++        deadline,
++        Instant::now,
++        |deadline| observe_exact_window(pid, window_id, deadline),
++        |observation| {
++            observation.process_activated(pid)
++                && observation.exact_window_focused(window_id)
++                && observation.exact_window_frontmost_ordinary(window_id)
++        },
++        |observation| observation.verification_stable = true,
++        |observation, count, elapsed, deadline_reached| {
++            observation.verification_poll_count = count;
++            observation.verification_elapsed_ms = elapsed.as_millis().min(u64::MAX as u128) as u64;
++            observation.verification_deadline_reached = deadline_reached;
++        },
++        |current, previous| {
++            current.prior_observation_diagnostic_only = Some(PriorObservationDiagnostic {
++                poll_count: previous.verification_poll_count,
++                elapsed_ms: previous.verification_elapsed_ms,
++                ordinary_window_classifications: previous.ordinary_window_classifications.clone(),
++            });
++        },
++        std::thread::sleep,
++    )
++}
++
++/// Runs the bounded verification loop with injectable time and observation
++/// functions so deadline/stability behavior can be tested without macOS APIs.
++fn wait_for_exact_window_with<O: Clone>(
++    deadline: Instant,
++    mut now: impl FnMut() -> Instant,
++    mut observe: impl FnMut(Instant) -> O,
++    mut is_exact: impl FnMut(&O) -> bool,
++    mut mark_stable: impl FnMut(&mut O),
++    mut record_progress: impl FnMut(&mut O, u32, Duration, bool),
++    mut retain_previous_diagnostic: impl FnMut(&mut O, &O),
++    mut sleep: impl FnMut(Duration),
++) -> O {
++    let started_at = now();
++    let mut poll_count = 0u32;
+     let mut stable_since = None;
+-    let mut observation;
++    let mut last_pre_deadline_observation: Option<O> = None;
+     loop {
+-        let now = Instant::now();
+-        observation = observe_exact_window(pid, window_id, deadline);
+-        if observation.exact_postcondition(pid, window_id) {
+-            let since = stable_since.get_or_insert(now);
+-            if now.duration_since(*since) >= VERIFY_STABLE {
++        if let Some(mut previous) = last_pre_deadline_observation.take() {
++            let resumed_at = now();
++            if resumed_at >= deadline {
++                let elapsed = resumed_at.saturating_duration_since(started_at);
++                record_progress(&mut previous, poll_count, elapsed, true);
++                return previous;
++            }
++            last_pre_deadline_observation = Some(previous);
++        }
++        let mut observation = observe(deadline);
++        poll_count = poll_count.saturating_add(1);
++        // Measure only after the synchronous observation has completed. If it
++        // consumed the budget, preserve that concrete observation and stop.
++        let observed_at = now();
++        let elapsed = observed_at.saturating_duration_since(started_at);
++        let deadline_reached = observed_at >= deadline;
++        record_progress(&mut observation, poll_count, elapsed, deadline_reached);
++        if deadline_reached {
++            if let Some(previous) = last_pre_deadline_observation.as_ref() {
++                retain_previous_diagnostic(&mut observation, previous);
++            }
++            return observation;
++        }
++        if is_exact(&observation) {
++            let since = *stable_since.get_or_insert(observed_at);
++            if observed_at.duration_since(since) >= VERIFY_STABLE {
++                mark_stable(&mut observation);
+                 return observation;
+             }
+         } else {
+             stable_since = None;
+         }
+-        if now >= deadline {
++        last_pre_deadline_observation = Some(observation.clone());
++        let remaining = deadline.saturating_duration_since(observed_at);
++        if remaining.is_zero() {
+             return observation;
+         }
+-        std::thread::sleep(VERIFY_POLL);
++        sleep(VERIFY_POLL.min(remaining));
+     }
+ }
+ 
+@@ -418,6 +508,11 @@
+             "frontmost_ordinary_window_id": observation.frontmost_ordinary_window_id,
+             "frontmost_window_diagnostic": observation.frontmost_row_diagnostic.as_json(),
+             "ordinary_window_classification": ordinary_classification,
++            "verification_stable": observation.verification_stable,
++            "verification_poll_count": observation.verification_poll_count,
++            "verification_elapsed_ms": observation.verification_elapsed_ms,
++            "verification_deadline_reached": observation.verification_deadline_reached,
++            "prior_observation_diagnostic_only": observation.prior_observation_diagnostic_only,
+         }
+     });
+     if activated {
+@@ -631,6 +726,11 @@
+             target_visible_ordinary,
+             frontmost_row_diagnostic: FrontmostRowDiagnostic::from_row(None, 42, 7),
+             ordinary_window_classifications: Vec::new(),
++            verification_stable: true,
++            verification_poll_count: 1,
++            verification_elapsed_ms: 0,
++            verification_deadline_reached: false,
++            prior_observation_diagnostic_only: None,
+         }
+     }
+ 
+@@ -683,6 +783,121 @@
+     }
+ 
+     #[test]
++    fn observation_that_exhausts_deadline_is_preserved_without_an_extra_poll() {
++        use std::cell::Cell;
++
++        let base = Instant::now();
++        let elapsed = Cell::new(Duration::ZERO);
++        let observed = Cell::new(0usize);
++        let slept = Cell::new(0usize);
++        let result = wait_for_exact_window_with(
++            base + VERIFY_TIMEOUT,
++            || base + elapsed.get(),
++            |_| {
++                observed.set(observed.get() + 1);
++                elapsed.set(Duration::from_millis(901));
++                ("last-concrete-diagnostic", false)
++            },
++            |_| true,
++            |value| value.1 = true,
++            |_, _, _, _| {},
++            |_, _| {},
++            |_| slept.set(slept.get() + 1),
++        );
++        assert_eq!(result.0, "last-concrete-diagnostic");
++        assert!(!result.1, "a post-deadline sample cannot satisfy stability");
++        assert_eq!(observed.get(), 1, "do not overwrite it with another poll");
++        assert_eq!(slept.get(), 0);
++    }
++
++    #[test]
++    fn deadline_observation_keeps_prior_diagnostic_separate_and_nonoperative() {
++        use std::cell::Cell;
++
++        let base = Instant::now();
++        let elapsed = Cell::new(Duration::ZERO);
++        let observed = Cell::new(0usize);
++        let result = wait_for_exact_window_with(
++            base + VERIFY_TIMEOUT,
++            || base + elapsed.get(),
++            |_| {
++                observed.set(observed.get() + 1);
++                if observed.get() == 1 {
++                    ("specific-before-deadline".to_string(), None, false)
++                } else {
++                    elapsed.set(Duration::from_millis(901));
++                    ("deadline-exceeded".to_string(), None, false)
++                }
++            },
++            |_| false,
++            |_| unreachable!("non-exact observation cannot become stable"),
++            |_, _, _, _| {},
++            |current, previous| current.1 = Some(previous.0.clone()),
++            |_| {},
++        );
++        assert_eq!(result.0, "deadline-exceeded");
++        assert_eq!(result.1.as_deref(), Some("specific-before-deadline"));
++        assert!(!result.2, "diagnostic history must not satisfy the guard");
++    }
++
++    #[test]
++    fn stable_interval_starts_when_the_observation_finishes() {
++        use std::cell::Cell;
++
++        let base = Instant::now();
++        let elapsed = Cell::new(Duration::ZERO);
++        let observed = Cell::new(0usize);
++        let result = wait_for_exact_window_with(
++            base + VERIFY_TIMEOUT,
++            || base + elapsed.get(),
++            |_| {
++                observed.set(observed.get() + 1);
++                elapsed.set(elapsed.get() + Duration::from_millis(10));
++                ((), false)
++            },
++            |_| true,
++            |value| value.1 = true,
++            |_, _, _, _| {},
++            |_, _| {},
++            |duration| elapsed.set(elapsed.get() + duration),
++        );
++        assert!(result.1);
++        assert_eq!(observed.get(), 5);
++        assert_eq!(elapsed.get(), Duration::from_millis(130));
++    }
++
++    #[test]
++    fn poll_sleep_is_capped_to_the_remaining_deadline() {
++        use std::cell::Cell;
++
++        let base = Instant::now();
++        let elapsed = Cell::new(Duration::from_millis(890));
++        let observed = Cell::new(0usize);
++        let slept = std::cell::RefCell::new(Vec::new());
++        let deadline_reached = Cell::new(false);
++        let result = wait_for_exact_window_with(
++            base + VERIFY_TIMEOUT,
++            || base + elapsed.get(),
++            |_| {
++                observed.set(observed.get() + 1);
++                ((), false)
++            },
++            |_| false,
++            |_| unreachable!("non-exact observation cannot become stable"),
++            |_, _, _, reached| deadline_reached.set(reached),
++            |_, _| {},
++            |duration| {
++                slept.borrow_mut().push(duration);
++                elapsed.set(elapsed.get() + duration);
++            },
++        );
++        assert_eq!(result, ((), false));
++        assert_eq!(*slept.borrow(), vec![Duration::from_millis(10)]);
++        assert_eq!(observed.get(), 1, "do not start an expired observation");
++        assert!(deadline_reached.get());
++    }
++
++    #[test]
+     fn exact_success_requires_process_focus_and_layer_zero_order() {
+         assert_eq!(
+             classify_exact_outcome(
+@@ -692,6 +907,12 @@
+                 observation(Some(9), Some(true), Some(7), Some(7), true),
+             ),
+             ExactOutcome::Activated
++        );
++        let mut not_stable_yet = observation(Some(42), Some(true), Some(7), Some(7), true);
++        not_stable_yet.verification_stable = false;
++        assert_eq!(
++            classify_exact_outcome(true, 42, 7, not_stable_yet),
++            ExactOutcome::Partial
+         );
+         for incomplete in [
+             observation(Some(42), Some(false), Some(7), Some(7), true),
+@@ -866,6 +1087,18 @@
+             .as_object_mut()
+             .expect("observed object")
+             .remove("ordinary_window_classification");
++        for key in [
++            "verification_stable",
++            "verification_poll_count",
++            "verification_elapsed_ms",
++            "verification_deadline_reached",
++            "prior_observation_diagnostic_only",
++        ] {
++            structured["observed"]
++                .as_object_mut()
++                .expect("observed object")
++                .remove(key);
++        }
+         assert_eq!(
+             structured,
+             json!({
+@@ -1053,6 +1286,18 @@
+                 .as_object_mut()
+                 .expect("observed object")
+                 .remove("ordinary_window_classification");
++            for key in [
++                "verification_stable",
++                "verification_poll_count",
++                "verification_elapsed_ms",
++                "verification_deadline_reached",
++                "prior_observation_diagnostic_only",
++            ] {
++                structured["observed"]
++                    .as_object_mut()
++                    .expect("observed object")
++                    .remove(key);
++            }
+             assert_eq!(structured, expected);
+         }
+     }
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+@@ -148,6 +148,8 @@
+         "layer": row.layer,
+         "z_index": row.z_index,
+         "is_on_screen": row.is_on_screen,
++        "visibility_source": row.visibility_source,
++        "raw_is_on_screen": row.raw_is_on_screen,
+         "bounds": {
+             "x": row.bounds.x,
+             "y": row.bounds.y,
+@@ -174,6 +176,7 @@
+             "allowed": report.allowed,
+             "enumeration": {
+                 "read_status": report.read_status,
++                "source_options": report.source_options,
+                 "raw_row_count": report.raw_row_count,
+                 "parsed_row_count": report.parsed_row_count,
+                 "malformed_row_count": report.malformed_row_count,
+@@ -195,7 +198,7 @@
+         })
+     });
+     json!({
+-        "schema": "foreground-pixel-guard-diagnostic-v1",
++        "schema": "foreground-pixel-guard-diagnostic-v2",
+         "target": { "pid": target_pid, "window_id": target_window_id },
+         "frontmost_pid": {
+             "status": if frontmost_pid.is_some() { "available" } else { "unavailable" },
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/foreground_oracle_diagnostic.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/foreground_oracle_diagnostic.rs
+@@ -8,11 +8,12 @@
+     protocol::ToolResult,
+     tool::{Tool, ToolDef},
+ };
+-use serde_json::{json, Value};
++use serde_json::{Value, json};
+ use std::{
+     sync::{
++        OnceLock,
+         atomic::{AtomicBool, Ordering},
+-        mpsc, OnceLock,
++        mpsc,
+     },
+     thread,
+     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+@@ -308,13 +309,22 @@
+             element_owner_status: "deadline_expired",
+         }
+     };
+-    let report = if remaining(deadline).is_some() {
+-        Some(crate::windows::exact_window_hit_test_report(
+-            pid, window_id, x, y, None,
++    let published_overlay_id = crate::cursor::overlay::owned_mouse_ignoring_overlay_window_id();
++    let click_equivalent_overlay =
++        published_overlay_id.map(|overlay_id| (std::process::id() as i32, overlay_id));
++    let reports = if remaining(deadline).is_some() {
++        Some(crate::windows::exact_window_hit_test_dual_report(
++            pid,
++            window_id,
++            x,
++            y,
++            click_equivalent_overlay,
+         ))
+     } else {
+         None
+     };
++    let raw_report = reports.as_ref().map(|reports| &reports.0);
++    let click_equivalent_report = reports.as_ref().map(|reports| &reports.1);
+     let after = if remaining(deadline).is_some() {
+         crate::input::skylight::observe_front_process(pid, window_id)
+     } else {
+@@ -329,11 +339,23 @@
+         _ => None,
+     };
+ 
+-    let point_top = report.as_ref().and_then(|report| {
++    // Keep the no-overlay projection as a conservative completeness signal for
++    // the independent-oracle conclusion. The click-equivalent projection is
++    // reported separately: a malformed known-identity row behind the target
++    // can leave the click projection allowed while this diagnostic stays
++    // inconclusive because its raw inventory is incomplete.
++    let raw_point_top = raw_report.and_then(|report| {
+         if report.read_status != "ok"
+             || report.malformed_row_count != 0
+             || report.target_row.is_none()
+         {
++            None
++        } else {
++            Some(report.allowed)
++        }
++    });
++    let click_equivalent_point_top = click_equivalent_report.and_then(|report| {
++        if report.read_status != "ok" || report.target_row.is_none() {
+             None
+         } else {
+             Some(report.allowed)
+@@ -346,7 +368,7 @@
+         front_target,
+         ax.focused_window_id,
+         ax.focused_element_owner_pid,
+-        point_top,
++        raw_point_top,
+     );
+     let conclusion =
+         classify_appkit_independent(conclusion, workspace_front_pid, target_active, pid);
+@@ -356,7 +378,7 @@
+         && target_active.is_some()
+         && ax.focused_window_id.is_some()
+         && ax.focused_element_owner_pid.is_some()
+-        && report.as_ref().is_some_and(|report| {
++        && raw_report.is_some_and(|report| {
+             report.read_status == "ok"
+                 && report.malformed_row_count == 0
+                 && report.target_row.is_some()
+@@ -387,15 +409,23 @@
+             "focusedElementOwnerPid": {"status": ax.element_owner_status, "value": ax.focused_element_owner_pid}
+         },
+         "cgPoint": {
+-            "status": report.as_ref().map(|r| if r.read_status == "ok" && r.malformed_row_count == 0 { "available" } else { "unknown_incomplete_inventory" }).unwrap_or("deadline_expired"),
+-            "targetIdentity": report.as_ref().and_then(|r| r.target_row.as_ref()).map(|row| json!({"pid": row.pid, "windowId": row.window_id, "layer": row.layer, "zIndex": row.z_index, "onScreen": row.is_on_screen})),
+-            "pointTopMatchesTarget": point_top,
+-            "readStatus": report.as_ref().map(|r| r.read_status),
+-            "rawRows": report.as_ref().and_then(|r| r.raw_row_count),
+-            "parsedRows": report.as_ref().map(|r| r.parsed_row_count),
+-            "malformedRows": report.as_ref().map(|r| r.malformed_row_count),
+-            "outcome": report.as_ref().map(|r| r.outcome),
+-            "firstBlockingWindow": report.as_ref().and_then(|r| r.first_blocking_row.as_ref()).map(|row| json!({"pid": row.pid, "windowId": row.window_id, "layer": row.layer, "zIndex": row.z_index, "onScreen": row.is_on_screen}))
++            "status": raw_report.map(|r| if r.read_status == "ok" && r.malformed_row_count == 0 { "available" } else { "unknown_incomplete_inventory" }).unwrap_or("deadline_expired"),
++            "pointScreenCoordinates": {"x": x, "y": y, "coordinateSpace": "window_server_screen_points"},
++            "publishedMouseIgnoringOverlay": published_overlay_id.map(|window_id| json!({"pid": std::process::id(), "windowId": window_id})),
++            "targetIdentity": raw_report.and_then(|r| r.target_row.as_ref()).map(|row| json!({"pid": row.pid, "windowId": row.window_id, "layer": row.layer, "zIndex": row.z_index, "onScreen": row.is_on_screen})),
++            "rawPointTopMatchesTarget": raw_point_top,
++            "clickEquivalentPointTopMatchesTarget": click_equivalent_point_top,
++            "conclusionPointProjection": "no_overlay_exemption_conservative_completeness",
++            "readStatus": raw_report.map(|r| r.read_status),
++            "rawRows": raw_report.and_then(|r| r.raw_row_count),
++            "parsedRows": raw_report.map(|r| r.parsed_row_count),
++            "malformedRows": raw_report.map(|r| r.malformed_row_count),
++            "outcome": raw_report.map(|r| r.outcome),
++            "firstBlockingWindow": raw_report.and_then(|r| r.first_blocking_row.as_ref()).map(|row| json!({"pid": row.pid, "windowId": row.window_id, "layer": row.layer, "zIndex": row.z_index, "onScreen": row.is_on_screen})),
++            "rawReport": raw_report.map(|report| point_report_json(report, "no_overlay_exemption")),
++            "clickEquivalentReport": click_equivalent_report.map(|report| point_report_json(report, "click_equivalent")),
++            "diagnosticOnly": true,
++            "authorizesInput": false
+         },
+         "conclusion": match conclusion {
+             EvidenceConclusion::TargetConsistent => "independent_oracles_target_consistent",
+@@ -403,6 +433,40 @@
+             EvidenceConclusion::FocusOrOcclusionMismatch => "focus_or_point_mismatch",
+             EvidenceConclusion::Inconclusive => "inconclusive",
+         }
++    })
++}
++
++fn point_report_json(report: &crate::windows::PointHitTestReport, projection: &str) -> Value {
++    let row = |row: &crate::windows::PointWindowReport| {
++        json!({
++            "pid": row.pid,
++            "windowId": row.window_id,
++            "layer": row.layer,
++            "zIndex": row.z_index,
++            "onScreen": row.is_on_screen,
++            "visibilitySource": row.visibility_source,
++            "rawIsOnscreenKey": row.raw_is_on_screen,
++            "bounds": {
++                "x": row.bounds.x,
++                "y": row.bounds.y,
++                "width": row.bounds.width,
++                "height": row.bounds.height,
++            },
++        })
++    };
++    json!({
++        "projection": projection,
++        "status": report.outcome,
++        "allowed": report.allowed,
++        "enumeration": {
++            "readStatus": report.read_status,
++            "sourceOptions": report.source_options,
++            "rawRows": report.raw_row_count,
++            "parsedRows": report.parsed_row_count,
++            "malformedRows": report.malformed_row_count,
++        },
++        "targetRow": report.target_row.as_ref().map(row),
++        "firstBlockingRow": report.first_blocking_row.as_ref().map(row),
+     })
+ }
+ 
+@@ -434,7 +498,7 @@
+     }
+     let elapsed = start.elapsed();
+     json!({
+-        "schema": "foreground-oracle-diagnostic-v1",
++        "schema": "foreground-oracle-diagnostic-v2",
+         "diagnosticOnly": true,
+         "authorizesInput": false,
+         "target": {"pid": pid, "windowId": window_id, "screenX": x, "screenY": y},
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs
+@@ -21,9 +21,11 @@
+             infer one), is_on_screen, space_ids, current_space_id (the active Space on that \
+             window's display), and on_current_space. The top-level current_space_id is \
+             WindowServer's main/global active Space and can differ from a record's \
+-            current_space_id when displays use independent Spaces. To select a frontmost candidate, take the \
+-            maximum integer z_index; if every value is null, use an explicit fallback instead of \
+-            relying on array order.".into(),
++            current_space_id when displays use independent Spaces. z_index describes WindowServer \
++            stacking order only; it does not prove which window is physically focused. The \
++            inventory.foreground field is present only when AppKit frontmost PID and Accessibility \
++            focused window ID agree across a stable before/after sample and match one returned \
++            visible row. Do not infer focus from z_index or row order.".into(),
+         input_schema: serde_json::json!({
+             "type": "object",
+             "properties": {
+@@ -56,27 +58,102 @@
+         let pid_filter: Option<i32> = args.opt_i64("pid").map(|v| v as i32);
+         let on_screen_only = args.bool_or("on_screen_only", false);
+ 
+-        let enumeration = if on_screen_only {
+-            crate::windows::visible_windows_with_space_snapshot()
+-        } else {
+-            crate::windows::all_windows_with_space_snapshot()
+-        };
++        let frontmost_before = crate::apps::frontmost_pid();
++        let focused_before =
++            frontmost_before.and_then(crate::ax::bindings::focused_window_id_of_pid);
++
++        let enumeration = crate::windows::list_windows_with_space_scope(pid_filter, on_screen_only);
+         let current_space_id = enumeration.current_space_id;
+-        let mut windows = enumeration.windows;
+-
+-        if let Some(pid) = pid_filter {
+-            windows.retain(|w| w.pid == pid);
+-        }
+-
++        let windows = enumeration.windows.clone();
++
++        let frontmost_after = crate::apps::frontmost_pid();
++        let focused_after = frontmost_after.and_then(crate::ax::bindings::focused_window_id_of_pid);
++        let foreground = verified_foreground_window(
++            &windows,
++            frontmost_before,
++            focused_before,
++            frontmost_after,
++            focused_after,
++        );
+         let windows_json: Vec<Value> = windows.iter().map(window_record_json).collect();
++        let inventory = inventory_evidence(
++            &enumeration,
++            pid_filter,
++            on_screen_only,
++            windows_json.len(),
++            foreground,
++        );
++        let reported_foreground = (inventory["complete"] == Value::Bool(true))
++            .then_some(foreground)
++            .flatten();
+ 
+         ToolResult::text(format!("Found {} window(s).", windows_json.len())).with_structured(
+             serde_json::json!({
+                 "windows": windows_json,
+-                "current_space_id": current_space_id
++                "current_space_id": current_space_id,
++                "complete": inventory["complete"],
++                "truncated": false,
++                "foreground_pid": reported_foreground.map(|(pid, _)| pid),
++                "foreground_window_id": reported_foreground.map(|(_, window_id)| window_id),
++                "inventory": inventory,
+             }),
+         )
+     }
++}
++
++fn inventory_evidence(
++    enumeration: &crate::windows::WindowEnumeration,
++    pid_filter: Option<i32>,
++    on_screen_only: bool,
++    row_count: usize,
++    foreground: Option<(i32, u32)>,
++) -> Value {
++    let complete = enumeration.read_status == "ok"
++        && enumeration.raw_row_count == Some(row_count)
++        && enumeration.malformed_row_count == 0;
++    serde_json::json!({
++        "version": "macos-window-inventory-v1",
++        "scope": {
++            "layer": 0,
++            "pid": pid_filter,
++            "on_screen_only": on_screen_only,
++        },
++        "complete": complete,
++        "truncated": false,
++        "read_status": enumeration.read_status,
++        "raw_row_count": enumeration.raw_row_count,
++        "row_count": row_count,
++        "malformed_row_count": enumeration.malformed_row_count,
++        "foreground": (complete.then_some(foreground).flatten()).map(|(pid, window_id)| serde_json::json!({
++            "status": "verified",
++            "pid": pid,
++            "window_id": window_id,
++        })),
++    })
++}
++
++fn verified_foreground_window(
++    windows: &[crate::windows::WindowInfo],
++    frontmost_before: Option<i32>,
++    focused_before: Option<u32>,
++    frontmost_after: Option<i32>,
++    focused_after: Option<u32>,
++) -> Option<(i32, u32)> {
++    let pid = frontmost_before?;
++    let window_id = focused_before?;
++    if frontmost_after != Some(pid) || focused_after != Some(window_id) {
++        return None;
++    }
++    let matches = windows
++        .iter()
++        .filter(|window| {
++            window.pid == pid
++                && window.window_id == window_id
++                && window.layer == 0
++                && window.is_on_screen
++        })
++        .count();
++    (matches == 1).then_some((pid, window_id))
+ }
+ 
+ pub(super) fn window_record_json(w: &crate::windows::WindowInfo) -> Value {
+@@ -103,6 +180,41 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    fn sample_window(pid: i32, window_id: u32, is_on_screen: bool) -> crate::windows::WindowInfo {
++        crate::windows::WindowInfo {
++            window_id,
++            pid,
++            app_name: "TextEdit".into(),
++            title: "Untitled".into(),
++            bounds: crate::windows::WindowBounds {
++                x: 0.0,
++                y: 0.0,
++                width: 640.0,
++                height: 480.0,
++            },
++            layer: 0,
++            z_index: 1,
++            is_on_screen,
++            current_space_id: None,
++            on_current_space: None,
++            space_ids: None,
++        }
++    }
++
++    fn sample_enumeration(
++        read_status: &'static str,
++        raw_row_count: Option<usize>,
++        malformed_row_count: usize,
++    ) -> crate::windows::WindowEnumeration {
++        crate::windows::WindowEnumeration {
++            windows: vec![sample_window(42, 100, true)],
++            current_space_id: Some(7),
++            read_status,
++            raw_row_count,
++            malformed_row_count,
++        }
++    }
+ 
+     #[test]
+     fn window_record_includes_observed_z_index() {
+@@ -135,4 +247,96 @@
+             serde_json::json!(true)
+         );
+     }
+-}
++
++    #[test]
++    fn inventory_attestation_binds_scope_and_distinguishes_unreadable_or_malformed_rows() {
++        let complete = inventory_evidence(
++            &sample_enumeration("ok", Some(1), 0),
++            Some(42),
++            false,
++            1,
++            Some((42, 100)),
++        );
++        assert_eq!(complete["version"], "macos-window-inventory-v1");
++        assert_eq!(
++            complete["scope"],
++            serde_json::json!({ "layer": 0, "pid": 42, "on_screen_only": false })
++        );
++        assert_eq!(complete["complete"], true);
++        assert_eq!(complete["raw_row_count"], 1);
++        assert_eq!(complete["row_count"], 1);
++        assert_eq!(complete["malformed_row_count"], 0);
++        assert_eq!(
++            complete["foreground"],
++            serde_json::json!({ "status": "verified", "pid": 42, "window_id": 100 })
++        );
++
++        let omitted_row = inventory_evidence(
++            &sample_enumeration("ok", Some(2), 0),
++            Some(42),
++            false,
++            1,
++            None,
++        );
++        assert_eq!(
++            omitted_row["complete"], false,
++            "a scoped row-count mismatch cannot attest completeness"
++        );
++        let malformed = inventory_evidence(
++            &sample_enumeration("ok", Some(2), 1),
++            Some(42),
++            false,
++            1,
++            None,
++        );
++        assert_eq!(malformed["complete"], false);
++        assert_eq!(malformed["malformed_row_count"], 1);
++        let unavailable = inventory_evidence(
++            &sample_enumeration("unavailable", None, 0),
++            Some(42),
++            false,
++            0,
++            None,
++        );
++        assert_eq!(unavailable["complete"], false);
++        assert_eq!(unavailable["read_status"], "unavailable");
++        assert_eq!(unavailable["raw_row_count"], Value::Null);
++    }
++
++    #[test]
++    fn foreground_is_attested_only_for_stable_exact_visible_ax_focus() {
++        let visible = vec![sample_window(42, 100, true), sample_window(42, 101, true)];
++        assert_eq!(
++            verified_foreground_window(&visible, Some(42), Some(101), Some(42), Some(101)),
++            Some((42, 101))
++        );
++        assert_eq!(
++            verified_foreground_window(&visible, Some(42), Some(101), Some(7), Some(101)),
++            None
++        );
++        assert_eq!(
++            verified_foreground_window(&visible, Some(42), Some(101), Some(42), Some(100)),
++            None
++        );
++        assert_eq!(
++            verified_foreground_window(
++                &[sample_window(42, 100, false)],
++                Some(42),
++                Some(100),
++                Some(42),
++                Some(100)
++            ),
++            None
++        );
++        assert_eq!(
++            verified_foreground_window(
++                &[sample_window(42, 100, true), sample_window(42, 100, true)],
++                Some(42),
++                Some(100),
++                Some(42),
++                Some(100)
++            ),
++            None
++        );
++    }
++}
+--- a/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
+@@ -38,11 +38,52 @@
+     pub(crate) malformed_row_count: usize,
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct ListWindowsScope {
++    pub(crate) pid: Option<i32>,
++    pub(crate) on_screen_only: bool,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum ScopedRowDisposition {
++    Included,
++    Excluded,
++    Unknown,
++}
++
++fn classify_list_windows_row(
++    layer: Option<i32>,
++    pid: Option<i32>,
++    is_on_screen: Option<bool>,
++    scope: ListWindowsScope,
++) -> ScopedRowDisposition {
++    let Some(layer) = layer else {
++        return ScopedRowDisposition::Unknown;
++    };
++    if layer != 0 {
++        return ScopedRowDisposition::Excluded;
++    }
++    let Some(pid) = pid.filter(|pid| *pid > 0) else {
++        return ScopedRowDisposition::Unknown;
++    };
++    if scope.pid.is_some_and(|scope_pid| scope_pid != pid) {
++        return ScopedRowDisposition::Excluded;
++    }
++    let Some(is_on_screen) = is_on_screen else {
++        return ScopedRowDisposition::Unknown;
++    };
++    if scope.on_screen_only && !is_on_screen {
++        return ScopedRowDisposition::Excluded;
++    }
++    ScopedRowDisposition::Included
++}
++
+ #[derive(Debug, Clone)]
+ pub(crate) struct PointHitTestReport {
+     pub(crate) allowed: bool,
+     pub(crate) outcome: &'static str,
+     pub(crate) read_status: &'static str,
++    pub(crate) source_options: &'static str,
+     pub(crate) raw_row_count: Option<usize>,
+     pub(crate) parsed_row_count: usize,
+     pub(crate) malformed_row_count: usize,
+@@ -57,7 +98,139 @@
+     pub(crate) layer: i32,
+     pub(crate) z_index: usize,
+     pub(crate) is_on_screen: bool,
++    pub(crate) visibility_source: &'static str,
++    pub(crate) raw_is_on_screen: &'static str,
+     pub(crate) bounds: WindowBounds,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum RawOnscreenKey {
++    True,
++    False,
++    Missing,
++    Invalid,
++}
++
++fn list_windows_onscreen_value(
++    raw: RawOnscreenKey,
++    scope: Option<ListWindowsScope>,
++) -> Option<bool> {
++    match raw {
++        RawOnscreenKey::True => Some(true),
++        RawOnscreenKey::False => Some(false),
++        // Apple's CGWindowList contract says a missing kCGWindowIsOnscreen key
++        // means the window is not ordered on screen. Keep this interpretation
++        // local to scoped list_windows enumeration; point hit-testing and the
++        // unscoped inventory retain their stricter unknown handling.
++        RawOnscreenKey::Missing if scope.is_some() => Some(false),
++        RawOnscreenKey::Missing | RawOnscreenKey::Invalid => None,
++    }
++}
++
++#[cfg(target_os = "macos")]
++fn point_cf_number(
++    dict: &core_foundation::dictionary::CFDictionary<
++        *const std::os::raw::c_void,
++        *const std::os::raw::c_void,
++    >,
++    key: &str,
++) -> Option<f64> {
++    use core_foundation::{
++        base::{CFGetTypeID, TCFType},
++        number::CFNumber,
++        string::CFString,
++    };
++    use std::os::raw::c_void;
++    let key = CFString::new(key);
++    let value = *dict.find(key.as_concrete_TypeRef() as *const c_void)?;
++    if unsafe { CFGetTypeID(value) } != CFNumber::type_id() {
++        return None;
++    }
++    unsafe { CFNumber::wrap_under_get_rule(value as _).to_f64() }
++}
++
++#[cfg(target_os = "macos")]
++fn point_cf_integer(
++    dict: &core_foundation::dictionary::CFDictionary<
++        *const std::os::raw::c_void,
++        *const std::os::raw::c_void,
++    >,
++    key: &str,
++) -> Option<i64> {
++    let value = point_cf_number(dict, key)?;
++    (value.is_finite()
++        && value.fract() == 0.0
++        && value >= i64::MIN as f64
++        && value < -(i64::MIN as f64))
++        .then_some(value as i64)
++}
++
++#[cfg(target_os = "macos")]
++fn point_cf_onscreen(
++    dict: &core_foundation::dictionary::CFDictionary<
++        *const std::os::raw::c_void,
++        *const std::os::raw::c_void,
++    >,
++) -> RawOnscreenKey {
++    use core_foundation::{
++        base::{CFGetTypeID, TCFType},
++        boolean::CFBoolean,
++        string::CFString,
++    };
++    use std::os::raw::c_void;
++    let key = CFString::new("kCGWindowIsOnscreen");
++    match dict
++        .find(key.as_concrete_TypeRef() as *const c_void)
++        .map(|v| *v)
++    {
++        None => RawOnscreenKey::Missing,
++        Some(value) if unsafe { CFGetTypeID(value) } == CFBoolean::type_id() => {
++            if bool::from(unsafe { CFBoolean::wrap_under_get_rule(value as _) }) {
++                RawOnscreenKey::True
++            } else {
++                RawOnscreenKey::False
++            }
++        }
++        Some(_) => RawOnscreenKey::Invalid,
++    }
++}
++
++impl RawOnscreenKey {
++    fn label(self) -> &'static str {
++        match self {
++            Self::True => "true",
++            Self::False => "false",
++            Self::Missing => "missing",
++            Self::Invalid => "invalid_type",
++        }
++    }
++}
++
++#[derive(Debug, Clone)]
++struct PointSnapshotWindow {
++    pid: i32,
++    window_id: u32,
++    layer: i32,
++    z_index: usize,
++    bounds: WindowBounds,
++    raw_is_on_screen: RawOnscreenKey,
++}
++
++#[derive(Debug, Clone)]
++pub(crate) struct PointSnapshot {
++    windows: Vec<PointSnapshotWindow>,
++    unusable_rows: Vec<PointSnapshotUnusableRow>,
++    duplicate_identities: Vec<(i32, u32)>,
++    raw_row_count: Option<usize>,
++    malformed_row_count: usize,
++    read_status: &'static str,
++}
++
++#[derive(Debug, Clone)]
++struct PointSnapshotUnusableRow {
++    identity: Option<(i32, u32)>,
++    z_index: usize,
++    raw_is_on_screen: RawOnscreenKey,
+ }
+ 
+ // ── CGWindow option flags ─────────────────────────────────────────────────────
+@@ -107,6 +280,29 @@
+     enumerate_windows(
+         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+         LayerFilter::ZeroOnly,
++    )
++}
++
++/// Enumerate the exact PID/on-screen scope requested by the public list_windows
++/// tool. Rows with a known different PID or nonzero layer are excluded before
++/// validating fields that cannot affect this scope. Unknown layer or owner
++/// remains malformed because it cannot be safely excluded.
++pub(crate) fn list_windows_with_space_scope(
++    pid: Option<i32>,
++    on_screen_only: bool,
++) -> WindowEnumeration {
++    let options = (if on_screen_only {
++        kCGWindowListOptionOnScreenOnly
++    } else {
++        0
++    }) | kCGWindowListExcludeDesktopElements;
++    enumerate_windows_with_scope(
++        options,
++        LayerFilter::ZeroOnly,
++        Some(ListWindowsScope {
++            pid,
++            on_screen_only,
++        }),
+     )
+ }
+ 
+@@ -166,6 +362,7 @@
+         allowed,
+         outcome,
+         read_status,
++        source_options: "legacy_projected_rows",
+         raw_row_count,
+         parsed_row_count: windows.len(),
+         malformed_row_count,
+@@ -178,6 +375,8 @@
+         layer: window.layer,
+         z_index: window.z_index,
+         is_on_screen: window.is_on_screen,
++        visibility_source: "legacy_projection",
++        raw_is_on_screen: "unavailable",
+         bounds: window.bounds.clone(),
+     };
+ 
+@@ -185,7 +384,12 @@
+         return report(false, "invalid_point", None, None);
+     }
+     if read_status != "ok" {
+-        return report(false, "enumeration_unavailable", None, None);
++        let outcome = match read_status {
++            "visibility_conflict" => "visibility_conflict",
++            "malformed_snapshot" => "malformed_snapshot",
++            _ => "enumeration_unavailable",
++        };
++        return report(false, outcome, None, None);
+     }
+ 
+     let Some(target) = windows
+@@ -271,10 +475,120 @@
+     y: f64,
+     owned_mouse_ignoring_overlay: Option<(i32, u32)>,
+ ) -> PointHitTestReport {
+-    let enumeration = all_windows_any_layer_snapshot();
+-    point_hit_test_report_in(
+-        &enumeration.windows,
+-        enumeration.read_status,
++    let enumeration = point_snapshot_onscreen_any_layer();
++    point_hit_test_report_from_onscreen_snapshot(
++        &enumeration,
++        target_pid,
++        target_window_id,
++        x,
++        y,
++        owned_mouse_ignoring_overlay,
++    )
++}
++
++pub(crate) fn exact_window_hit_test_dual_report(
++    target_pid: i32,
++    target_window_id: u32,
++    x: f64,
++    y: f64,
++    click_equivalent_overlay: Option<(i32, u32)>,
++) -> (PointHitTestReport, PointHitTestReport) {
++    let snapshot = point_snapshot_onscreen_any_layer();
++    point_hit_test_dual_reports_from_onscreen_snapshot(
++        &snapshot,
++        target_pid,
++        target_window_id,
++        x,
++        y,
++        click_equivalent_overlay,
++    )
++}
++
++fn point_hit_test_report_from_onscreen_snapshot(
++    enumeration: &PointSnapshot,
++    target_pid: i32,
++    target_window_id: u32,
++    x: f64,
++    y: f64,
++    owned_mouse_ignoring_overlay: Option<(i32, u32)>,
++) -> PointHitTestReport {
++    let conflicts = enumeration
++        .windows
++        .iter()
++        .map(|row| row.raw_is_on_screen)
++        .chain(
++            enumeration
++                .unusable_rows
++                .iter()
++                .map(|row| row.raw_is_on_screen),
++        )
++        .any(|raw| !matches!(raw, RawOnscreenKey::True | RawOnscreenKey::Missing));
++    let windows: Vec<WindowInfo> = enumeration
++        .windows
++        .iter()
++        .map(|row| WindowInfo {
++            window_id: row.window_id,
++            pid: row.pid,
++            app_name: String::new(),
++            title: String::new(),
++            bounds: row.bounds.clone(),
++            layer: row.layer,
++            z_index: row.z_index,
++            // Membership in this API's OnScreenOnly result is the visibility
++            // evidence when the optional key is absent. Explicit false is a
++            // contradiction and must never become an allowed hit test.
++            is_on_screen: matches!(
++                row.raw_is_on_screen,
++                RawOnscreenKey::True | RawOnscreenKey::Missing
++            ),
++            current_space_id: None,
++            on_current_space: None,
++            space_ids: None,
++        })
++        .collect();
++    let duplicate_identity = enumeration.windows.iter().enumerate().any(|(index, row)| {
++        enumeration.windows[..index]
++            .iter()
++            .any(|prior| prior.pid == row.pid && prior.window_id == row.window_id)
++    });
++    let target_is_duplicated = enumeration
++        .duplicate_identities
++        .iter()
++        .any(|identity| *identity == (target_pid, target_window_id))
++        || duplicate_identity;
++    let target_unusable = enumeration
++        .unusable_rows
++        .iter()
++        .any(|row| row.identity == Some((target_pid, target_window_id)));
++    let target_z = enumeration
++        .windows
++        .iter()
++        .find(|row| row.pid == target_pid && row.window_id == target_window_id)
++        .map(|row| row.z_index);
++    let unknown_row_above_target = target_z.is_some_and(|target_z| {
++        enumeration
++            .unusable_rows
++            .iter()
++            .any(|row| row.identity.is_some() && row.z_index >= target_z)
++    });
++    let has_unidentified_row = enumeration
++        .unusable_rows
++        .iter()
++        .any(|row| row.identity.is_none());
++    let read_status = if conflicts {
++        "visibility_conflict"
++    } else if target_is_duplicated
++        || target_unusable
++        || has_unidentified_row
++        || unknown_row_above_target
++    {
++        "malformed_snapshot"
++    } else {
++        enumeration.read_status
++    };
++    let mut report = point_hit_test_report_in(
++        &windows,
++        read_status,
+         enumeration.raw_row_count,
+         enumeration.malformed_row_count,
+         target_pid,
+@@ -282,7 +596,188 @@
+         x,
+         y,
+         owned_mouse_ignoring_overlay,
+-    )
++    );
++    let attach_provenance = |reported: &mut Option<PointWindowReport>| {
++        if let Some(reported) = reported {
++            if let Some(row) = enumeration
++                .windows
++                .iter()
++                .find(|row| row.pid == reported.pid && row.window_id == reported.window_id)
++            {
++                reported.visibility_source = "cg_onscreen_only_membership";
++                reported.raw_is_on_screen = row.raw_is_on_screen.label();
++            }
++        }
++    };
++    attach_provenance(&mut report.target_row);
++    attach_provenance(&mut report.first_blocking_row);
++    report.source_options = "onscreen_only_exclude_desktop_any_layer";
++    report
++}
++
++/// Produce no-overlay and click-equivalent projections from the exact
++/// same strict OnScreenOnly point snapshot. Only the latter skips the exact
++/// published mouse-ignoring overlay tuple used by the click guard.
++pub(crate) fn point_hit_test_dual_reports_from_onscreen_snapshot(
++    snapshot: &PointSnapshot,
++    target_pid: i32,
++    target_window_id: u32,
++    x: f64,
++    y: f64,
++    click_equivalent_overlay: Option<(i32, u32)>,
++) -> (PointHitTestReport, PointHitTestReport) {
++    let raw = point_hit_test_report_from_onscreen_snapshot(
++        snapshot,
++        target_pid,
++        target_window_id,
++        x,
++        y,
++        None,
++    );
++    let click_equivalent = point_hit_test_report_from_onscreen_snapshot(
++        snapshot,
++        target_pid,
++        target_window_id,
++        x,
++        y,
++        click_equivalent_overlay,
++    );
++    (raw, click_equivalent)
++}
++
++/// Strict point-only enumeration. Unlike the general inventory parser this
++/// accepts a window only when every required identity/geometry field is typed
++/// and the source enumeration itself is OnScreenOnly.
++fn point_snapshot_onscreen_any_layer() -> PointSnapshot {
++    use core_foundation::{
++        array::CFArray,
++        base::{CFGetTypeID, CFTypeRef, TCFType},
++        dictionary::CFDictionary,
++        string::CFString,
++    };
++    use std::os::raw::c_void;
++
++    let raw_ref = unsafe {
++        CGWindowListCopyWindowInfo(
++            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
++            kCGNullWindowID,
++        )
++    };
++    if raw_ref.is_null() {
++        return PointSnapshot {
++            windows: Vec::new(),
++            unusable_rows: Vec::new(),
++            duplicate_identities: Vec::new(),
++            raw_row_count: None,
++            malformed_row_count: 0,
++            read_status: "unavailable",
++        };
++    }
++    let raw: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(raw_ref as _) };
++    let total = raw.len() as usize;
++    let dict_type = CFDictionary::<*const c_void, *const c_void>::type_id();
++    let mut windows = Vec::with_capacity(total);
++    let mut malformed = 0usize;
++    let mut seen = std::collections::HashSet::new();
++    let mut unusable_rows = Vec::new();
++    let mut duplicate_identities = Vec::new();
++    for (idx, item) in raw.iter().enumerate() {
++        let item = *item;
++        let z_index = z_index_from_front_to_back(total, idx);
++        if unsafe { CFGetTypeID(item) } != dict_type {
++            malformed += 1;
++            unusable_rows.push(PointSnapshotUnusableRow {
++                identity: None,
++                z_index,
++                raw_is_on_screen: RawOnscreenKey::Missing,
++            });
++            continue;
++        }
++        let dict: CFDictionary<*const c_void, *const c_void> =
++            unsafe { CFDictionary::wrap_under_get_rule(item as _) };
++        let value = |key: &str| {
++            let key = CFString::new(key);
++            dict.find(key.as_concrete_TypeRef() as *const c_void)
++                .map(|v| *v)
++        };
++        let number = |key: &str| point_cf_integer(&dict, key);
++        let bounds = || -> Option<WindowBounds> {
++            let v = value("kCGWindowBounds")?;
++            if unsafe { CFGetTypeID(v) } != dict_type {
++                return None;
++            }
++            let bounds: CFDictionary<*const c_void, *const c_void> =
++                unsafe { CFDictionary::wrap_under_get_rule(v as _) };
++            let coord = |key: &str| -> Option<f64> { point_cf_number(&bounds, key) };
++            Some(WindowBounds {
++                x: coord("X")?,
++                y: coord("Y")?,
++                width: coord("Width")?,
++                height: coord("Height")?,
++            })
++        };
++        let raw_onscreen = point_cf_onscreen(&dict);
++        let pid = number("kCGWindowOwnerPID").and_then(|v| i32::try_from(v).ok());
++        let window_id = number("kCGWindowNumber").and_then(|v| u32::try_from(v).ok());
++        let identity = pid
++            .zip(window_id)
++            .filter(|(pid, window_id)| *pid > 0 && *window_id > 0);
++        let Some((pid, window_id)) = identity else {
++            malformed += 1;
++            unusable_rows.push(PointSnapshotUnusableRow {
++                identity: None,
++                z_index,
++                raw_is_on_screen: raw_onscreen,
++            });
++            continue;
++        };
++        if !seen.insert((pid, window_id)) {
++            malformed += 1;
++            duplicate_identities.push((pid, window_id));
++            unusable_rows.push(PointSnapshotUnusableRow {
++                identity: Some((pid, window_id)),
++                z_index,
++                raw_is_on_screen: raw_onscreen,
++            });
++            continue;
++        }
++        let layer = number("kCGWindowLayer").and_then(|v| i32::try_from(v).ok());
++        let bounds = bounds();
++        let (Some(layer), Some(bounds)) = (layer, bounds) else {
++            malformed += 1;
++            unusable_rows.push(PointSnapshotUnusableRow {
++                identity: Some((pid, window_id)),
++                z_index,
++                raw_is_on_screen: raw_onscreen,
++            });
++            continue;
++        };
++        if !bounds_are_usable(&bounds) {
++            malformed += 1;
++            unusable_rows.push(PointSnapshotUnusableRow {
++                identity: Some((pid, window_id)),
++                z_index,
++                raw_is_on_screen: raw_onscreen,
++            });
++            continue;
++        }
++        windows.push(PointSnapshotWindow {
++            pid,
++            window_id,
++            layer,
++            z_index,
++            bounds,
++            raw_is_on_screen: raw_onscreen,
++        });
++    }
++    PointSnapshot {
++        windows,
++        unusable_rows,
++        duplicate_identities,
++        raw_row_count: Some(total),
++        malformed_row_count: malformed,
++        read_status: "ok",
++    }
+ }
+ 
+ /// Which CGWindow layers an enumeration admits.
+@@ -295,12 +790,18 @@
+ }
+ 
+ fn enumerate_windows(options: u32, layers: LayerFilter) -> WindowEnumeration {
++    enumerate_windows_with_scope(options, layers, None)
++}
++
++fn enumerate_windows_with_scope(
++    options: u32,
++    layers: LayerFilter,
++    scope: Option<ListWindowsScope>,
++) -> WindowEnumeration {
+     use core_foundation::{
+         array::CFArray,
+         base::{CFGetTypeID, CFTypeRef, TCFType},
+-        boolean::CFBoolean,
+         dictionary::CFDictionary,
+-        number::CFNumber,
+         string::CFString,
+     };
+     use std::os::raw::c_void;
+@@ -327,6 +828,8 @@
+     let total = raw.len() as usize;
+     let mut results = Vec::new();
+     let mut malformed_row_count = 0;
++    let mut scoped_raw_row_count = 0;
++    let mut seen_identities = std::collections::HashSet::new();
+ 
+     for (idx, item) in raw.iter().enumerate() {
+         let item = *item;
+@@ -334,26 +837,14 @@
+         let dict_type = CFDictionary::<*const c_void, *const c_void>::type_id();
+         if unsafe { CFGetTypeID(item) } != dict_type {
+             malformed_row_count += 1;
++            if scope.is_some() {
++                scoped_raw_row_count += 1;
++            }
+             continue;
+         }
+ 
+         let dict: CFDictionary<*const c_void, *const c_void> =
+             unsafe { CFDictionary::wrap_under_get_rule(item as _) };
+-
+-        // Helper: get number from dict by key string.
+-        let get_num = |key: &str| -> i64 {
+-            let k = CFString::new(key);
+-            dict.find(k.as_concrete_TypeRef() as *const c_void)
+-                .and_then(|v| unsafe {
+-                    let v = *v;
+-                    if CFGetTypeID(v) == CFNumber::type_id() {
+-                        CFNumber::wrap_under_get_rule(v as _).to_i64()
+-                    } else {
+-                        None
+-                    }
+-                })
+-                .unwrap_or(0)
+-        };
+ 
+         let get_str = |key: &str| -> String {
+             let k = CFString::new(key);
+@@ -369,62 +860,87 @@
+                 .unwrap_or_default()
+         };
+ 
+-        let get_bool = |key: &str| -> bool {
+-            let k = CFString::new(key);
+-            dict.find(k.as_concrete_TypeRef() as *const c_void)
+-                .map(|v| unsafe {
+-                    let v = *v;
+-                    if CFGetTypeID(v) == CFBoolean::type_id() {
+-                        bool::from(CFBoolean::wrap_under_get_rule(v as _))
+-                    } else {
+-                        false
+-                    }
+-                })
+-                .unwrap_or(false)
+-        };
+-
+-        let window_id = get_num("kCGWindowNumber") as u32;
+-        let pid = get_num("kCGWindowOwnerPID") as i32;
++        let layer =
++            point_cf_integer(&dict, "kCGWindowLayer").and_then(|value| i32::try_from(value).ok());
++        let Some(layer) = layer else {
++            malformed_row_count += 1;
++            if scope.is_some() {
++                scoped_raw_row_count += 1;
++            }
++            continue;
++        };
++
++        // Only include layer-0 windows, unless the caller asked for every layer.
++        // Rows outside the declared layer scope need no other fields; an unreadable
++        // layer cannot safely be classified as outside that scope.
++        if layer != 0 && layers == LayerFilter::ZeroOnly {
++            continue;
++        }
++
++        let pid = point_cf_integer(&dict, "kCGWindowOwnerPID")
++            .and_then(|value| i32::try_from(value).ok())
++            .filter(|value| *value > 0);
++        if let (Some(scope), Some(pid)) = (scope, pid) {
++            if scope.pid.is_some_and(|scope_pid| scope_pid != pid) {
++                continue;
++            }
++        }
++
++        let is_on_screen = list_windows_onscreen_value(point_cf_onscreen(&dict), scope);
++        if let Some(scope) = scope {
++            match classify_list_windows_row(Some(layer), pid, is_on_screen, scope) {
++                ScopedRowDisposition::Excluded => continue,
++                ScopedRowDisposition::Unknown => {
++                    malformed_row_count += 1;
++                    scoped_raw_row_count += 1;
++                    continue;
++                }
++                ScopedRowDisposition::Included => scoped_raw_row_count += 1,
++            }
++        }
++
++        let window_id = point_cf_integer(&dict, "kCGWindowNumber")
++            .and_then(|value| u32::try_from(value).ok())
++            .filter(|value| *value > 0);
++        let (Some(window_id), Some(pid), Some(is_on_screen)) = (window_id, pid, is_on_screen)
++        else {
++            malformed_row_count += 1;
++            continue;
++        };
+         let app_name = get_str("kCGWindowOwnerName");
+         let title = get_str("kCGWindowName");
+-        let layer = get_num("kCGWindowLayer") as i32;
+-        let is_on_screen = get_bool("kCGWindowIsOnscreen");
+-
+-        // Only include layer-0 windows, unless the caller asked for every layer.
+-        if layer != 0 && layers == LayerFilter::ZeroOnly {
++
++        if options & kCGWindowListOptionOnScreenOnly != 0 && !is_on_screen {
++            malformed_row_count += 1;
+             continue;
+         }
+ 
+-        // Parse bounds dict.
+-        let bounds = {
+-            let bk = CFString::new("kCGWindowBounds");
+-            dict.find(bk.as_concrete_TypeRef() as *const c_void)
+-                .and_then(|v| unsafe {
+-                    let v = *v;
+-                    if CFGetTypeID(v) == CFDictionary::<*const c_void, *const c_void>::type_id() {
+-                        let bd: CFDictionary<*const c_void, *const c_void> =
+-                            CFDictionary::wrap_under_get_rule(v as _);
+-                        let x = get_bounds_num(&bd, "X");
+-                        let y = get_bounds_num(&bd, "Y");
+-                        let w = get_bounds_num(&bd, "Width");
+-                        let h = get_bounds_num(&bd, "Height");
+-                        Some(WindowBounds {
+-                            x,
+-                            y,
+-                            width: w,
+-                            height: h,
+-                        })
+-                    } else {
+-                        None
+-                    }
++        let bounds = dict
++            .find(CFString::new("kCGWindowBounds").as_concrete_TypeRef() as *const c_void)
++            .and_then(|value| unsafe {
++                let value = *value;
++                if CFGetTypeID(value) != CFDictionary::<*const c_void, *const c_void>::type_id() {
++                    return None;
++                }
++                let bounds: CFDictionary<*const c_void, *const c_void> =
++                    CFDictionary::wrap_under_get_rule(value as _);
++                Some(WindowBounds {
++                    x: point_cf_number(&bounds, "X")?,
++                    y: point_cf_number(&bounds, "Y")?,
++                    width: point_cf_number(&bounds, "Width")?,
++                    height: point_cf_number(&bounds, "Height")?,
+                 })
+-                .unwrap_or(WindowBounds {
+-                    x: 0.,
+-                    y: 0.,
+-                    width: 0.,
+-                    height: 0.,
+-                })
+-        };
++            });
++        let Some(bounds) = bounds.filter(bounds_are_usable) else {
++            malformed_row_count += 1;
++            continue;
++        };
++
++        let identity = (pid, window_id);
++        if !seen_identities.insert(identity) {
++            malformed_row_count += 1;
++            continue;
++        }
+ 
+         // z_index: CGWindowList front-to-back → assign reverse index.
+         let z_index = z_index_from_front_to_back(total, idx);
+@@ -450,7 +966,7 @@
+                 windows: results,
+                 current_space_id,
+                 read_status: "ok",
+-                raw_row_count: Some(total),
++                raw_row_count: Some(scope.map_or(total, |_| scoped_raw_row_count)),
+                 malformed_row_count,
+             };
+         };
+@@ -467,7 +983,7 @@
+         windows: results,
+         current_space_id,
+         read_status: "ok",
+-        raw_row_count: Some(total),
++        raw_row_count: Some(scope.map_or(total, |_| scoped_raw_row_count)),
+         malformed_row_count,
+     }
+ }
+@@ -491,33 +1007,6 @@
+ 
+ fn z_index_from_front_to_back(total: usize, position: usize) -> usize {
+     total.saturating_sub(position)
+-}
+-
+-fn get_bounds_num(
+-    dict: &core_foundation::dictionary::CFDictionary<
+-        *const std::os::raw::c_void,
+-        *const std::os::raw::c_void,
+-    >,
+-    key: &str,
+-) -> f64 {
+-    use core_foundation::{
+-        base::{CFGetTypeID, TCFType},
+-        number::CFNumber,
+-        string::CFString,
+-    };
+-    use std::os::raw::c_void;
+-
+-    let k = CFString::new(key);
+-    dict.find(k.as_concrete_TypeRef() as *const c_void)
+-        .and_then(|v| unsafe {
+-            let v = *v;
+-            if CFGetTypeID(v) == CFNumber::type_id() {
+-                CFNumber::wrap_under_get_rule(v as _).to_f64()
+-            } else {
+-                None
+-            }
+-        })
+-        .unwrap_or(0.0)
+ }
+ 
+ /// Look up a window by its CGWindowID across every layer.
+@@ -602,6 +1091,192 @@
+     use super::*;
+ 
+     #[test]
++    fn scoped_list_windows_full_inventory_keeps_missing_onscreen_as_hidden() {
++        let full_scope = ListWindowsScope {
++            pid: Some(42),
++            on_screen_only: false,
++        };
++        let hidden = list_windows_onscreen_value(RawOnscreenKey::Missing, Some(full_scope));
++        assert_eq!(hidden, Some(false));
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), hidden, full_scope),
++            ScopedRowDisposition::Included,
++            "full PID scope retains a well-formed hidden window"
++        );
++        assert_eq!(
++            list_windows_onscreen_value(RawOnscreenKey::Missing, None),
++            None,
++            "unscoped enumeration keeps the existing strict missing-key behavior"
++        );
++    }
++
++    #[test]
++    fn scoped_list_windows_on_screen_only_excludes_missing_onscreen_rows() {
++        let full_scope = ListWindowsScope {
++            pid: Some(42),
++            on_screen_only: false,
++        };
++        let visible_scope = ListWindowsScope {
++            on_screen_only: true,
++            ..full_scope
++        };
++        let not_visible =
++            list_windows_onscreen_value(RawOnscreenKey::Missing, Some(visible_scope));
++        assert_eq!(not_visible, Some(false));
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), not_visible, visible_scope),
++            ScopedRowDisposition::Excluded,
++            "on-screen-only scope must not promote a hidden window to visible"
++        );
++    }
++
++    #[test]
++    fn scoped_list_windows_invalid_onscreen_type_remains_incomplete() {
++        let full_scope = ListWindowsScope {
++            pid: Some(42),
++            on_screen_only: false,
++        };
++        let wrong_type = list_windows_onscreen_value(RawOnscreenKey::Invalid, Some(full_scope));
++        assert_eq!(wrong_type, None);
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), wrong_type, full_scope),
++            ScopedRowDisposition::Unknown,
++            "an invalid CF value remains malformed in the full PID scope"
++        );
++    }
++
++    #[test]
++    fn list_windows_pid_scope_excludes_known_foreign_rows_but_fails_closed_on_unknown_identity() {
++        let scope = ListWindowsScope {
++            pid: Some(42),
++            on_screen_only: false,
++        };
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(99), None, scope),
++            ScopedRowDisposition::Excluded,
++            "a known different PID is outside the requested app scope before its unrelated fields are read",
++        );
++        assert_eq!(
++            classify_list_windows_row(Some(2), None, None, scope),
++            ScopedRowDisposition::Excluded,
++            "a known nonzero layer is outside list_windows even when its owner is unavailable",
++        );
++        assert_eq!(
++            classify_list_windows_row(None, Some(99), Some(true), scope),
++            ScopedRowDisposition::Unknown,
++            "an unreadable layer cannot be excluded safely",
++        );
++        assert_eq!(
++            classify_list_windows_row(Some(0), None, Some(true), scope),
++            ScopedRowDisposition::Unknown,
++            "an unreadable owner could belong to the requested PID",
++        );
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), None, scope),
++            ScopedRowDisposition::Unknown,
++            "a row in the requested PID scope still needs a typed visibility field",
++        );
++    }
++
++    #[test]
++    fn list_windows_on_screen_scope_excludes_known_offscreen_rows_only() {
++        let scope = ListWindowsScope {
++            pid: Some(42),
++            on_screen_only: true,
++        };
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), Some(false), scope),
++            ScopedRowDisposition::Excluded,
++        );
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), Some(true), scope),
++            ScopedRowDisposition::Included,
++        );
++        assert_eq!(
++            classify_list_windows_row(Some(0), Some(42), None, scope),
++            ScopedRowDisposition::Unknown,
++        );
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn strict_point_reader_uses_typed_core_foundation_dictionary_values() {
++        use core_foundation::{
++            base::{CFType, TCFType},
++            boolean::CFBoolean,
++            dictionary::CFDictionary,
++            number::CFNumber,
++            string::CFString,
++        };
++        type RawDict = CFDictionary<*const std::os::raw::c_void, *const std::os::raw::c_void>;
++        fn raw(dict: &CFDictionary<CFType, CFType>) -> RawDict {
++            unsafe { RawDict::wrap_under_get_rule(dict.as_concrete_TypeRef() as _) }
++        }
++
++        let owner_key = CFString::new("kCGWindowOwnerPID");
++        let id_key = CFString::new("kCGWindowNumber");
++        let visibility_key = CFString::new("kCGWindowIsOnscreen");
++        let owner = CFNumber::from(25280.0);
++        let id = CFNumber::from(7069.0);
++        let yes = CFBoolean::true_value();
++        let valid = CFDictionary::from_CFType_pairs(&[
++            (owner_key.as_CFType(), owner.as_CFType()),
++            (id_key.as_CFType(), id.as_CFType()),
++            (visibility_key.as_CFType(), yes.as_CFType()),
++        ]);
++        assert_eq!(
++            point_cf_integer(&raw(&valid), "kCGWindowOwnerPID"),
++            Some(25280)
++        );
++        assert_eq!(
++            point_cf_integer(&raw(&valid), "kCGWindowNumber"),
++            Some(7069)
++        );
++        assert_eq!(point_cf_onscreen(&raw(&valid)), RawOnscreenKey::True);
++
++        let no = CFBoolean::false_value();
++        let explicit_false = CFDictionary::from_CFType_pairs(&[
++            (owner_key.as_CFType(), owner.as_CFType()),
++            (id_key.as_CFType(), id.as_CFType()),
++            (visibility_key.as_CFType(), no.as_CFType()),
++        ]);
++        assert_eq!(
++            point_cf_onscreen(&raw(&explicit_false)),
++            RawOnscreenKey::False
++        );
++
++        let fractional = CFNumber::from(25280.5);
++        let wrong_numeric = CFDictionary::from_CFType_pairs(&[
++            (owner_key.as_CFType(), fractional.as_CFType()),
++            (id_key.as_CFType(), id.as_CFType()),
++            (visibility_key.as_CFType(), yes.as_CFType()),
++        ]);
++        assert_eq!(
++            point_cf_integer(&raw(&wrong_numeric), "kCGWindowOwnerPID"),
++            None
++        );
++
++        let wrong_visibility = CFDictionary::from_CFType_pairs(&[
++            (owner_key.as_CFType(), owner.as_CFType()),
++            (id_key.as_CFType(), id.as_CFType()),
++            (visibility_key.as_CFType(), owner.as_CFType()),
++        ]);
++        assert_eq!(
++            point_cf_onscreen(&raw(&wrong_visibility)),
++            RawOnscreenKey::Invalid
++        );
++
++        let missing_visibility = CFDictionary::from_CFType_pairs(&[
++            (owner_key.as_CFType(), owner.as_CFType()),
++            (id_key.as_CFType(), id.as_CFType()),
++        ]);
++        assert_eq!(
++            point_cf_onscreen(&raw(&missing_visibility)),
++            RawOnscreenKey::Missing
++        );
++    }
++
++    #[test]
+     fn cg_front_to_back_order_normalizes_to_higher_is_frontmost() {
+         let indices: Vec<_> = (0..3)
+             .map(|position| z_index_from_front_to_back(3, position))
+@@ -630,14 +1305,16 @@
+         assert_eq!(secondary_display_window.current_space_id, Some(4));
+         assert_eq!(secondary_display_window.space_ids, Some(vec![2, 4]));
+         assert_eq!(secondary_display_window.on_current_space, Some(true));
+-        assert!(secondary_display_window
+-            .space_ids
+-            .as_deref()
+-            .is_some_and(|spaces| spaces.contains(
+-                &secondary_display_window
+-                    .current_space_id
+-                    .expect("display Space must be present")
+-            )));
++        assert!(
++            secondary_display_window
++                .space_ids
++                .as_deref()
++                .is_some_and(|spaces| spaces.contains(
++                    &secondary_display_window
++                        .current_space_id
++                        .expect("display Space must be present")
++                ))
++        );
+     }
+ 
+     fn window(window_id: u32, pid: i32, app_name: &str) -> WindowInfo {
+@@ -659,6 +1336,215 @@
+             on_current_space: None,
+             space_ids: None,
+         }
++    }
++
++    fn point_row(
++        window_id: u32,
++        pid: i32,
++        z_index: usize,
++        raw: RawOnscreenKey,
++    ) -> PointSnapshotWindow {
++        PointSnapshotWindow {
++            pid,
++            window_id,
++            layer: 0,
++            z_index,
++            bounds: WindowBounds {
++                x: 0.0,
++                y: 0.0,
++                width: 100.0,
++                height: 100.0,
++            },
++            raw_is_on_screen: raw,
++        }
++    }
++
++    fn point_snapshot(rows: Vec<PointSnapshotWindow>) -> PointSnapshot {
++        PointSnapshot {
++            raw_row_count: Some(rows.len()),
++            windows: rows,
++            unusable_rows: vec![],
++            duplicate_identities: vec![],
++            malformed_row_count: 0,
++            read_status: "ok",
++        }
++    }
++
++    #[test]
++    fn point_membership_is_visibility_evidence_when_optional_key_is_missing() {
++        let snapshot = point_snapshot(vec![point_row(10, 100, 1, RawOnscreenKey::Missing)]);
++        let report =
++            point_hit_test_report_from_onscreen_snapshot(&snapshot, 100, 10, 5.0, 5.0, None);
++        assert!(report.allowed);
++        let target = report.target_row.unwrap();
++        assert_eq!(target.visibility_source, "cg_onscreen_only_membership");
++        assert_eq!(target.raw_is_on_screen, "missing");
++    }
++
++    #[test]
++    fn point_snapshot_rejects_explicit_false_and_wrong_type_visibility_keys() {
++        for raw in [RawOnscreenKey::False, RawOnscreenKey::Invalid] {
++            let snapshot = point_snapshot(vec![point_row(10, 100, 1, raw)]);
++            let report =
++                point_hit_test_report_from_onscreen_snapshot(&snapshot, 100, 10, 5.0, 5.0, None);
++            assert!(!report.allowed);
++            assert_eq!(report.outcome, "visibility_conflict");
++        }
++    }
++
++    #[test]
++    fn point_snapshot_preserves_nonzero_layer_and_same_pid_blockers() {
++        for (pid, layer) in [(100, 0), (200, 3)] {
++            let target = point_row(10, 100, 1, RawOnscreenKey::Missing);
++            let mut blocker = point_row(20, pid, 2, RawOnscreenKey::True);
++            blocker.layer = layer;
++            let snapshot = point_snapshot(vec![target, blocker]);
++            let report =
++                point_hit_test_report_from_onscreen_snapshot(&snapshot, 100, 10, 5.0, 5.0, None);
++            assert!(!report.allowed);
++            assert_eq!(report.outcome, "blocked_by_window");
++        }
++    }
++
++    #[test]
++    fn point_snapshot_only_skips_the_exact_owned_overlay_tuple() {
++        let target = point_row(10, 100, 1, RawOnscreenKey::True);
++        let mut overlay = point_row(20, 200, 2, RawOnscreenKey::Missing);
++        overlay.layer = 4;
++        let snapshot = point_snapshot(vec![target, overlay]);
++        let exact = point_hit_test_report_from_onscreen_snapshot(
++            &snapshot,
++            100,
++            10,
++            5.0,
++            5.0,
++            Some((200, 20)),
++        );
++        assert!(exact.allowed);
++        assert_eq!(
++            exact.source_options,
++            "onscreen_only_exclude_desktop_any_layer"
++        );
++    }
++
++    #[test]
++    fn dual_point_projection_uses_one_strict_onscreen_snapshot() {
++        let target = point_row(10, 100, 1, RawOnscreenKey::Missing);
++        let mut overlay = point_row(20, 200, 2, RawOnscreenKey::True);
++        overlay.layer = 5;
++        let snapshot = point_snapshot(vec![target, overlay]);
++        let (raw, click_equivalent) = point_hit_test_dual_reports_from_onscreen_snapshot(
++            &snapshot,
++            100,
++            10,
++            5.0,
++            5.0,
++            Some((200, 20)),
++        );
++        assert!(!raw.allowed);
++        assert_eq!(raw.outcome, "blocked_by_window");
++        assert!(click_equivalent.allowed);
++        assert_eq!(
++            raw.source_options,
++            "onscreen_only_exclude_desktop_any_layer"
++        );
++        assert_eq!(raw.source_options, click_equivalent.source_options);
++        assert_eq!(
++            click_equivalent.target_row.unwrap().visibility_source,
++            "cg_onscreen_only_membership"
++        );
++    }
++
++    #[test]
++    fn point_snapshot_does_not_exempt_near_overlay_or_unknown_geometry() {
++        let target = point_row(10, 100, 1, RawOnscreenKey::True);
++        let blocker = point_row(21, 200, 2, RawOnscreenKey::True);
++        let snapshot = point_snapshot(vec![target.clone(), blocker]);
++        assert!(
++            !point_hit_test_report_from_onscreen_snapshot(
++                &snapshot,
++                100,
++                10,
++                5.0,
++                5.0,
++                Some((200, 20))
++            )
++            .allowed
++        );
++
++        let mut unknown = point_row(20, 200, 2, RawOnscreenKey::True);
++        unknown.bounds.width = f64::NAN;
++        let snapshot = point_snapshot(vec![target, unknown]);
++        assert_eq!(
++            point_hit_test_report_from_onscreen_snapshot(&snapshot, 100, 10, 5.0, 5.0, None)
++                .outcome,
++            "unknown_potential_blocker"
++        );
++    }
++
++    #[test]
++    fn point_snapshot_rejects_malformed_rows_and_duplicate_target_identity() {
++        let duplicate = point_snapshot(vec![
++            point_row(10, 100, 2, RawOnscreenKey::True),
++            point_row(10, 100, 1, RawOnscreenKey::True),
++        ]);
++        let duplicate_report =
++            point_hit_test_report_from_onscreen_snapshot(&duplicate, 100, 10, 5.0, 5.0, None);
++        assert!(!duplicate_report.allowed);
++        assert_eq!(duplicate_report.outcome, "malformed_snapshot");
++
++        let malformed = PointSnapshot {
++            malformed_row_count: 1,
++            unusable_rows: vec![PointSnapshotUnusableRow {
++                identity: None,
++                z_index: 2,
++                raw_is_on_screen: RawOnscreenKey::True,
++            }],
++            ..point_snapshot(vec![point_row(10, 100, 1, RawOnscreenKey::True)])
++        };
++        assert!(
++            !point_hit_test_report_from_onscreen_snapshot(&malformed, 100, 10, 5.0, 5.0, None)
++                .allowed
++        );
++
++        let missing = point_snapshot(vec![point_row(11, 100, 1, RawOnscreenKey::True)]);
++        let missing_report =
++            point_hit_test_report_from_onscreen_snapshot(&missing, 100, 10, 5.0, 5.0, None);
++        assert_eq!(missing_report.outcome, "target_missing");
++    }
++
++    #[test]
++    fn malformed_behind_row_does_not_block_but_malformed_above_row_does() {
++        let target = point_row(10, 100, 10, RawOnscreenKey::True);
++        let behind = PointSnapshot {
++            windows: vec![target.clone()],
++            unusable_rows: vec![PointSnapshotUnusableRow {
++                identity: Some((200, 20)),
++                z_index: 5,
++                raw_is_on_screen: RawOnscreenKey::True,
++            }],
++            duplicate_identities: vec![],
++            raw_row_count: Some(2),
++            malformed_row_count: 1,
++            read_status: "ok",
++        };
++        let behind_report =
++            point_hit_test_report_from_onscreen_snapshot(&behind, 100, 10, 5.0, 5.0, None);
++        assert!(behind_report.allowed);
++        assert_eq!(behind_report.malformed_row_count, 1);
++
++        let above = PointSnapshot {
++            unusable_rows: vec![PointSnapshotUnusableRow {
++                identity: Some((200, 20)),
++                z_index: 11,
++                raw_is_on_screen: RawOnscreenKey::True,
++            }],
++            ..behind
++        };
++        let above_report =
++            point_hit_test_report_from_onscreen_snapshot(&above, 100, 10, 5.0, 5.0, None);
++        assert!(!above_report.allowed);
++        assert_eq!(above_report.outcome, "malformed_snapshot");
+     }
+ 
+     #[test]

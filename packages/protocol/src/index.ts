@@ -991,6 +991,10 @@ export interface ComputerWindowOption {
   readonly appName?: string;
   readonly title?: string;
   readonly isCurrent: boolean;
+  /** Inventory-sample visibility only, not foreground or activation proof. Omitted means unknown. */
+  readonly isOnScreen?: boolean;
+  /** Inventory-sample minimized state. Omitted means unknown. */
+  readonly minimized?: boolean;
   /** Informational only: this exact native identity was visible in a post-action diff. */
   readonly firstObservedAfterAction?: boolean;
   /** Run-scoped action that preceded the first visible diff observation. This proves no ownership or causality. */
@@ -1128,6 +1132,8 @@ export type ComputerWindowCandidateRelationship =
 export interface ComputerWindowCandidate extends ComputerWindowIdentity {
   /** Adapter-issued refresh token. Required only for bound_window_missing. */
   readonly handoffToken?: string;
+  /** Internal adapter marker, projected to the user only as an explicit restore choice. */
+  readonly restoreCurrentManagedBrowser?: true;
   readonly appName?: string;
   readonly title?: string;
   /** Exact owner relation for popup handoff, or Host allowlist scope for a peer. */
@@ -1329,7 +1335,7 @@ export type RuntimeEventData =
       to: SurfaceRef;
       reason: SurfaceTransitionReason;
     }
-  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; maxWireInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
+  | { type: "model.request.started"; providerId: string; requestId?: string; decisionId?: string; attempt?: number; recoveryAttempt?: "ambiguous-headers-once-v1"; preparedRequest?: PreparedRequestMetadata; contextBudget?: { mode: "raw" | "recent"; estimatedInputTokens: number; estimatedFixedTextTokens?: number; estimatedHistoryTextTokens?: number; estimatedToolSchemaTokens?: number; imageCount?: number; selectedHistoryEvents: number; omittedHistoryEvents: number; maxHistoryEvents?: number; maxInputTokens?: number; maxWireInputTokens?: number; estimatedMemoryTokens?: number; memoryMaxTokens?: number; estimatedMonitorGuidanceTokens?: number; monitorGuidanceIncluded?: boolean; estimatedGroundingTokens?: number; groundingIncluded?: boolean; trace?: ContextTrace } }
   | { type: "model.response.received"; requestId?: string; decisionId?: string; attempt?: number; turn: ModelTurn }
   | {
       type: "model.request.failed";
@@ -1337,6 +1343,7 @@ export type RuntimeEventData =
       message: string;
       code?: string;
       retryable?: boolean;
+      recoveryHint?: "ambiguous-headers-timeout-v1" | "ambiguous-headers-transport-v1";
       requestId?: string;
       decisionId?: string;
       attempt?: number;
@@ -1426,6 +1433,7 @@ export type RuntimeEventData =
   | {
       type: "run.finished";
       outcome: RunOutcome;
+      providerRecoveryState?: { mode: "off" | "ambiguous-headers-once-v1"; runWindowMs: number; latchConsumed: boolean; attemptStarted: boolean; remoteOutcomeUnknown: boolean };
       summary?: string;
       reportedStatus?: "success" | "failure";
       /** Runtime-canonical source evidence; present only when explicitly enabled for this Run. */

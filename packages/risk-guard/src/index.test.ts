@@ -295,6 +295,18 @@ describe("LayeredRiskGuard", () => {
     await expect(guard.evaluate(context("financial", "Confirm payment", "Pay for order"), new AbortController().signal)).resolves.toMatchObject({ decision: "require_approval", path: "local", modelRequestCount: 0, categories: ["financial"] });
   });
 
+  it("keeps a Save click declared external_commitment behind approval even with a local-file summary", async () => {
+    const candidate = context("local_edit", "Save", "Save the new local task file at the user's requested path");
+    candidate.candidate.calls[0]!.declaredEffect!.effects = ["external_commitment"];
+    const classify = vi.fn(async () => ({ effects: ["local_edit"] as const, alignment: "aligned" as const, evidence: "Synthetic local-file review" }));
+    const guard = new LayeredRiskGuard({ assessor: { id: "must-not-downgrade", classify } });
+
+    await expect(guard.evaluate(candidate, new AbortController().signal)).resolves.toMatchObject({
+      decision: "require_approval", path: "local", reasonCode: "declared_high_impact", modelRequestCount: 0, categories: ["external_commitment"],
+    });
+    expect(classify).not.toHaveBeenCalled();
+  });
+
   it("uses the Run-scoped switch as the approval boundary and ignores its claimed content effects", async () => {
     const guard = new LayeredRiskGuard();
     for (const candidate of [

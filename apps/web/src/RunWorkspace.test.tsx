@@ -73,6 +73,27 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("stop confirmation lifecycle", () => {
+  const workspace = (runId = "run-1") => <PreferencesProvider><RunWorkspace runId={runId} /></PreferencesProvider>;
+
+  it.each(["terminal", "capability", "navigation"])("drops an open confirmation after %s changes", (change) => {
+    const view = render(workspace());
+    fireEvent.click(screen.getByRole("button", { name: "停止任务" }));
+    expect(screen.getByRole("group", { name: "确认停止任务" })).toBeDefined();
+    if (change === "terminal") feedState = { ...feedState, snapshot: { ...approval, status: "finished" } };
+    if (change === "capability") feedState = { ...feedState, snapshot: { ...approval, capabilities: { pause: true, abort: false } } };
+    if (change === "navigation") feedState = { ...feedState, snapshot: { ...approval, runId: "run-2" } };
+    view.rerender(workspace(change === "navigation" ? "run-2" : "run-1"));
+    expect(screen.queryByRole("group", { name: "确认停止任务" })).toBeNull();
+    expect(commands.control).not.toHaveBeenCalled();
+    if (change !== "navigation") {
+      feedState = { ...feedState, snapshot: approval };
+      view.rerender(workspace());
+      expect(screen.queryByRole("group", { name: "确认停止任务" })).toBeNull();
+    }
+  });
+});
+
 describe("request-bound screenshot lifecycle", () => {
   it("disables manual progress and result reading during voice input but leaves stop reading available", () => {
     render(<RunSpeechActions voiceInputActive hasResult onReadProgress={vi.fn()} onReadResult={vi.fn()} onStop={vi.fn()} />);
@@ -460,7 +481,7 @@ describe("request-bound screenshot lifecycle", () => {
     expect(commands.correct).toHaveBeenCalledWith("Use the date shown in the current report");
   });
 
-  it("exposes separate keyboard-focusable pause, resume, and stop controls", () => {
+  it("exposes separate keyboard-focusable pause, resume, and stop controls", async () => {
     feedState = {
       ...feedState,
       snapshot: {
@@ -483,7 +504,11 @@ describe("request-bound screenshot lifecycle", () => {
     fireEvent.click(pause);
     fireEvent.click(resume);
     fireEvent.click(stop);
+    expect(commands.control.mock.calls).toEqual([["pause"], ["resume"]]);
+    fireEvent.click(screen.getByRole("button", { name: "确认停止" }));
     expect(commands.control.mock.calls).toEqual([["pause"], ["resume"], ["abort"]]);
+    expect(confirm).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("group", { name: "确认停止任务" })).toBeNull());
     confirm.mockRestore();
   });
 

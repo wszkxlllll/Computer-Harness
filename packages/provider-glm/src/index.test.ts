@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import type { AssetId, ToolCallId, Viewport } from "@computer-harness/protocol";
 import { decorateToolsWithActionEffects, type AssetReader, type ModelInput } from "@computer-harness/runtime";
 import { createDefaultComputerTools } from "../../runtime/src/computer-tools.js";
-import { FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile, type GlmTransportEvidence } from "./index.js";
+import { FetchArkHttpClient, FetchDeepseekHttpClient, FetchGlmHttpClient, GlmAdapter, type GlmHttpClient, type GlmProfile, type GlmTransportEvidence } from "./index.js";
 
 const viewport: Viewport = { width: 800, height: 600, coordinateSpace: "physical" };
 const asset = { assetId: "asset-1" as AssetId, relativePath: "screenshots/asset-1.png", mediaType: "image/png", byteLength: 3 };
@@ -616,6 +616,7 @@ describe("GLM provider adapter", () => {
       const evidence: GlmTransportEvidence[] = [];
       const error = await client.post("https://private.invalid/secret-path", { secret: "PRIVATE_BODY" }, { authorization: "PRIVATE_KEY" }, new AbortController().signal, { payloadHash: "a".repeat(64), onTransportEvidence: (item) => { evidence.push(item); } }).catch((failure: unknown) => failure);
       expect(error).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, retryMode: "feedback", message: expect.stringMatching(/phase=awaiting_headers elapsedMs=\d+ deadlineMs=10/u) });
+      expect(error).toMatchObject({ recoveryHint: { kind: "ambiguous-headers-timeout-v1", phase: "awaiting_headers", abortSource: "local_request_timeout", noResponse: true, remoteOutcome: "unknown" } });
       expect(String(error)).not.toMatch(/secret-path|PRIVATE_BODY|PRIVATE_KEY/u);
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(evidence).toMatchObject([
@@ -624,6 +625,70 @@ describe("GLM provider adapter", () => {
       ]);
       expect(evidence.some((item) => "httpStatus" in item)).toBe(false);
     } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("types only a direct ETIMEDOUT cause while Fetch is awaiting headers", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn(async () => {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ETIMEDOUT" } });
+      }) as unknown as typeof fetch;
+      const error = await new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({
+        code: "GLM_NETWORK_ERROR", retryable: true, retryMode: "same_input",
+        recoveryHint: { kind: "ambiguous-headers-transport-v1", phase: "awaiting_headers", abortSource: "transport_failure", noResponse: true, transportCode: "ETIMEDOUT", remoteOutcome: "unknown" },
+      });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it.each([
+    ["DeepSeek", () => new FetchDeepseekHttpClient({ requestTimeoutMs: 10 })],
+    ["Ark", () => new FetchArkHttpClient({ requestTimeoutMs: 10 })],
+  ] as const)("keeps GLM ambiguous-header recovery hints out of the shared %s boundary", async (_label, createClient) => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn(async () => {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ETIMEDOUT" } });
+      }) as unknown as typeof fetch;
+      const networkError = await createClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(networkError).toMatchObject({ retryable: true, retryMode: "same_input" });
+      expect((networkError as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+      globalThis.fetch = vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+      })) as unknown as typeof fetch;
+      const deadlineError = await createClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(deadlineError).toMatchObject({ retryable: false });
+      expect((deadlineError as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it("does not type body timeouts, external aborts, or non-ETIMEDOUT causes as header transport ambiguity", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => { throw Object.assign(new TypeError("body read failed"), { cause: { code: "ETIMEDOUT" } }); },
+      })) as unknown as typeof fetch;
+      const bodyError = await new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(bodyError).toMatchObject({ code: "GLM_NETWORK_ERROR", retryable: true });
+      expect((bodyError as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+
+      globalThis.fetch = vi.fn(async () => {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+      }) as unknown as typeof fetch;
+      const otherError = await new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, new AbortController().signal).catch((failure: unknown) => failure);
+      expect(otherError).toMatchObject({ code: "GLM_NETWORK_ERROR", retryable: true, retryMode: "same_input" });
+      expect((otherError as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+
+      const controller = new AbortController();
+      globalThis.fetch = vi.fn(async (_url: string, options: { signal: AbortSignal }) => new Promise<never>((_resolve, reject) => {
+        controller.abort(new Error("external cancel"));
+        options.signal.addEventListener("abort", () => reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ETIMEDOUT" } })), { once: true });
+      })) as unknown as typeof fetch;
+      const aborted = await new FetchGlmHttpClient().post("https://fixture.invalid", {}, {}, controller.signal).catch((failure: unknown) => failure);
+      expect((aborted as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
+    } finally { globalThis.fetch = originalFetch; }
   });
 
   it("retains the received HTTP status when response-body reading times out", async () => {
@@ -638,6 +703,7 @@ describe("GLM provider adapter", () => {
         { payloadHash: "a".repeat(64), onTransportEvidence: (item) => { evidence.push(item); } },
       ).catch((failure: unknown) => failure);
       expect(error).toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false, message: expect.stringMatching(/httpStatus=200/u) });
+      expect((error as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
       expect(evidence).toMatchObject([
         { stage: "fetch_invoked", phase: "awaiting_headers" },
         { stage: "headers_received", phase: "reading_body", httpStatus: 200 },
@@ -737,6 +803,7 @@ describe("GLM provider adapter", () => {
         onTransportEvidence: (item) => { evidence.push(item); },
       });
       await expect(timeoutFirst).rejects.toMatchObject({ code: "GLM_REQUEST_TIMEOUT", retryable: false });
+      await expect(timeoutFirst).rejects.toMatchObject({ recoveryHint: { kind: "ambiguous-headers-timeout-v1", abortSource: "local_request_timeout" } });
       expect(evidence.at(-1)).toMatchObject({ outcome: "timeout", abortSource: "local_request_timeout" });
 
       const runEvidence: GlmTransportEvidence[] = [];
@@ -753,6 +820,7 @@ describe("GLM provider adapter", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       cancelledController.abort(cancellation);
       await expect(request).rejects.toBe(cancellation);
+      expect((await request.catch((error: unknown) => error) as { recoveryHint?: unknown }).recoveryHint).toBeUndefined();
       expect(runEvidence.at(-1)).toMatchObject({ outcome: "cancelled", abortSource: "run_cancelled" });
     } finally {
       globalThis.fetch = originalFetch;

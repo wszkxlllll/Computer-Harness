@@ -138,6 +138,7 @@ export interface WindowCandidate {
   title?: string;
   description?: string;
   previewRequired?: boolean;
+  restoreCurrentManagedBrowser?: true;
   relationship?: WindowCandidateRelationship;
 }
 

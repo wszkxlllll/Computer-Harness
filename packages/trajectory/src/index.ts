@@ -1563,6 +1563,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     requestId: nonEmptyString.optional(),
     decisionId: nonEmptyString.optional(),
     attempt: z.number().int().positive().optional(),
+    recoveryAttempt: z.literal("ambiguous-headers-once-v1").optional(),
     preparedRequest: z.object({
       payloadHash: nonEmptyString,
       estimate: z.object({
@@ -1603,6 +1604,7 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     message: z.string(),
     code: nonEmptyString.optional(),
     retryable: z.boolean().optional(),
+    recoveryHint: z.enum(["ambiguous-headers-timeout-v1", "ambiguous-headers-transport-v1"]).optional(),
     requestId: nonEmptyString.optional(),
     decisionId: nonEmptyString.optional(),
     attempt: z.number().int().positive().optional(),
@@ -1758,6 +1760,13 @@ const runtimeEventUnionSchema = z.discriminatedUnion("type", [
     ...eventBaseSchema,
     type: z.literal("run.finished"),
     outcome: z.enum(["succeeded", "failed", "cancelled", "budget_exhausted", "outcome_unknown"]),
+    providerRecoveryState: z.object({
+      mode: z.enum(["off", "ambiguous-headers-once-v1"]),
+      runWindowMs: z.number().int().positive().max(900_000),
+      latchConsumed: z.boolean(),
+      attemptStarted: z.boolean(),
+      remoteOutcomeUnknown: z.boolean(),
+    }).optional(),
     summary: z.string().optional(),
     reportedStatus: z.enum(["success", "failure"]).optional(),
     resultEvidence: sourceLinkedFinishEvidenceSchema.optional(),

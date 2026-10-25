@@ -476,8 +476,9 @@ function verifyScenario(scenario, httpClient, provider, contextMode, scenarioId,
         !listDescription.includes("expire on refresh/switch/end") ||
         !listDescription.includes("unlisted apps may exist") ||
         !switchDescription.includes("not PID/HWND") || !switchDescription.includes("Desktop capture/input stays full") ||
-        !switchDescription.includes("native-window scope rebinds") || !switchDescription.includes("Already foreground: no-op") ||
-        !switchDescription.includes("Sole call this turn") || !switchDescription.includes("reobserve before next action") ||
+        !switchDescription.includes("native-window scope rebinds") || !switchDescription.includes("not verified physical foreground") ||
+        !switchDescription.includes("rechecks exact identity and foreground") || !switchDescription.includes("may refuse without dispatch") ||
+        !switchDescription.includes("Sole call this turn") || !switchDescription.includes("reobserve before any further action") ||
         (typeLine !== undefined && !typeLine.includes(`description=${JSON.stringify(compact(typeTextDescription))}`)) ||
         (typeLine !== undefined && !typeLine.includes(`description=${JSON.stringify(compact(typeElementRefDescription))}`))) {
       throw new ProbeFailure("QWEN_TOOL_CATALOG_TRUNCATED", "Qwen outbound catalog omitted a complete registered tool or parameter description.");

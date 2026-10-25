@@ -53,6 +53,24 @@ function observation(id: string) {
 }
 
 describe("DefaultContextCompiler", () => {
+  it("keeps sampled window visibility explicit without inventing unknown state or activation proof", () => {
+    const text = formatWindowSwitchState(undefined, {
+      options: [
+        { windowRef: "visible-open", appName: "TextEdit", title: "Open", isCurrent: false, isOnScreen: true, minimized: false },
+        { windowRef: "offscreen-untitled", appName: "TextEdit", title: "", isCurrent: false, isOnScreen: false, minimized: true },
+        { windowRef: "unknown", appName: "TextEdit", title: "", isCurrent: false },
+      ],
+      truncated: false,
+      omittedCount: 0,
+    }, undefined, viewport);
+    expect(text).toContain("windowRef=visible-open isOnScreen=true minimized=false");
+    expect(text).toContain("windowRef=offscreen-untitled isOnScreen=false minimized=true");
+    expect(text?.split("\n").find((line) => line.startsWith("- windowRef=unknown"))).toBe("- windowRef=unknown app=TextEdit title=");
+    expect(text).toContain("only that inventory sample, not current foreground or guaranteed activation");
+    expect(text).toContain("absent means unknown");
+    expect(text).toContain("An offscreen untitled window is not evidence of a blank document");
+  });
+
   it("projects first-observed window metadata before same-label alternatives without implying ownership", () => {
     const text = formatWindowSwitchState(undefined, {
       options: [
@@ -66,6 +84,31 @@ describe("DefaultContextCompiler", () => {
     expect(text).toContain("windowRef=existing-save");
     expect(text?.indexOf("windowRef=new-save")).toBeLessThan(text?.indexOf("windowRef=existing-save") ?? -1);
   });
+
+  it("distinguishes incomplete inventories from known omitted candidates", () => {
+    const unknownCount = formatWindowSwitchState(undefined, {
+      options: [],
+      truncated: true,
+      omittedCount: 0,
+    }, undefined, viewport);
+    expect(unknownCount).toContain("The source inventory is incomplete and no additional selectable windows are known to have been omitted; whether other windows exist is unknown.");
+    expect(unknownCount).not.toContain("0 additional selectable windows were omitted");
+
+    const missingCount = formatWindowSwitchState(undefined, {
+      options: [],
+      truncated: true,
+    }, undefined, viewport);
+    expect(missingCount).toContain("The source completeness and count of known omissions are unavailable; additional selectable windows may exist.");
+
+    const knownCount = formatWindowSwitchState(undefined, {
+      options: [],
+      truncated: true,
+      omittedCount: 3,
+    }, undefined, viewport);
+    expect(knownCount).toContain("At least 3 known selectable windows were omitted from this projection; the source may also be incomplete, so the total number of selectable windows is unknown.");
+    expect(knownCount).not.toContain("3 additional selectable windows were omitted");
+  });
+
 
   it("distinguishes complete inventories, unknown source completeness, and known omitted windows", () => {
     const render = (truncated: boolean, omittedCount: number) => formatWindowSwitchState(undefined, {

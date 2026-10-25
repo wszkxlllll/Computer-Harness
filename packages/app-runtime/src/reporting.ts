@@ -42,6 +42,7 @@ interface RunRecoveryReport {
     category?: string;
     code?: string;
     retryable?: boolean;
+    recoveryHint?: "ambiguous-headers-timeout-v1" | "ambiguous-headers-transport-v1";
   }>;
   unknownSideEffects: { status: "none_recorded" | "unknown"; actionIds: string[] };
   planState?: { statusSource: "model_maintained_state_not_environment_verification"; tasks: Array<{ id: string; status: string; sourceEventId: string | null }> };
@@ -70,6 +71,7 @@ export async function buildRunReport(
   const managedGrounding = config.grounding === "dom-catalog-v1" || config.grounding === "hybrid-catalog-v1";
   const externalComputer = config.computer.kind === "external" ? config.computer : undefined;
   const completedWindowHandoffs = events.filter((event): event is Extract<RuntimeEvent, { type: "computer.window.handoff.completed" }> => event.type === "computer.window.handoff.completed");
+  const lastFinishedEvent = [...events].reverse().find((event) => event.type === "run.finished");
   const latestWindowHandoff = completedWindowHandoffs.at(-1);
   const finalWindow = latestWindowHandoff?.target;
   const startedTargetTransitionEvents = events.filter((event): event is Extract<RuntimeEvent, { type: "action.execution.started" }> =>
@@ -153,6 +155,11 @@ export async function buildRunReport(
     monitor: config.monitor ?? "off",
     grounding: config.grounding ?? "off",
     windowHandoff: config.windowHandoff ?? "off",
+    providerRecovery: config.providerRecovery ?? "off",
+    providerRecoveryRunWindowMs: config.providerRecoveryRunWindowMs ?? 900_000,
+    providerRecoveryAttemptStarted: events.some((event) => event.type === "model.request.started" && event.recoveryAttempt === "ambiguous-headers-once-v1"),
+    providerRemoteOutcomeUnknown: events.some((event) => event.type === "model.request.failed" && event.recoveryHint !== undefined),
+    providerRecoveryState: lastFinishedEvent?.type === "run.finished" ? lastFinishedEvent.providerRecoveryState ?? null : null,
     windowSwitch: config.windowSwitch ?? "off",
     cleanupDeadlineMs: config.cleanupDeadlineMs,
     riskProfile: config.riskProfile,
@@ -197,7 +204,7 @@ export async function buildRunReport(
       runtimeErrors: events.filter((event) => event.type === "runtime.error").length,
       providerErrors: events
         .filter((event): event is Extract<RuntimeEvent, { type: "model.request.failed" }> => event.type === "model.request.failed")
-        .map((event) => ({ category: event.category, code: event.code ?? null, retryable: event.retryable ?? null, message: event.message })),
+        .map((event) => ({ category: event.category, code: event.code ?? null, retryable: event.retryable ?? null, recoveryHint: event.recoveryHint ?? null, message: event.message })),
       monitorTransitions: events
         .filter((event): event is Extract<RuntimeEvent, { type: "monitor.transition" }> => event.type === "monitor.transition")
         .reduce((counts, event) => ({ ...counts, [event.transition]: (counts[event.transition] ?? 0) + 1 }), {} as Record<string, number>),
@@ -250,6 +257,7 @@ function buildRunRecoveryReport(
         category: safeCode(event.category),
         ...(event.code === undefined ? {} : { code: safeCode(event.code) }),
         ...(event.retryable === undefined ? {} : { retryable: event.retryable }),
+        ...(event.recoveryHint === undefined ? {} : { recoveryHint: event.recoveryHint }),
       });
       continue;
     }

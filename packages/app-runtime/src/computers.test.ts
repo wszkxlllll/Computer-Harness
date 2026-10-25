@@ -714,6 +714,40 @@ describe("createComputer", () => {
     });
   });
 
+  it("keeps direct managed-browser handoff calls fail-closed without explicit window-switch opt-in", async () => {
+    const fixture = managedFixture();
+    const computer = await createComputer(
+      {
+        kind: "cua",
+        socketPath: "fixture.sock",
+        screenshotDir: "screenshots",
+        grounding: "hybrid-catalog-v1",
+        managedBrowserUrl: "about:blank",
+        windowSwitch: "off",
+      },
+      {
+        createManagedBrowserHost: fixture.createHost,
+        openCuaBootstrapSession: fixture.openBootstrap,
+        importCuaComputer: async () => ({ CuaDriverComputer: fixture.Delegate }),
+      },
+    );
+    const browserSession = await computer.open({}, fixture.signal);
+
+    await expect(computer.detectNewWindowHandoffCandidates?.(browserSession, fixture.signal))
+      .rejects.toThrow("managed browser window handoff requires the explicit window-switch opt-in");
+    await expect(computer.listWindowHandoffCandidates?.(browserSession, fixture.signal))
+      .rejects.toThrow("managed browser window handoff requires the explicit window-switch opt-in");
+    await expect(computer.handoffWindow?.(browserSession, nativeWindowCandidate, fixture.signal))
+      .rejects.toThrow("managed browser window handoff requires the explicit window-switch opt-in");
+    expect(fixture.calls).toMatchObject({
+      delegateDetectNewHandoffCandidates: 0,
+      delegateListHandoffCandidates: 0,
+      delegateHandoff: 0,
+    });
+
+    await computer.close(browserSession);
+  });
+
   it("cleans bootstrap and host when managed startup or delegate open fails", async () => {
     const failedHost = managedFixture({ failStart: true });
     const failedComputer = await createComputer(

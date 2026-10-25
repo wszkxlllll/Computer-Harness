@@ -7,6 +7,7 @@ import { PhoneLayout } from "./components/PhoneLayout";
 import { ResultPanel } from "./components/ResultPanel";
 import { ScreenshotPanel } from "./components/ScreenshotPanel";
 import { statusTextFor } from "./components/StatusLabel";
+import { StopRunControl } from "./components/StopRunControl";
 import { usePreferences } from "./PreferencesContext";
 import { useRunCommands } from "./hooks/useRunCommands";
 import { useRunFeed } from "./hooks/useRunFeed";
@@ -426,7 +427,7 @@ export function RunWorkspace({ runId, voiceCapabilities }: RunWorkspaceProps) {
             <div className="control-actions">
               {snapshot.capabilities.pause && <button className="button button-secondary button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("pause")}>暂停任务</button>}
               {snapshot.capabilities.resume && <button className="button button-primary button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("resume")}>继续任务</button>}
-              {snapshot.capabilities.abort && <button className="button button-danger-outline button-large" type="button" disabled={commands.busyCommand !== undefined} onClick={() => void commands.control("abort")}>停止任务</button>}
+              {snapshot.capabilities.abort && <StopRunControl key={runId} disabled={commands.busyCommand !== undefined} onConfirm={() => commands.control("abort")} />}
             </div>
             <p className="control-footnote">暂停或停止请求仍需电脑回报；停止不会撤销已经完成的操作。</p>
           </section>

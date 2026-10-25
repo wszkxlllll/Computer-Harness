@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CuaDriverLike, ToolResult as CuaToolResult } from "@trycua/cua-driver";
 import type { ToolCall, ToolCallId } from "@computer-harness/protocol";
 import type { ModelInput, ProviderAdapter } from "@computer-harness/runtime";
@@ -45,6 +45,7 @@ const WINDOWS: readonly FixtureWindow[] = [
 
 type RunStep =
   | { readonly kind: "click"; readonly callId: string; readonly expectedEnabled: boolean }
+  | { readonly kind: "dom_click"; readonly callId: string; readonly expectedEnabled: boolean }
   | { readonly kind: "list"; readonly callId: string }
   | { readonly kind: "switch"; readonly callId: string; readonly listCallId: string; readonly targetTitle: string }
   | { readonly kind: "action"; readonly callId: string; readonly name: string; readonly arguments: Record<string, unknown> }
@@ -81,6 +82,8 @@ interface FixtureOptions {
   readonly includeRecoveryWindow?: boolean;
   readonly hybridOutputPath?: string;
   readonly nativeWebDocumentGrant?: { readonly outputPath: string; readonly expectedExecutableUrl: string };
+  readonly baseWindowHandoff?: "off" | "confirm-v1";
+  readonly domClickCandidate?: boolean;
 }
 
 interface FixtureMetrics {
@@ -292,6 +295,13 @@ function scriptedProvider(steps: readonly RunStep[], trace: ProviderTrace): Prov
         // reject it without sending native input to the managed browser.
         return { type: "tool_calls", calls: [{ id: step.callId as ToolCallId, name: "click", arguments: { x: 20, y: 20 } }] };
       }
+      if (step.kind === "dom_click") {
+        const groundedClickAvailable = input.tools.some((tool) => tool.name === "click_element");
+        expect(groundedClickAvailable).toBe(step.expectedEnabled);
+        const groundedRef = JSON.stringify(input.messages).match(/dom-[a-f0-9]+-[0-9]+/u)?.[0];
+        if (groundedRef === undefined) throw new Error("fixture Provider could not find the current grounded DOM element reference");
+        return { type: "tool_calls", calls: [{ id: step.callId as ToolCallId, name: "click_element", arguments: { elementRef: groundedRef } }] };
+      }
       if (step.kind === "finish") {
         if (pendingListCallId !== undefined) {
           trace.listedWindows.push(listedWindowsFrom(input, pendingListCallId));
@@ -337,7 +347,14 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
   const domTransport = createMockDomGroundingTransport((request) => {
     domTargets.push({ ...request.browserTarget.windowTarget });
     if (options.failDomCapture === true) throw new Error("fixture DOM capture unavailable");
-    return { complete: true, tabId: `fixture-tab-${domTargets.length}`, generation: `fixture-generation-${domTargets.length}`, candidates: [] };
+    return {
+      complete: true,
+      tabId: `fixture-tab-${domTargets.length}`,
+      generation: `fixture-generation-${domTargets.length}`,
+      candidates: options.domClickCandidate === true
+        ? [{ tagName: "button", name: "Continue", frame: { x: 10, y: 10, width: 20, height: 20 }, visible: true, interactive: true, state: { enabled: true } }]
+        : [],
+    };
   });
 
   const computerFactoryDependencies = {
@@ -466,6 +483,7 @@ async function createFixture(outputDir: string, options: FixtureOptions = {}) {
     riskTimeoutMs: 100,
     cleanupDeadlineMs: 500,
     ...(options.initialGrounding === undefined ? {} : { grounding: options.initialGrounding }),
+    ...(options.baseWindowHandoff === undefined ? {} : { windowHandoff: options.baseWindowHandoff }),
     ...(options.nativeWebDocumentGrant === undefined ? {} : {
       windowHandoff: "confirm-v1" as const,
       windowSwitch: "opened-windows-v1" as const,
@@ -494,6 +512,43 @@ async function runFixture(session: ApplicationSession, windowSwitch: "off" | "op
 }
 
 describe("managed browser companion through ApplicationSession and the real tool registry", () => {
+  it("does not probe browser window handoff after a completed click when the Run opts out", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "harness-managed-browser-handoff-optout-"));
+    const handoffDetector = vi.spyOn(CuaDriverComputer.prototype, "detectNewWindowHandoffCandidates");
+    const fixture = await createFixture(outputDir, {
+      initialGrounding: "hybrid-catalog-v1",
+      managedBrowserUrl: "https://fixture.example/ordinary-browser",
+      baseWindowHandoff: "confirm-v1",
+      domClickCandidate: true,
+      steps: [
+        { kind: "dom_click", callId: "ordinary-browser-click", expectedEnabled: true },
+        { kind: "finish" },
+      ],
+    });
+    try {
+      // Models the effective normal-Web feature override over a Host whose
+      // base configuration also supports legacy native handoff.
+      const handle = await fixture.session.startRun("Continue after one ordinary browser click", {
+        windowSwitch: "off",
+        windowHandoff: "off",
+      });
+      const outcome = await fixture.session.waitForActiveRun();
+      const events = handle.controller.getEvents();
+      expect(outcome).toBe("succeeded");
+      expect(events.some((event) => event.type === "runtime.error")).toBe(false);
+      expect(fixture.metrics.delegateCalls.filter((call) => call.name === "click")).toHaveLength(1);
+      expect(handoffDetector).not.toHaveBeenCalled();
+      expect(fixture.metrics.provider.inputs).toHaveLength(2);
+      expect(events.filter((event) => event.type === "observation.created").length).toBeGreaterThan(1);
+      expect(handle.config).toMatchObject({ windowSwitch: "off", windowHandoff: "off" });
+      await fixture.session.close();
+    } finally {
+      handoffDetector.mockRestore();
+      await fixture.session.close();
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps Browser research, completed TextEdit close, exact Host recovery, and one reopen in one direct Run", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "hybrid-browser-textedit-reopen-runtime-"));
     const canonicalOutputDir = await realpath(outputDir);

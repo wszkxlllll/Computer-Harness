@@ -74,7 +74,7 @@ export function formatWindowSwitchState(
   const currentLabel = [currentWindow?.appName, currentWindow?.title]
     .filter((value): value is string => value !== undefined && value.trim().length > 0)
     .map((value) => compactLabel(value, 160));
-  lines.push(`Selected target label from the latest inventory/selection: ${currentLabel.length === 0 ? "not available" : currentLabel.join(" — ")}. This app/title label reflects its discovery time and may be stale; use the latest screenshot to understand current window content.`);
+  lines.push(`Selected target label from the latest inventory/selection: ${currentLabel.length === 0 ? "not available" : currentLabel.join(" — ")}. This app/title label reflects its discovery time and may be stale; use the latest screenshot to understand current window content. A [current] inventory marker means the Run-bound target, not proof that the window is physically in the foreground. If that target is not foreground, select its exact fresh windowRef with switch_window before ordinary input; do not treat the current marker as focus confirmation.`);
   if (!usableGrounding) {
     lines.push("Current observation has no usable UIA/DOM grounding catalog; do not use element references or select_option for this target.");
   } else {
@@ -84,6 +84,7 @@ export function formatWindowSwitchState(
     lines.push("No list_windows inventory is cached. Call list_windows before choosing another target.");
   } else {
     lines.push("Latest list_windows inventory (choose only a listed windowRef; references remain valid across ordinary observations and expire when the list is refreshed, a target changes, or the Run ends. App/title labels reflect discovery time and may be stale):");
+    lines.push("Optional isOnScreen/minimized reflect only that inventory sample, not current foreground or guaranteed activation; absent means unknown. Prefer isOnScreen=true with a semantically matching app/title. An offscreen untitled window is not evidence of a blank document.");
     const firstObserved = state.options.filter((option) => option.firstObservedAfterAction === true);
     const firstObservedRefs = new Set(firstObserved.map((option) => option.windowRef));
     const orderedOptions = [...firstObserved, ...state.options.filter((option) => !firstObservedRefs.has(option.windowRef))];
@@ -104,10 +105,12 @@ export function formatWindowSwitchState(
 function formatWindowOption(option: ComputerWindowOption): string {
   const appName = option.appName === undefined ? "" : ` app=${compactLabel(option.appName, 128)}`;
   const title = option.title === undefined ? "" : ` title=${compactLabel(option.title, 160)}`;
+  const isOnScreen = option.isOnScreen === undefined ? "" : ` isOnScreen=${option.isOnScreen}`;
+  const minimized = option.minimized === undefined ? "" : ` minimized=${option.minimized}`;
   const firstObserved = option.firstObservedAfterAction === true && option.sourceActionId !== undefined
     ? ` [first observed after action=${compactLabel(option.sourceActionId, 128)}; not proof of creation, ownership, foreground, or relation]`
     : "";
-  return `- windowRef=${compactLabel(option.windowRef, 128)}${option.isCurrent ? " [current]" : ""}${firstObserved}${appName}${title}`;
+  return `- windowRef=${compactLabel(option.windowRef, 128)}${option.isCurrent ? " [current]" : ""}${firstObserved}${isOnScreen}${minimized}${appName}${title}`;
 }
 
 export function composeSystemPrompt(
@@ -131,7 +134,7 @@ export function composeSystemPrompt(
     : "the original Goal, latest observed state, and relevant recalled Run Memory";
   sections.push(`Completion contract: finish.summary is the full user answer, not a status label. Re-check ${completionEvidence}; include every requested value, choice, date, unit, path and caveat. For Goal-required mutations (sending, saving, editing, creating, etc.), an already-present matching result is prior state, not proof this Run made the change. Claim the mutation only when this Run's matching action/receipt and a fresh post-action Observation support it; if it was not executed, do not say it was—report it as uncompleted or unknown with the evidence gap. Separate facts from unknowns; do not return only a status, invent facts or expose secrets. Report success only for complete, supported deliverables; otherwise report or ask about the gap.`);
   sections.push("Evidence ledger: For each required field, use enabled bookkeeping tools only; bind the exact value (or unknown) to observed URL, row/caption/region and Observation ID. Preserve dates, units and list members; reuse source strings. A ledger is recall, not proof. Unobserved coverage is 'not confirmed here', not absent; same-named data elsewhere is not evidence.");
-  sections.push("Navigation convergence: Track visited branches/regions, Observation IDs, gaps and the next relevant path. After 3 observations without a new target fact, stop repeating; choose an uncovered path within the Goal or terminate with verified partials and explicit unknowns. Scrolling covers only the visible viewport; partial/truncated evidence never proves absence. No guessed URLs, wider scope or stale refs.");
+  sections.push("Navigation convergence: Track visited branches/regions, Observation IDs, gaps and the next relevant path. When read-only discovery repeats without a new target fact, change to a relevant uncovered path within the Goal or report verified partials and the specific evidence gap; do not add a fixed observation-count stopping condition to the Goal. Scrolling covers only the visible viewport; partial/truncated evidence never proves absence. No guessed URLs, wider scope or stale refs.");
   sections.push("Termination: terminate must be the sole call in its ModelTurn, never combined with bookkeeping or GUI action. Make useful notes earlier when tools/budget allow; never delay the required answer. Status means deliverables were completed, not that compared records agree: report completed discrepancies as success and incomplete/unverified work as failure, with findings and unknowns.");
   if (features.planning !== "off") sections.push("Planning tools are optional; use them for genuinely multi-stage, cross-interface or compare tasks. Before the first GUI action, create one handoff-sized current phase only; do not copy the Goal or future stages. After observed completion, the same turn may call task_update(completed) then task_create for only the next phase (at most two Planning/Memory writes); otherwise update only after evidence. Do not plan single-screen work or every click; bookkeeping is not proof, and progress still works with Planning off.");
   if (features.planning !== "off") sections.push("task_create takes only subject and optional description; task_update uses an existing taskId and declared fields. Keep current-phase evidence and gaps concise in description.");
@@ -147,6 +150,7 @@ export function composeSystemPrompt(
         ? "Memory tools are non-Computer tools: pass only their declared arguments and do not attach GUI effect metadata unless that specific schema explicitly declares it."
         : "Non-Computer tools are not GUI actions: pass only their declared arguments and do not attach GUI effect metadata unless that specific schema explicitly declares it.";
   if (features.riskGuard === "layered") sections.push(`Include _harnessEffect only when the exposed schema declares it; supply its required effects/target/summary for this call's immediate effect. ${effectParameterGuidance} list_windows takes its declared empty object; switch_window takes only its exact listed windowRef and is exempt. Use navigate for ordinary page or view navigation; use local_edit for focusing ordinary input controls or reversible edits that do not submit; use the matching class for payment, sending, submission, deletion, disclosure or security changes, and unknown when uncertain. Switching preserves the observed Surface's capture scope and authorizes selection only, not content changes. Runtime controls approvals. A screenshot that does not show an approval cannot establish that approval was unnecessary or did not occur; unless explicit Runtime evidence says so, do not state whether approval occurred. Do not expose private content.`);
+  if (features.riskGuard === "layered") sections.push("Declare effects from the action's actual consequences, not a button label. Saving to a new local task file at the user's explicitly requested path is local_edit only when the destination is confirmed, the file is new, and there is no overwrite, upload, sync, sharing or sending. external_commitment means an outward commitment, such as placing an order, accepting a contract or starting a subscription. A Save label alone does not establish local_edit: overwriting an unrelated file, uploading/syncing/sharing, or an uncertain destination requires the applicable protected effect (such as destructive, sensitive_disclosure or external_commitment), or unknown when the consequences are uncertain; never hide these consequences as local_edit.");
   const selectAllBatch = platform === "darwin"
     ? "CMD/Meta+A→type, or click→CMD/Meta+A→type, in the same already-active text control, using exposed tools named click, hotkey with exact keys [CMD, A] (or [META, A]), and type"
     : "Ctrl+A→type, or click→Ctrl+A→type, in the same already-active text control, using exposed tools named click, hotkey with exact keys [CTRL, A], and type";

@@ -122,6 +122,7 @@ export { inspectAuthorizedOutputFileIdentity };
 export type { CuaMultilineTypeProfile, CuaWindowDeliveryMode, ReopenSavedDocumentGrant };
 
 const PRIMARY_DESKTOP = { kind: "desktop", display_id: "primary" } as const;
+const TEXTEDIT_EXECUTABLE_URL = "file:///System/Applications/TextEdit.app/Contents/MacOS/TextEdit";
 const CLEANUP_POLL_INTERVAL_MS = 50;
 const TRANSIENT_RECOVERY_RECHECK_DELAYS_MS = [300, 300, 300] as const;
 const unconfirmedNativeTransitionFailures = new WeakSet<object>();
@@ -661,7 +662,59 @@ function samePinnedRecoveryIdentity(pinned: CuaWindowInfo, fresh: CuaWindowInfo)
     pinned.windowClass === fresh.windowClass;
 }
 
-function windowRefusalCode(code: string | undefined, message: string, structuredNoInputEvidence = false): string {
+const PINNED_TYPE_TEXT_NO_DISPATCH_MESSAGES = new Set([
+  "type_text failed: exact foreground target is not currently focused; no text was dispatched",
+  "type_text failed: exact foreground target changed during settle; no text was dispatched",
+]);
+
+const PINNED_TOOL_NO_DISPATCH_MESSAGES: Readonly<Record<string, ReadonlySet<string>>> = {
+  type_text: PINNED_TYPE_TEXT_NO_DISPATCH_MESSAGES,
+  hotkey: new Set([
+    "hotkey failed: exact target window did not become focused for foreground HID delivery",
+  ]),
+  click: new Set([
+    "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched",
+  ]),
+};
+
+function hasPinnedToolNoDispatchMessage(toolName: string | undefined, message: string): boolean {
+  return toolName !== undefined && (PINNED_TOOL_NO_DISPATCH_MESSAGES[toolName]?.has(message) ?? false);
+}
+
+function hasPinnedClickFocusMismatchDiagnostic(
+  toolName: string | undefined,
+  message: string,
+  structuredJson: string | undefined,
+  expectedTarget: CuaWindowTarget | undefined,
+): boolean {
+  if (toolName !== "click" ||
+      !PINNED_TOOL_NO_DISPATCH_MESSAGES.click?.has(message) ||
+      structuredJson === undefined || expectedTarget === undefined ||
+      !Number.isSafeInteger(expectedTarget.pid) || expectedTarget.pid <= 0 ||
+      !Number.isSafeInteger(expectedTarget.windowId) || expectedTarget.windowId <= 0) return false;
+  const structured = parseStructuredRecord(structuredJson);
+  const diagnostic = parseStructuredRecord(structured?.guard_diagnostic);
+  if (diagnostic?.schema !== "foreground-pixel-guard-diagnostic-v1" &&
+      diagnostic?.schema !== "foreground-pixel-guard-diagnostic-v2") return false;
+  const target = parseStructuredRecord(diagnostic.target);
+  const frontmost = parseStructuredRecord(diagnostic.frontmost_pid);
+  const focused = parseStructuredRecord(diagnostic.focused_window_id);
+  const pointHitTest = parseStructuredRecord(diagnostic.point_hit_test);
+  if (target?.pid !== expectedTarget.pid || target.window_id !== expectedTarget.windowId ||
+      frontmost?.status !== "available" || typeof frontmost.value !== "number" || !Number.isSafeInteger(frontmost.value) || frontmost.value <= 0 ||
+      focused?.status !== "available" || typeof focused.value !== "number" || !Number.isSafeInteger(focused.value) || focused.value <= 0 ||
+      pointHitTest?.status !== "not_evaluated") return false;
+  return frontmost.value !== expectedTarget.pid || focused.value !== expectedTarget.windowId;
+}
+
+function windowRefusalCode(
+  code: string | undefined,
+  message: string,
+  structuredNoInputEvidence = false,
+  toolName?: string,
+  structuredJson?: string,
+  expectedTarget?: CuaWindowTarget,
+): string {
   // This prefix is emitted only after input dispatch may have begun. Keep it
   // on the existing unknown-outcome path even if the Tool also supplies a
   // generic refusal code.
@@ -670,12 +723,44 @@ function windowRefusalCode(code: string | undefined, message: string, structured
   // than a dedicated error code. The old foreground_unavailable: prefix alone
   // is not enough to make an action retry-safe; require explicit no-input
   // evidence.
-  const foregroundRefusal = /^foreground_unavailable:/iu.test(message);
-  const noInputEvidence = hasExplicitNoInputEvidence(message) || structuredNoInputEvidence;
+  const pinnedToolRefusal = (toolName === "type_text" || toolName === "hotkey") &&
+    hasPinnedToolNoDispatchMessage(toolName, message);
+  const pinnedClickFocusMismatch = hasPinnedClickFocusMismatchDiagnostic(toolName, message, structuredJson, expectedTarget);
+  const foregroundRefusal = /^foreground_unavailable:/iu.test(message) || pinnedToolRefusal || pinnedClickFocusMismatch;
+  const noInputEvidence = hasExplicitNoInputEvidence(message) || structuredNoInputEvidence || pinnedToolRefusal;
   if (foregroundRefusal || code === "WINDOW_FOREGROUND_MISMATCH") {
     return noInputEvidence ? "WINDOW_FOREGROUND_MISMATCH" : "CUA_TOOL_REFUSED";
   }
   return code ?? "CUA_TOOL_REFUSED";
+}
+
+function nativeIncompleteTypeTextReceipt(
+  actionId: ActionReceipt["actionId"],
+  toolName: string,
+  errorCode: string | undefined,
+  structuredJson: string | undefined,
+): ActionReceipt | undefined {
+  if (toolName !== "type_text") return undefined;
+  const structured = parseStructuredRecord(structuredJson);
+  const structuredCode = typeof structured?.code === "string" ? structured.code : undefined;
+  if (errorCode !== "type_text_incomplete" && structuredCode !== "type_text_incomplete") return undefined;
+
+  // This native code is emitted after dispatch may have started. Treat malformed
+  // diagnostics as unknown too; never downgrade it to a retry-safe refusal.
+  const requested = structured?.requested_chars;
+  const delivered = structured?.delivered_chars;
+  const validCounts = structured?.effect === "partial" &&
+    typeof requested === "number" && Number.isSafeInteger(requested) && requested > 0 &&
+    typeof delivered === "number" && Number.isSafeInteger(delivered) && delivered >= 0 && delivered <= requested;
+  const countMessage = validCounts
+    ? ` Native typing delivered ${delivered} of ${requested} requested characters.`
+    : " Native typing delivery counts were unavailable or malformed.";
+  return {
+    actionId,
+    status: "partial",
+    driverCode: "ACTION_OUTCOME_UNKNOWN",
+    message: `The native type_text tool reported incomplete input after dispatch may have begun.${countMessage} Inspect the current screen; do not repeat or automatically continue the text action.`,
+  };
 }
 
 function hasExplicitNoInputEvidence(message: string): boolean {
@@ -691,10 +776,111 @@ function isAmbiguousForegroundResult(message: string): boolean {
     (/^foreground_unavailable:/iu.test(message) && !hasExplicitNoInputEvidence(message));
 }
 
-function resultProvesNoInput(result: { readonly text: string; readonly structuredJson?: string }): boolean {
-  if (hasExplicitNoInputEvidence(result.text)) return true;
+function resultProvesNoInput(
+  result: { readonly text: string; readonly structuredJson?: string },
+  toolName?: string,
+): boolean {
+  if (hasExplicitNoInputEvidence(result.text) || hasPinnedToolNoDispatchMessage(toolName, result.text)) return true;
   const structured = parseStructuredRecord(result.structuredJson);
   return (structured?.input_sent === false) || (structured?.inputSent === false);
+}
+
+const NATIVE_POINT_BLOCKED_NO_DISPATCH_MESSAGE =
+  "click failed: exact foreground target is not focused and unobscured at the click point; no pointer or mouse event was dispatched";
+const POINT_GUARD_DIAGNOSTIC_MAX_COORDINATE = 1_000_000;
+
+/** Project the one pinned native click-guard refusal into bounded numeric facts only. */
+function pointBlockedGuardRefusalMessage(input: {
+  readonly actionKind: ActionIntent["kind"];
+  readonly toolName: string;
+  readonly message: string;
+  readonly structuredJson?: string;
+  readonly bindingTarget?: CuaWindowTarget;
+  readonly requestedTarget: unknown;
+}): string | undefined {
+  if (input.actionKind !== "click" || input.toolName !== "click" || input.bindingTarget === undefined ||
+      input.message !== NATIVE_POINT_BLOCKED_NO_DISPATCH_MESSAGE ||
+      input.structuredJson === undefined || input.structuredJson.length > 16_384) return undefined;
+  const requestTarget = parseStructuredRecord(input.requestedTarget);
+  if (requestTarget?.pid !== input.bindingTarget.pid || requestTarget.window_id !== input.bindingTarget.windowId) return undefined;
+
+  const envelope = parseStructuredRecord(input.structuredJson);
+  const diagnostic = parseStructuredRecord(envelope?.guard_diagnostic);
+  const target = parseStructuredRecord(diagnostic?.target);
+  const frontmost = parseStructuredRecord(diagnostic?.frontmost_pid);
+  const focused = parseStructuredRecord(diagnostic?.focused_window_id);
+  const point = parseStructuredRecord(diagnostic?.translated_screen_point);
+  const hitTest = parseStructuredRecord(diagnostic?.point_hit_test);
+  const enumeration = parseStructuredRecord(hitTest?.enumeration);
+  const targetRow = parseStructuredRecord(hitTest?.target_row);
+  const blockerRow = parseStructuredRecord(hitTest?.first_blocking_row);
+  const targetBounds = parseDiagnosticBounds(targetRow?.bounds);
+  const blockerBounds = parseDiagnosticBounds(blockerRow?.bounds);
+  const screenX = boundedDiagnosticCoordinate(point?.x);
+  const screenY = boundedDiagnosticCoordinate(point?.y);
+  const targetLayer = boundedDiagnosticInteger(targetRow?.layer, -1_000_000, 1_000_000);
+  const targetZ = boundedDiagnosticInteger(targetRow?.z_index, -1_000_000, 1_000_000);
+  const blockerLayer = boundedDiagnosticInteger(blockerRow?.layer, -1_000_000, 1_000_000);
+  const blockerZ = boundedDiagnosticInteger(blockerRow?.z_index, -1_000_000, 1_000_000);
+  const rawRows = boundedDiagnosticInteger(enumeration?.raw_row_count, 0, 1_000_000);
+  const parsedRows = boundedDiagnosticInteger(enumeration?.parsed_row_count, 2, 1_000_000);
+  const malformedRows = boundedDiagnosticInteger(enumeration?.malformed_row_count, 0, 1_000_000);
+  const targetPid = boundedDiagnosticInteger(target?.pid, 1, Number.MAX_SAFE_INTEGER);
+  const targetWindowId = boundedDiagnosticInteger(target?.window_id, 1, Number.MAX_SAFE_INTEGER);
+  const blockerPid = boundedDiagnosticInteger(blockerRow?.pid, 1, Number.MAX_SAFE_INTEGER);
+  const blockerWindowId = boundedDiagnosticInteger(blockerRow?.window_id, 1, Number.MAX_SAFE_INTEGER);
+
+  if (diagnostic?.schema !== "foreground-pixel-guard-diagnostic-v2" ||
+      targetPid !== input.bindingTarget.pid || targetWindowId !== input.bindingTarget.windowId ||
+      frontmost?.status !== "available" || frontmost.value !== targetPid ||
+      focused?.status !== "available" || focused.value !== targetWindowId ||
+      screenX === undefined || screenY === undefined ||
+      hitTest?.status !== "blocked_by_window" || hitTest.allowed !== false ||
+      enumeration?.read_status !== "ok" || rawRows === undefined || parsedRows === undefined || malformedRows === undefined ||
+      parsedRows > rawRows || malformedRows > rawRows ||
+      targetPid !== targetRow?.pid || targetWindowId !== targetRow.window_id ||
+      targetRow.is_on_screen !== true || blockerRow?.is_on_screen !== true ||
+      blockerPid === undefined || blockerWindowId === undefined ||
+      (blockerPid === targetPid && blockerWindowId === targetWindowId) ||
+      targetLayer === undefined || targetZ === undefined || blockerLayer === undefined || blockerZ === undefined ||
+      blockerZ <= targetZ || targetBounds === undefined || blockerBounds === undefined ||
+      !diagnosticBoundsContainPoint(targetBounds, screenX, screenY) ||
+      !diagnosticBoundsContainPoint(blockerBounds, screenX, screenY)) return undefined;
+
+  return `Click refused: exact focus matched target pid/window=${targetPid}/${targetWindowId}; point=${formatDiagnosticCoordinate(screenX)},${formatDiagnosticCoordinate(screenY)} is blocked by reported window pid/window/layer/z=${blockerPid}/${blockerWindowId}/${blockerLayer}/${blockerZ} (target layer/z=${targetLayer}/${targetZ}; target bounds=${formatDiagnosticBounds(targetBounds)}; blocker bounds=${formatDiagnosticBounds(blockerBounds)}); no pointer or mouse event was dispatched. Do not repeat this click, or use another reference/tool to send the same click, while the reported blocker remains. A target-window screenshot alone does not prove the blocker disappeared. Use fresh GUI evidence to choose an unobstructed control, or a normal menu/keyboard path only after confirming the exact target is focused. If safe progress cannot be verified, stop and report the blocker.`;
+}
+
+function boundedDiagnosticInteger(value: unknown, minimum: number, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : undefined;
+}
+
+function boundedDiagnosticCoordinate(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= POINT_GUARD_DIAGNOSTIC_MAX_COORDINATE
+    ? value
+    : undefined;
+}
+
+function parseDiagnosticBounds(value: unknown): CuaWindowGeometry | undefined {
+  const record = parseStructuredRecord(value);
+  const x = boundedDiagnosticCoordinate(record?.x);
+  const y = boundedDiagnosticCoordinate(record?.y);
+  const width = boundedDiagnosticCoordinate(record?.width);
+  const height = boundedDiagnosticCoordinate(record?.height);
+  return x !== undefined && y !== undefined && width !== undefined && height !== undefined && width > 0 && height > 0
+    ? { x, y, width, height }
+    : undefined;
+}
+
+function diagnosticBoundsContainPoint(bounds: CuaWindowGeometry, x: number, y: number): boolean {
+  return x >= bounds.x && y >= bounds.y && x <= bounds.x + bounds.width && y <= bounds.y + bounds.height;
+}
+
+function formatDiagnosticCoordinate(value: number): string {
+  return value.toFixed(2);
+}
+
+function formatDiagnosticBounds(bounds: CuaWindowGeometry): string {
+  return `${formatDiagnosticCoordinate(bounds.x)},${formatDiagnosticCoordinate(bounds.y)},${formatDiagnosticCoordinate(bounds.width)},${formatDiagnosticCoordinate(bounds.height)}`;
 }
 
 function parseActualForegroundWindowId(message: string): number | undefined {
@@ -811,8 +997,12 @@ interface PrivateSession {
     readonly actionId: ActionIntent["actionId"];
     readonly sourceObservationId: ObservationId;
     readonly closeShortcut: boolean;
+    readonly createTextEditDocumentShortcut: boolean;
+    readonly openTextEditDocumentShortcut: boolean;
+    readonly sourceApplicationIdentity?: VerifiedApplicationIdentity;
     completed: boolean;
     readonly targetKeys: ReadonlySet<string>;
+    readonly windowRows: readonly CuaWindowInfo[];
     readonly complete: boolean;
     readonly truncated: boolean;
     readonly parentSurfaceRef: SurfaceRef;
@@ -827,6 +1017,18 @@ interface PrivateSession {
     epoch: number;
     confirming: boolean;
   };
+  /** Exact TextEdit document windows created by this Run's completed Cmd+N actions. */
+  runOwnedTextEditWindows: Map<string, RunOwnedTextEditWindowProof>;
+  /** A completed model Cmd+O, scoped to its exact Run-owned TextEdit root until its modal Open action completes. */
+  runOwnedTextEditOpenIntent?: RunOwnedTextEditOpenIntent;
+  /** Transition-only capture after a completed close, awaiting explicit model switch_window. */
+  taskWindowTransition?: {
+    readonly closeSourceActionId: ActionIntent["actionId"];
+    readonly closeSourceSurfaceRef: SurfaceRef;
+    readonly target: CuaWindowTarget;
+    readonly candidate: RunOwnedTextEditWindowProof;
+    observationSurfaceRef?: SurfaceRef;
+  };
   /** Windows surfaced since that observation; only these may be considered for automatic handoff. */
   newlySurfacedWindowKeys: ReadonlySet<string>;
   /** Visible identities observed after a completed action; model inventory annotation only. */
@@ -835,6 +1037,11 @@ interface PrivateSession {
   newHandoffCandidates: readonly ComputerWindowCandidate[];
   /** Exact HWND reported by CUA as foreground for the current no-input refusal. */
   foregroundMismatchWindowId: number | undefined;
+  /** Set only when the driver has an explicit no-input foreground refusal; it does not require a foreign HWND value. */
+  managedBrowserRestoreEligible: boolean;
+  /** Fresh UI-confirmable restore tokens for this exact managed browser target. */
+  managedBrowserRestoreCandidates: Map<string, ComputerWindowCandidate>;
+  managedBrowserRestoreConfirming: boolean;
   /** True only when the last completed action produced a pre/post inventory diff. */
   proactiveHandoffCandidatesReady: boolean;
   recoveryWindowIdentity?: CuaWindowInfo;
@@ -863,6 +1070,25 @@ interface PrivateSession {
   unknownActionReconciliationPending?: boolean;
   /** Exact active root re-confirmed by the most recent unknown-action diff. */
   unknownActionReconfirmedSurfaceRef?: SurfaceRef;
+}
+
+interface RunOwnedTextEditWindowProof {
+  readonly target: CuaWindowTarget;
+  readonly sourceActionId: ActionIntent["actionId"];
+  readonly sourceOpenActionId?: ActionIntent["actionId"];
+  readonly sourceParentSurfaceRef: SurfaceRef;
+  readonly sourceApplicationIdentity: VerifiedApplicationIdentity;
+  surfaceRef: SurfaceRef;
+}
+
+interface RunOwnedTextEditOpenIntent {
+  readonly sourceActionId: ActionIntent["actionId"];
+  readonly sourceTarget: CuaWindowTarget;
+  readonly sourceParentSurfaceRef: SurfaceRef;
+  readonly sourceApplicationIdentity: VerifiedApplicationIdentity;
+  readonly baselineTargetKeys: ReadonlySet<string>;
+  admittedOpenSheetRef?: SurfaceRef;
+  sourceParentAfterOpenSheetRef?: SurfaceRef;
 }
 
 type CuaPlatform = "win32" | "darwin" | "linux";
@@ -1220,10 +1446,14 @@ export class CuaDriverComputer implements Computer {
         initialObservationPending: true,
         visibleWindowBaseline: undefined,
         preActionWindowBaseline: undefined,
+        runOwnedTextEditWindows: new Map(),
         newlySurfacedWindowKeys: new Set(),
         firstObservedAfterActionWindows: undefined,
         newHandoffCandidates: [],
         foregroundMismatchWindowId: undefined,
+        managedBrowserRestoreEligible: false,
+        managedBrowserRestoreCandidates: new Map(),
+        managedBrowserRestoreConfirming: false,
         proactiveHandoffCandidatesReady: false,
         ...(recoveryWindowIdentity === undefined ? {} : { recoveryWindowIdentity }),
         ...(reopenSavedDocument === undefined ? {} : { reopenSavedDocument }),
@@ -1250,6 +1480,9 @@ export class CuaDriverComputer implements Computer {
   ): Promise<ObservationCapture> {
     const current = this.requireSession(session);
     signal.throwIfAborted();
+    if (current.missingParent !== undefined && current.taskWindowTransition !== undefined) {
+      return this.observeTaskWindowTransition(current, session, observationId, signal);
+    }
     if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
     if (activeSurfaceUnavailable(current)) {
       throw normalizeDriverError(new WindowContractError("WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session"), "observe");
@@ -1591,7 +1824,11 @@ export class CuaDriverComputer implements Computer {
     }
   }
 
-  private async reconcileActiveTransientChild(current: PrivateSession, signal: AbortSignal): Promise<SurfaceRef | undefined> {
+  private async reconcileActiveTransientChild(
+    current: PrivateSession,
+    signal: AbortSignal,
+    inventoryPidScope?: number,
+  ): Promise<SurfaceRef | undefined> {
     signal.throwIfAborted();
     const ref = current.surfaceRegistry.activeSurface;
     if (ref === undefined || !isExecutableSurfaceRef(current.surfaceRegistry, ref)) {
@@ -1611,10 +1848,16 @@ export class CuaDriverComputer implements Computer {
           this.options.windowSwitch !== "opened-windows-v1" || !isCurrentSurfaceRef(current.surfaceRegistry, parentRef)) {
         throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "macOS attached-sheet lifecycle lost its authorized current parent context");
       }
+      if (inventoryPidScope !== undefined && inventoryPidScope !== parentTarget.pid) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "attached-sheet reconciliation PID scope does not match its exact parent");
+      }
       const [inventory, parentBinding] = await Promise.all([
-        listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe),
+        listWindowInventory(current.driver, current.label, signal, inventoryPidScope, false, this.options.windowRelationshipProbe, current.platform),
         discoverWindow(current.driver, current.label, parentTarget, signal),
       ]);
+      if (inventoryPidScope !== undefined && (!inventory.complete || inventory.truncated === true)) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "incomplete parent-process inventory cannot prove that the exact Open sheet disappeared");
+      }
       const storedParentBinding = current.windowBindings.get(windowIdentityKey(parentTarget));
       if (storedParentBinding === undefined || !sameWindowGeometry(parentBinding.bounds, storedParentBinding.bounds)) {
         throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the exact parent window geometry changed during attached-sheet reconciliation");
@@ -1694,7 +1937,7 @@ export class CuaDriverComputer implements Computer {
           throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "the attached-sheet stack changed during the bounded hidden-child recheck");
         }
         const [retryInventory, retryParentBinding] = await Promise.all([
-          listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe),
+          listWindowInventory(current.driver, current.label, signal, inventoryPidScope, false, this.options.windowRelationshipProbe, current.platform),
           discoverWindow(current.driver, current.label, parentTarget, signal),
         ]);
         const retryChildRows = retryInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
@@ -1702,7 +1945,7 @@ export class CuaDriverComputer implements Computer {
         const retryCandidate = retryChildRows.length === 1 ? retryChildRows[0] : undefined;
         const retryParentRow = retryParentRows.length === 1 ? retryParentRows[0] : undefined;
         if (!stillSameStack() || windowIdentityKey(retryParentBinding.target) !== windowIdentityKey(parentTarget) ||
-            retryInventory.truncated === true || retryChildRows.length !== 1 ||
+            retryInventory.truncated === true || inventoryPidScope !== undefined && !retryInventory.complete || retryChildRows.length !== 1 ||
             retryParentRows.length !== 1 || retryCandidate === undefined || retryCandidate.isOnScreen !== false ||
             retryCandidate.minimized === true ||
             (retryCandidate.ownerPid !== undefined && retryCandidate.ownerPid !== parentTarget.pid) ||
@@ -1746,7 +1989,7 @@ export class CuaDriverComputer implements Computer {
       childAbsent = verification.status === "absent";
     } else {
       const childTarget = asCuaWindowTarget(child.nativeWindow);
-      let inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+      let inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe, current.platform);
       let candidate = inventory.windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(childTarget));
       if (this.options.windowDeliveryMode === "foreground" && candidate?.noActivate === true && candidate.isOnScreen === true && candidate.minimized !== true &&
           candidate.ownerPid === parentTarget.pid && candidate.ownerWindowId === parentTarget.windowId) {
@@ -2094,7 +2337,7 @@ export class CuaDriverComputer implements Computer {
     if (probe === undefined) {
       throw new WindowContractError("WINDOW_INVENTORY_UNKNOWN", "safe transient recovery requires a Win32 relationship probe");
     }
-    const cua = await listWindowInventory(current.driver, current.label, signal, undefined, false);
+    const cua = await listWindowInventory(current.driver, current.label, signal, undefined, false, undefined, current.platform);
     signal.throwIfAborted();
     const snapshot = await probe.read(signal);
     signal.throwIfAborted();
@@ -2551,14 +2794,35 @@ export class CuaDriverComputer implements Computer {
     const current = this.requireSession(session);
     const missing = current.missingParent;
     if (missing?.confirming) throw new Error("window handoff confirmation is in flight");
+    if (current.managedBrowserRestoreConfirming) throw new Error("managed browser restore confirmation is in flight");
     const epoch = missing === undefined ? undefined : ++missing.epoch;
     // Invalidate before I/O, including failed/aborted refreshes.
     missing?.candidates.clear();
+    current.managedBrowserRestoreCandidates.clear();
     current.windowRefs.clear();
+    const restoreTarget = this.eligibleCurrentManagedBrowserRestoreTarget(current);
+    if (missing === undefined && restoreTarget !== undefined) {
+      const inventory = await listWindowInventory(current.driver, current.label, signal, restoreTarget.pid, true,
+        this.options.windowRelationshipProbe, current.platform);
+      const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(restoreTarget));
+      if (matches.length !== 1 || matches[0]?.isOnScreen !== true || matches[0]?.minimized === true) return [];
+      signal.throwIfAborted();
+      if (this.eligibleCurrentManagedBrowserRestoreTarget(current) === undefined) return [];
+      const handoffToken = randomUUID();
+      const candidate: ComputerWindowCandidate = {
+        ...restoreTarget,
+        handoffToken,
+        restoreCurrentManagedBrowser: true,
+        appName: "Harness-managed browser",
+        title: "Run-owned browser window",
+      };
+      current.managedBrowserRestoreCandidates.set(handoffToken, candidate);
+      return [candidate];
+    }
     if (!this.canUseManualWindowHandoff(current)) {
       throw new Error("window handoff is available only for an explicitly bound native window");
     }
-    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe, current.platform);
     const windows = inventory.windows;
     const binding = activeWindowBinding(current);
     if (binding === undefined) throw new Error("window handoff requires the exact active native-window binding");
@@ -2655,7 +2919,28 @@ export class CuaDriverComputer implements Computer {
       throw new WindowContractError("WINDOW_SWITCH_DISABLED", "cross-window switching is not enabled for this Run");
     }
     signal.throwIfAborted();
-    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+    if (current.missingParent !== undefined && current.taskWindowTransition !== undefined) {
+      const { target } = await this.verifyTaskWindowTransition(current, signal);
+      const candidate = current.taskWindowTransition.candidate;
+      const peerRef = currentSurfaceRef(current.surfaceRegistry, candidate.surfaceRef.surfaceId);
+      if (peerRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, peerRef) ||
+          isExecutableSurfaceRef(current.surfaceRegistry, peerRef) ||
+          windowIdentityKey(candidate.target) !== windowIdentityKey(target.target)) {
+        throw new WindowContractError("WINDOW_SWITCH_STALE", "fresh task-window list no longer matches the Run-owned peer Surface");
+      }
+      candidate.surfaceRef = peerRef;
+      const windowRef = `win-${randomUUID()}`;
+      current.windowRefs.set(windowRef, peerRef);
+      return {
+        options: [{ windowRef, ...(target.appName === undefined ? {} : { appName: target.appName }),
+          ...(target.title === undefined ? {} : { title: target.title }), isCurrent: false,
+          ...(target.isOnScreen === undefined ? {} : { isOnScreen: target.isOnScreen }),
+          ...(target.minimized === undefined ? {} : { minimized: target.minimized }) }],
+        truncated: false,
+        omittedCount: 0,
+      };
+    }
+    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe, current.platform);
     signal.throwIfAborted();
     const inventoryComplete = inventory.complete && inventory.truncated !== true;
     const actionBaseline = current.preActionWindowBaseline;
@@ -2706,10 +2991,45 @@ export class CuaDriverComputer implements Computer {
       .filter((surface): surface is Extract<SurfaceRecord, { readonly kind: "native_window" }> =>
         surface.kind === "native_window" && surface.parentSurfaceId !== undefined && surface.status !== "closed")
       .map((surface) => windowIdentityKey(asCuaWindowTarget(surface.nativeWindow))));
+    const runOwnedTextEditWindowKeys = new Set(current.runOwnedTextEditWindows.keys());
     const isDesktopScope = activeSurface(current)?.kind === "desktop";
-    const windows = inventory.windows
-      .filter((window) => this.isTargetSwitchAllowed(window.target))
-      .filter((window) => !childWindowKeys.has(windowIdentityKey(window.target)));
+    const windows: CuaWindowInfo[] = [];
+    for (const window of inventory.windows) {
+      if (childWindowKeys.has(windowIdentityKey(window.target))) continue;
+      if (targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
+          this.hasHybridCapability() && windowIdentityKey(window.target) === windowIdentityKey(this.options.hybridNativeWebDocumentCapability!.managedBrowserTarget.windowTarget)) {
+        windows.push(window);
+        continue;
+      }
+      if (runOwnedTextEditWindowKeys.has(windowIdentityKey(window.target))) continue;
+    }
+    // A valid Run-owned TextEdit peer is verified against its own complete
+    // process inventory. Unrelated applications can make the desktop-wide
+    // list partial without making this exact Run task window ambiguous.
+    const scopedRunOwnedPids = new Set([...current.runOwnedTextEditWindows.values()]
+      .filter((candidate) => !childWindowKeys.has(windowIdentityKey(candidate.target)) &&
+        !targetAllowedByHostScope(candidate.target, this.options.windowSwitchAllowedTargets) &&
+        !(this.hasHybridCapability() && windowIdentityKey(candidate.target) ===
+          windowIdentityKey(this.options.hybridNativeWebDocumentCapability!.managedBrowserTarget.windowTarget)))
+      .map((candidate) => candidate.target.pid));
+    let runOwnedInventoryIncomplete = false;
+    for (const pid of scopedRunOwnedPids) {
+      const scopedInventory = await listWindowInventory(
+        current.driver, current.label, signal, pid, false, this.options.windowRelationshipProbe, "darwin",
+      );
+      if (!scopedInventory.complete || scopedInventory.truncated === true) {
+        runOwnedInventoryIncomplete = true;
+        continue;
+      }
+      for (const candidate of current.runOwnedTextEditWindows.values()) {
+        if (candidate.target.pid !== pid || childWindowKeys.has(windowIdentityKey(candidate.target)) ||
+            targetAllowedByHostScope(candidate.target, this.options.windowSwitchAllowedTargets) ||
+            this.hasHybridCapability() && windowIdentityKey(candidate.target) ===
+              windowIdentityKey(this.options.hybridNativeWebDocumentCapability!.managedBrowserTarget.windowTarget)) continue;
+        const verified = await this.verifyRunOwnedTextEditWindow(current, candidate, signal, scopedInventory);
+        if (verified !== undefined) windows.push(verified);
+      }
+    }
     const inventoryForegroundTarget = isDesktopScope && inventory.foregroundPid !== undefined && inventory.foregroundWindowId !== undefined
       ? { pid: inventory.foregroundPid, windowId: inventory.foregroundWindowId }
       : undefined;
@@ -2740,6 +3060,8 @@ export class CuaDriverComputer implements Computer {
         ...(window.appName === undefined ? {} : { appName: window.appName }),
         ...(window.title === undefined ? {} : { title: window.title }),
         isCurrent: currentKey === windowIdentityKey(window.target),
+        ...(window.isOnScreen === undefined ? {} : { isOnScreen: window.isOnScreen }),
+        ...(window.minimized === undefined ? {} : { minimized: window.minimized }),
         ...(window.isOnScreen === true && current.firstObservedAfterActionWindows?.targetKeys.has(windowIdentityKey(window.target)) === true
           ? { firstObservedAfterAction: true, sourceActionId: current.firstObservedAfterActionWindows.actionId }
           : {}),
@@ -2749,7 +3071,7 @@ export class CuaDriverComputer implements Computer {
     const omittedCount = projected.omittedCount + registrationOmissions;
     return {
       options,
-      truncated: !inventoryComplete || omittedCount > 0,
+      truncated: !inventoryComplete || runOwnedInventoryIncomplete || omittedCount > 0,
       omittedCount,
     };
   }
@@ -2768,6 +3090,7 @@ export class CuaDriverComputer implements Computer {
     const current = this.requireSession(session);
     current.firstObservedAfterActionWindows = undefined;
     signal.throwIfAborted();
+    if (current.missingParent !== undefined && current.taskWindowTransition !== undefined) return [];
     if (current.missingParent !== undefined) throw new BoundWindowMissingError(current.missingParent.sourceActionId);
     const confirmingUnknownAction = current.unknownActionReconciliationPending === true;
     delete current.unknownActionReconfirmedSurfaceRef;
@@ -2783,6 +3106,7 @@ export class CuaDriverComputer implements Computer {
     const activeSurface = activeBeforeReconcile === undefined
       ? undefined
       : current.surfaceRegistry.surfaces.get(activeBeforeReconcile.surfaceId);
+    let completedOpenDocumentPid: number | undefined;
     if (activeBeforeReconcile !== undefined && baseline?.completed === true && activeSurface?.kind === "native_window" &&
         activeSurface.admissionSource === "macos_attached_sheet_proof" &&
         activeSurface.parentSurfaceId !== undefined &&
@@ -2804,14 +3128,59 @@ export class CuaDriverComputer implements Computer {
       let nestedInventory = await listWindowInventory(
         current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe,
       );
-      if (nestedInventory.truncated === true) {
-        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet candidate inventory is truncated");
-      }
       const newRows = nestedInventory.windows.filter((window) =>
         !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
       let nestedCandidate = newRows.length === 1 && newRows[0]!.target.pid === activeBinding.target.pid
         ? newRows[0]
         : undefined;
+      // A completed normal Cmd+O flow can replace its exact admitted sheet
+      // with a new TextEdit document window. The sheet's parent HWND is then
+      // gone, so do not try to rediscover that obsolete parent as though the
+      // new document were another attached sheet. Require the completed
+      // Enter action's recorded Open lineage, exact Run-owned root peer, a
+      // complete inventory proving the panel absent, and a fresh exact
+      // document/process proof before falling through to ordinary child
+      // reconciliation. This never activates the document or creates a
+      // handoff; the model must still list and select its opaque window ref.
+      const openedDocumentProofs = [...current.runOwnedTextEditWindows.values()].filter((candidate) =>
+        candidate.sourceActionId === baseline.actionId && candidate.sourceOpenActionId !== undefined &&
+        candidate.sourceParentSurfaceRef.surfaceId === rootRef.surfaceId && candidate.target.pid === activeBinding.target.pid);
+      const rootTaskWindow = current.runOwnedTextEditWindows.get(windowIdentityKey(asCuaWindowTarget(rootNative)));
+      if (baseline.completed && openedDocumentProofs.length === 1 && rootTaskWindow !== undefined &&
+          rootTaskWindow.surfaceRef.surfaceId === rootRef.surfaceId &&
+          windowIdentityKey(rootTaskWindow.target) === windowIdentityKey(asCuaWindowTarget(rootNative)) &&
+          sameApplicationProcess(openedDocumentProofs[0]!.sourceApplicationIdentity, rootTaskWindow.sourceApplicationIdentity)) {
+        const openedDocument = openedDocumentProofs[0]!;
+        const openedDocumentInventory = await listWindowInventory(
+          current.driver, current.label, signal, activeBinding.target.pid, false, this.options.windowRelationshipProbe, "darwin",
+        );
+        const openedRows = openedDocumentInventory.windows.filter((window) =>
+          windowIdentityKey(window.target) === windowIdentityKey(openedDocument.target));
+        if (openedDocumentInventory.complete && openedDocumentInventory.truncated !== true &&
+            !openedDocumentInventory.windows.some((window) => windowIdentityKey(window.target) === windowIdentityKey(activeBinding.target)) &&
+            openedRows.length === 1 && openedRows[0]!.isOnScreen === true && openedRows[0]!.minimized !== true &&
+            openedDocumentInventory.foregroundPid === openedDocument.target.pid &&
+            openedDocumentInventory.foregroundWindowId === openedDocument.target.windowId) {
+          const verifiedOpenedDocument = await this.verifyRunOwnedTextEditWindow(
+            current, openedDocument, signal, openedDocumentInventory,
+          );
+          if (verifiedOpenedDocument !== undefined &&
+              windowIdentityKey(verifiedOpenedDocument.target) === windowIdentityKey(openedDocument.target) &&
+              sameApplicationProcess(openedDocument.sourceApplicationIdentity, rootTaskWindow.sourceApplicationIdentity)) {
+            completedOpenDocumentPid = activeBinding.target.pid;
+            nestedCandidate = undefined;
+          }
+        }
+      }
+      if (nestedInventory.truncated === true && completedOpenDocumentPid === undefined) {
+        throw new WindowContractError("TRANSIENT_SURFACE_UNKNOWN", "nested macOS sheet candidate inventory is truncated");
+      }
+      if (completedOpenDocumentPid !== undefined) {
+        // The PID-scoped complete inventory above proves the old panel is
+        // absent and the newly opened peer is exact; the ordinary sheet path
+        // below would otherwise rediscover that already-closed panel.
+        nestedCandidate = undefined;
+      }
       if (nestedCandidate !== undefined) {
         let freshParent = await discoverWindow(current.driver, current.label, activeBinding.target, signal);
         const storedParent = current.windowBindings.get(windowIdentityKey(activeBinding.target));
@@ -2921,7 +3290,7 @@ export class CuaDriverComputer implements Computer {
         return [];
       }
     }
-    const reconciledSibling = await this.reconcileActiveTransientChild(current, signal);
+    const reconciledSibling = await this.reconcileActiveTransientChild(current, signal, completedOpenDocumentPid);
     if (reconciledSibling !== undefined) return [];
     if (baseline !== undefined && sameSurfaceRef(activeBeforeReconcile, baseline.parentSurfaceRef) &&
         baseline.parentSurfaceRef.parentSurfaceId !== undefined &&
@@ -2994,7 +3363,7 @@ export class CuaDriverComputer implements Computer {
       readonly potentialOwnedTransientChild?: CuaWindowInfo;
     }> => {
       signal.throwIfAborted();
-      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe, current.platform);
       signal.throwIfAborted();
       const rawSurfaced = inventory.windows.filter((window) => !baseline.targetKeys.has(windowIdentityKey(window.target)));
       const surfaced = projectSelectableWindowCandidates(rawSurfaced, baseline.parentBinding.target, current.platform, undefined, (window) =>
@@ -3216,6 +3585,22 @@ export class CuaDriverComputer implements Computer {
             const pushed = pushChild(current.surfaceRegistry, parentRef, attached.evidence);
             if (pushed.decision === "applied") {
               current.surfaceRegistry = pushed.state;
+              const openIntent = current.runOwnedTextEditOpenIntent;
+              const sourceParentAfterOpenSheet = openIntent === undefined
+                ? undefined
+                : currentSurfaceRef(pushed.state, openIntent.sourceParentSurfaceRef.surfaceId);
+              if (baseline.openTextEditDocumentShortcut && openIntent !== undefined &&
+                  openIntent.sourceActionId === baseline.actionId &&
+                  sameSurfaceRef(openIntent.sourceParentSurfaceRef, baseline.parentSurfaceRef) &&
+                  pushed.value.parentSurfaceId === openIntent.sourceParentSurfaceRef.surfaceId &&
+                  sourceParentAfterOpenSheet !== undefined &&
+                  sourceParentAfterOpenSheet.generation === openIntent.sourceParentSurfaceRef.generation + 1) {
+                current.runOwnedTextEditOpenIntent = {
+                  ...openIntent,
+                  admittedOpenSheetRef: { ...pushed.value },
+                  sourceParentAfterOpenSheetRef: { ...sourceParentAfterOpenSheet },
+                };
+              }
               noteSurfaceTransition(current, "child_push");
               pushedChild = true;
               current.windowBindings.set(windowIdentityKey(enrichedCandidate.target), {
@@ -3296,6 +3681,7 @@ export class CuaDriverComputer implements Computer {
       }
     }
     const handoffWindows = pushedChild ? [] : surfaced
+      .filter((window) => !current.runOwnedTextEditWindows.has(windowIdentityKey(window.target)))
       .filter((window) => targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
         window.ownerPid === ownerTarget.pid && window.ownerWindowId === ownerTarget.windowId)
       .filter((window) => windowIdentityKey(window.target) !== nonBlockingAuxiliaryKey);
@@ -3332,9 +3718,25 @@ export class CuaDriverComputer implements Computer {
     return candidates;
   }
 
+  private eligibleCurrentManagedBrowserRestoreTarget(current: PrivateSession): CuaWindowTarget | undefined {
+    const binding = activeWindowBinding(current);
+    const managed = current.managedBrowserTarget;
+    if (this.options.windowSwitch !== "opened-windows-v1" || this.options.windowDeliveryMode !== "foreground" ||
+        this.options.browserTarget === undefined || binding === undefined || managed === undefined ||
+        current.browserTarget === undefined || !managedBrowserTargetForBinding(current, binding) ||
+        windowIdentityKey(current.browserTarget.windowTarget) !== windowIdentityKey(binding.target) ||
+        windowIdentityKey(managed.windowTarget) !== windowIdentityKey(binding.target) ||
+        !current.managedBrowserRestoreEligible ||
+        current.missingParent !== undefined) return undefined;
+    return { ...binding.target };
+  }
+
   public async handoffWindow(session: ComputerSessionDescriptor, candidate: ComputerWindowCandidate, signal: AbortSignal): Promise<ComputerSessionDescriptor> {
     const current = this.requireSession(session);
     const binding = activeWindowBinding(current);
+    if (candidate.restoreCurrentManagedBrowser === true) {
+      return this.restoreCurrentManagedBrowser(current, session, candidate, signal);
+    }
     if (binding === undefined || !this.canUseManualWindowHandoff(current)) {
       throw new Error("window handoff is available only for an explicitly bound native window");
     }
@@ -3357,7 +3759,7 @@ export class CuaDriverComputer implements Computer {
       try {
       if (this.options.recoverBoundWindowMissing === true && missing.reason === "bound_window_missing") {
         const pinned = current.recoveryWindowIdentity;
-        const freshInventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+        const freshInventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe, current.platform);
         const freshMatches = freshInventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate));
         if (pinned === undefined || freshInventory.truncated === true || freshMatches.length !== 1 ||
             !samePinnedRecoveryIdentity(pinned, freshMatches[0]!)) {
@@ -3412,7 +3814,7 @@ export class CuaDriverComputer implements Computer {
       if (!sameWindowGeometry(freshParent.bounds, binding.bounds)) {
         throw new WindowContractError("WINDOW_HANDOFF_STALE", "the current parent geometry changed before the owned-child selection");
       }
-      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+      const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe, current.platform);
       const ownedRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate));
       const ownedRow = ownedRows.length === 1 ? ownedRows[0] : undefined;
       const freshMismatchPeer = isForegroundMismatchPeer && ownedRow !== undefined &&
@@ -3445,6 +3847,40 @@ export class CuaDriverComputer implements Computer {
     });
   }
 
+  private async restoreCurrentManagedBrowser(
+    current: PrivateSession,
+    session: ComputerSessionDescriptor,
+    candidate: ComputerWindowCandidate,
+    signal: AbortSignal,
+  ): Promise<ComputerSessionDescriptor> {
+    const token = candidate.handoffToken;
+    const issued = token === undefined ? undefined : current.managedBrowserRestoreCandidates.get(token);
+    const target = this.eligibleCurrentManagedBrowserRestoreTarget(current);
+    if (token === undefined || current.managedBrowserRestoreConfirming || issued === undefined || target === undefined ||
+        issued.pid !== candidate.pid || issued.windowId !== candidate.windowId ||
+        candidate.pid !== target.pid || candidate.windowId !== target.windowId ||
+        candidate.appName !== issued.appName || candidate.title !== issued.title ||
+        candidate.restoreCurrentManagedBrowser !== true) {
+      throw new WindowContractError("WINDOW_HANDOFF_STALE", "the exact Run-owned browser restore candidate is missing, stale, or outside the current Run");
+    }
+    current.managedBrowserRestoreConfirming = true;
+    try {
+      const result = await this.transitionWindow(current, target, signal, {
+        onScreenOnly: true,
+        staleCode: "WINDOW_HANDOFF_STALE",
+        authorizedTargets: [{ pid: target.pid, windowId: target.windowId }],
+        allowCurrentTargetRestore: true,
+        targetPidOnly: true,
+        restorePermit: { candidate: issued, token },
+      });
+      signal.throwIfAborted();
+      return result;
+    } finally {
+      current.managedBrowserRestoreCandidates.clear();
+      current.managedBrowserRestoreConfirming = false;
+    }
+  }
+
   /**
    * The shared native target transition for host-confirmed handoff and the
    * opted-in model switch action. It validates identity, activates at most
@@ -3458,6 +3894,9 @@ export class CuaDriverComputer implements Computer {
       readonly onScreenOnly: boolean;
       readonly staleCode: string;
       readonly staleMessage?: string;
+      readonly allowCurrentTargetRestore?: boolean;
+      readonly allowRunOwnedPeerRefocus?: boolean;
+      readonly targetPidOnly?: boolean;
       readonly expectedAppName?: string;
       readonly expectedTitle?: string;
       readonly expectedOwner?: CuaWindowTarget;
@@ -3465,44 +3904,122 @@ export class CuaDriverComputer implements Computer {
       readonly authorizedTargets?: readonly CuaWindowTarget[];
       readonly selectedSurfaceRef?: SurfaceRef;
       readonly missingPermit?: { readonly boundary: NonNullable<PrivateSession["missingParent"]>; readonly epoch: number; readonly issued: ComputerWindowCandidate };
+      readonly restorePermit?: { readonly candidate: ComputerWindowCandidate; readonly token: string };
+      readonly taskOwnedWindow?: RunOwnedTextEditWindowProof;
+      readonly taskWindowTransitionPermit?: NonNullable<PrivateSession["taskWindowTransition"]>;
     },
   ): Promise<ComputerSessionDescriptor> {
     validateWindowTarget(target);
-    if (!targetAllowedByHostScope(target, options.authorizedTargets)) {
+    const taskOwnedWindow = options.taskOwnedWindow;
+    const taskTransition = options.taskWindowTransitionPermit;
+    const exactRunOwnedTarget = taskOwnedWindow !== undefined &&
+      current.runOwnedTextEditWindows.get(windowIdentityKey(target)) === taskOwnedWindow &&
+      windowIdentityKey(taskOwnedWindow.target) === windowIdentityKey(target);
+    const exactTransitionTarget = taskTransition !== undefined && current.taskWindowTransition === taskTransition &&
+      current.runOwnedTextEditWindows.get(windowIdentityKey(target)) === taskTransition.candidate &&
+      windowIdentityKey(taskTransition.target) === windowIdentityKey(target);
+    if (!targetAllowedByHostScope(target, options.authorizedTargets) && !exactRunOwnedTarget && !exactTransitionTarget) {
       throw new WindowContractError("WINDOW_SWITCH_UNAUTHORIZED", "selected window is outside the host-authorized window scope");
     }
     const activeRefBefore = current.surfaceRegistry.activeSurface;
+    const activeBefore = activeSurface(current);
+    const activeBindingBefore = activeWindowBinding(current);
+    const selectedIsCurrent = activePeerTarget(current) !== undefined &&
+      windowIdentityKey(activePeerTarget(current)!) === windowIdentityKey(target);
+    let runOwnedForegroundPeerRefocus: RunOwnedTextEditWindowProof | undefined;
     const assertTransitionCurrent = (): void => {
       const permit = options.missingPermit;
-      if (permit === undefined) return; // Do not narrow historical non-missing recovery paths.
+      const restorePermit = options.restorePermit;
+      const taskPermit = options.taskWindowTransitionPermit;
+      const taskWindow = options.taskOwnedWindow;
+      if (permit === undefined && restorePermit === undefined && taskPermit === undefined && taskWindow === undefined &&
+          options.allowRunOwnedPeerRefocus !== true) return; // Do not narrow historical non-missing recovery paths.
       signal.throwIfAborted();
       if (this.session !== current || !current.active || activeRefBefore === undefined ||
           !sameSurfaceRef(activeRefBefore, current.surfaceRegistry.activeSurface) ||
           !isExecutableSurfaceRef(current.surfaceRegistry, activeRefBefore)) {
         throw new WindowContractError(options.staleCode, "target transition session or Surface is no longer current");
       }
-      if (current.missingParent !== permit.boundary || !permit.boundary.confirming ||
-          permit.boundary.epoch !== permit.epoch || permit.boundary.candidates.get(permit.issued.handoffToken!) !== permit.issued) {
+      if (permit !== undefined && (current.missingParent !== permit.boundary || !permit.boundary.confirming ||
+          permit.boundary.epoch !== permit.epoch || permit.boundary.candidates.get(permit.issued.handoffToken!) !== permit.issued)) {
         throw new WindowContractError(options.staleCode, "missing-window confirmation is no longer current");
       }
+      if (restorePermit !== undefined && (current.missingParent !== undefined || !current.managedBrowserRestoreConfirming ||
+          current.managedBrowserRestoreCandidates.get(restorePermit.token) !== restorePermit.candidate ||
+          this.eligibleCurrentManagedBrowserRestoreTarget(current) === undefined)) {
+        throw new WindowContractError(options.staleCode, "managed-browser restore confirmation is no longer current");
+      }
+      if (taskWindow !== undefined && (current.taskWindowTransition !== undefined || current.missingParent !== undefined ||
+          current.runOwnedTextEditWindows.get(windowIdentityKey(target)) !== taskWindow ||
+          !isCurrentSurfaceRef(current.surfaceRegistry, taskWindow.surfaceRef) ||
+          !sameSurfaceRef(current.surfaceRegistry.activeSurface, activeRefBefore))) {
+        throw new WindowContractError(options.staleCode, "Run-created TextEdit peer authorization changed before transition");
+      }
+      if (taskPermit !== undefined && (current.taskWindowTransition !== taskPermit || current.missingParent === undefined ||
+          current.missingParent.sourceActionId !== taskPermit.closeSourceActionId ||
+          taskPermit.candidate !== current.runOwnedTextEditWindows.get(windowIdentityKey(target)) ||
+          !sameSurfaceRef(current.surfaceRegistry.activeSurface, taskPermit.closeSourceSurfaceRef) ||
+          taskPermit.observationSurfaceRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, taskPermit.observationSurfaceRef))) {
+        throw new WindowContractError(options.staleCode, "completed-close task-window authorization changed before transition");
+      }
+      if (options.allowRunOwnedPeerRefocus === true) {
+        const selectedRef = options.selectedSurfaceRef;
+        const hostScope = this.options.windowSwitchAllowedTargets;
+        if (this.options.windowSwitch !== "opened-windows-v1" || this.options.windowDeliveryMode !== "foreground" ||
+            current.platform !== "darwin" || this.options.browserTarget !== undefined ||
+            this.options.hybridNativeWebDocumentCapability !== undefined || taskWindow !== undefined || taskPermit !== undefined ||
+            permit !== undefined || restorePermit !== undefined || !selectedIsCurrent || activeRefBefore === undefined ||
+            selectedRef === undefined || !sameSurfaceRef(selectedRef, activeRefBefore) ||
+            !isCurrentSurfaceRef(current.surfaceRegistry, activeRefBefore) || !isExecutableSurfaceRef(current.surfaceRegistry, activeRefBefore) ||
+            activeBefore?.kind !== "native_window" || activeBefore.parentSurfaceId !== undefined || activeBindingBefore === undefined ||
+            windowIdentityKey(activeBindingBefore.target) !== windowIdentityKey(target) ||
+            !sameSurfaceRef(current.surfaceRegistry.activeSurface, activeRefBefore) ||
+            !this.isAuthorizedBoundRootRefocusTarget(target, hostScope)) {
+          throw new WindowContractError(options.staleCode, "current-window refocus is outside the exact authorized root-window boundary");
+        }
+        if (runOwnedForegroundPeerRefocus !== undefined &&
+            (current.runOwnedTextEditWindows.get(windowIdentityKey(runOwnedForegroundPeerRefocus.target)) !== runOwnedForegroundPeerRefocus ||
+             !sameSurfaceRef(runOwnedForegroundPeerRefocus.sourceParentSurfaceRef, activeRefBefore) ||
+             runOwnedForegroundPeerRefocus.sourceOpenActionId !== undefined ||
+             runOwnedForegroundPeerRefocus.target.pid !== target.pid ||
+             !isCurrentSurfaceRef(current.surfaceRegistry, runOwnedForegroundPeerRefocus.surfaceRef))) {
+          throw new WindowContractError(options.staleCode, "Run-created foreground peer authorization changed before current-window refocus");
+        }
+      }
     };
-    const activeBefore = activeSurface(current);
     if (activeBefore?.parentSurfaceId !== undefined &&
         (activeBefore.kind === "overlay" || activeBefore.kind === "native_window")) {
       throw new WindowContractError("TRANSIENT_SURFACE_MODAL", "close and pop the active modal child Surface before switching peers");
     }
-    const activeBindingBefore = activeWindowBinding(current);
-    const selectedIsCurrent = activePeerTarget(current) !== undefined &&
-      windowIdentityKey(activePeerTarget(current)!) === windowIdentityKey(target);
     signal.throwIfAborted();
-    const transitionInventory = options.expectedOwner === undefined && options.classifyOwnedChild !== true
+    const transitionInventory = options.expectedOwner === undefined && options.classifyOwnedChild !== true &&
+        options.taskOwnedWindow === undefined && options.taskWindowTransitionPermit === undefined &&
+        options.allowRunOwnedPeerRefocus !== true
       ? undefined
-      : await listWindowInventory(current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe);
+      : options.taskWindowTransitionPermit !== undefined
+        ? (await this.verifyTaskWindowTransition(current, signal)).inventory
+        : options.taskOwnedWindow !== undefined
+          ? (await this.verifyRunOwnedTextEditWindow(current, options.taskOwnedWindow, signal)) === undefined
+            ? undefined
+            : await listWindowInventory(current.driver, current.label, signal, target.pid, false, this.options.windowRelationshipProbe, "darwin")
+          : options.allowRunOwnedPeerRefocus === true
+            ? await listWindowInventory(current.driver, current.label, signal, target.pid, false, this.options.windowRelationshipProbe, "darwin")
+            : await listWindowInventory(current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe, current.platform);
+    if ((options.taskOwnedWindow !== undefined || options.taskWindowTransitionPermit !== undefined ||
+        options.allowRunOwnedPeerRefocus === true) && transitionInventory === undefined) {
+      throw new WindowContractError(options.staleCode, "fresh complete TextEdit inventory no longer proves the Run-owned target");
+    }
     const windows = transitionInventory?.windows ?? await listWindowTargets(
-      current.driver, current.label, signal, undefined, options.onScreenOnly, this.options.windowRelationshipProbe,
+      current.driver, current.label, signal, options.targetPidOnly === true ? target.pid : undefined,
+      options.onScreenOnly, this.options.windowRelationshipProbe, current.platform,
     );
     assertTransitionCurrent();
-    const fresh = windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+    const freshRows = options.restorePermit === undefined ? undefined
+      : windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+    if (freshRows !== undefined && freshRows.length !== 1) {
+      throw new WindowContractError(options.staleCode, "the exact Run-owned browser target is absent or ambiguous in fresh PID-scoped inventory");
+    }
+    const fresh = freshRows?.[0] ?? windows.find((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
     if (fresh === undefined && selectedIsCurrent) {
       if (activeRefBefore !== undefined) {
         const invalidated = markSurfaceUnknown(current.surfaceRegistry, activeRefBefore);
@@ -3519,6 +4036,39 @@ export class CuaDriverComputer implements Computer {
     }
     if (this.options.windowDeliveryMode === "foreground" && fresh.noActivate === true) {
       throw new WindowContractError(options.staleCode, "selected window is a known WS_EX_NOACTIVATE auxiliary and cannot be activated as an independent target");
+    }
+    if (options.restorePermit !== undefined && (fresh.isOnScreen !== true || fresh.minimized === true)) {
+      throw new WindowContractError(options.staleCode, "the exact Run-owned browser target is no longer visible and eligible for restoration");
+    }
+    if (options.allowRunOwnedPeerRefocus === true) {
+      const inventory = transitionInventory!;
+      const selectedRef = options.selectedSurfaceRef;
+      const targetRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+      const foregroundTarget = inventory.foregroundPid !== undefined && inventory.foregroundWindowId !== undefined
+        ? { pid: inventory.foregroundPid, windowId: inventory.foregroundWindowId }
+        : undefined;
+      if (!inventory.complete || inventory.truncated === true || selectedRef === undefined ||
+          !sameSurfaceRef(selectedRef, activeRefBefore) || targetRows.length !== 1 || targetRows[0]!.isOnScreen !== true ||
+          targetRows[0]!.minimized === true || targetRows[0]!.noActivate === true || activeBindingBefore === undefined ||
+          !sameWindowGeometry(targetRows[0]!.bounds, activeBindingBefore.bounds) || foregroundTarget === undefined) {
+        throw new WindowContractError(options.staleCode, "fresh complete TextEdit inventory no longer proves the bound current window and physical foreground");
+      }
+      if (windowIdentityKey(foregroundTarget) === windowIdentityKey(target)) {
+        throw new WindowContractError("WINDOW_ALREADY_CURRENT", "the bound window is already the verified physical foreground");
+      }
+      const foregroundRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(foregroundTarget));
+      const runOwnedMatches = [...current.runOwnedTextEditWindows.values()].filter((candidate) =>
+        windowIdentityKey(candidate.target) === windowIdentityKey(foregroundTarget) && candidate.target.pid === target.pid &&
+        candidate.sourceActionId.length > 0 && candidate.sourceOpenActionId === undefined &&
+        candidate.sourceApplicationIdentity.pid === target.pid && sameSurfaceRef(candidate.sourceParentSurfaceRef, activeRefBefore!),
+      );
+      if (foregroundRows.length !== 1 || foregroundRows[0]!.isOnScreen !== true || foregroundRows[0]!.minimized === true ||
+          runOwnedMatches.length !== 1 || !isCurrentSurfaceRef(current.surfaceRegistry, runOwnedMatches[0]!.surfaceRef) ||
+          await this.verifyRunOwnedTextEditWindow(current, runOwnedMatches[0]!, signal, inventory) === undefined) {
+        throw new WindowContractError(options.staleCode, "physical foreground is not the exact visible Run-created TextEdit peer of the bound window");
+      }
+      runOwnedForegroundPeerRefocus = runOwnedMatches[0]!;
+      assertTransitionCurrent();
     }
     if (options.expectedOwner !== undefined) {
       const ownerRows = windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(options.expectedOwner!));
@@ -3569,14 +4119,20 @@ export class CuaDriverComputer implements Computer {
         }
       }
     }
-    if (selectedIsCurrent) {
+    if (selectedIsCurrent && options.allowCurrentTargetRestore !== true && options.allowRunOwnedPeerRefocus !== true) {
       throw new WindowContractError("WINDOW_ALREADY_CURRENT", "selected window is already the current target");
     }
     current.windowRefs.clear();
 
     assertTransitionCurrent();
     let targetSurfaceRef = options.selectedSurfaceRef;
-    if (targetSurfaceRef === undefined && confirmedChildEvidence === undefined) {
+    if (targetSurfaceRef === undefined && options.allowCurrentTargetRestore === true) {
+      const restoreRoot = surfaceRefForWindow(current, target);
+      if (activeRefBefore === undefined || restoreRoot === undefined || !selectedIsCurrent) {
+        throw new WindowContractError(options.staleCode, "managed browser restore target no longer matches the current Surface");
+      }
+      targetSurfaceRef = restoreRoot;
+    } else if (targetSurfaceRef === undefined && confirmedChildEvidence === undefined) {
       const registered = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(target));
       if (registered.decision !== "applied") {
         throw new WindowContractError(options.staleCode, registered.reason);
@@ -3604,6 +4160,16 @@ export class CuaDriverComputer implements Computer {
       }
     }
 
+    if (options.taskWindowTransitionPermit !== undefined) {
+      await this.verifyTaskWindowTransition(current, signal);
+      assertTransitionCurrent();
+    } else if (options.taskOwnedWindow !== undefined) {
+      if (await this.verifyRunOwnedTextEditWindow(current, options.taskOwnedWindow, signal) === undefined) {
+        throw new WindowContractError(options.staleCode, "Run-created TextEdit peer identity changed after activation");
+      }
+      assertTransitionCurrent();
+    }
+
     let capture: Awaited<ReturnType<typeof captureWindowWithRetry>>;
     try {
       assertTransitionCurrent();
@@ -3620,6 +4186,26 @@ export class CuaDriverComputer implements Computer {
       throw error;
     }
 
+    if (options.taskWindowTransitionPermit !== undefined) {
+      const proof = await queryDocumentIdentity(current.driver, current.label, target, capture.binding.bounds, TEXTEDIT_EXECUTABLE_URL, signal);
+      if (proof === undefined || !sameApplicationProcess(proof.identity, options.taskWindowTransitionPermit.candidate.sourceApplicationIdentity)) {
+        throw new WindowContractError(options.staleCode, "captured task peer no longer proves the Run-created TextEdit process");
+      }
+      assertTransitionCurrent();
+    } else if (options.taskOwnedWindow !== undefined) {
+      const proof = await queryDocumentIdentity(current.driver, current.label, target, capture.binding.bounds, TEXTEDIT_EXECUTABLE_URL, signal);
+      if (proof === undefined || !sameApplicationProcess(proof.identity, options.taskOwnedWindow.sourceApplicationIdentity)) {
+        throw new WindowContractError(options.staleCode, "captured TextEdit peer no longer proves the Run-created process");
+      }
+      assertTransitionCurrent();
+    } else if (runOwnedForegroundPeerRefocus !== undefined) {
+      const proof = await queryDocumentIdentity(current.driver, current.label, target, capture.binding.bounds, TEXTEDIT_EXECUTABLE_URL, signal);
+      if (proof === undefined || !sameApplicationProcess(proof.identity, runOwnedForegroundPeerRefocus.sourceApplicationIdentity)) {
+        throw new WindowContractError(options.staleCode, "fresh refocused window identity no longer proves the Run-created TextEdit process and foreground");
+      }
+      assertTransitionCurrent();
+    }
+
     // Activation may change foreground focus, but sends no application content
     // input. Commit only after a fresh exact capture, with the new viewport and
     // no references from the old UI.
@@ -3629,6 +4215,27 @@ export class CuaDriverComputer implements Computer {
       current.surfaceRegistry = pushed.state;
       targetSurfaceRef = pushed.value;
       noteSurfaceTransition(current, "child_push");
+    } else if (options.taskWindowTransitionPermit !== undefined) {
+      if (targetSurfaceRef === undefined) throw new WindowContractError(options.staleCode, "selected task peer has no current transition Surface");
+      const activated = activatePeer(current.surfaceRegistry, targetSurfaceRef, {
+        nativeWindow: asNativeWindowIdentity(capture.binding.target), identityVerified: true, captureVerified: true,
+      });
+      if (activated.decision !== "applied") throw new WindowContractError(options.staleCode, activated.reason);
+      current.surfaceRegistry = activated.state;
+      targetSurfaceRef = activated.value;
+    } else if (options.allowCurrentTargetRestore === true) {
+      const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef!);
+      if (advanced.decision !== "applied") throw new WindowContractError(options.staleCode, advanced.reason);
+      current.surfaceRegistry = advanced.state;
+      targetSurfaceRef = advanced.value;
+      noteSurfaceTransition(current, "generation_advanced");
+    } else if (runOwnedForegroundPeerRefocus !== undefined) {
+      if (targetSurfaceRef === undefined) throw new WindowContractError(options.staleCode, "authorized current Surface disappeared before refocus commit");
+      const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef);
+      if (advanced.decision !== "applied") throw new WindowContractError(options.staleCode, advanced.reason);
+      current.surfaceRegistry = advanced.state;
+      targetSurfaceRef = advanced.value;
+      noteSurfaceTransition(current, "generation_advanced");
     } else {
       if (targetSurfaceRef === undefined) throw new WindowContractError(options.staleCode, "selected Surface could not be registered");
       const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef);
@@ -3660,6 +4267,12 @@ export class CuaDriverComputer implements Computer {
     };
     current.windowRefs.clear();
     this.clearTargetObservationState(current, activeRefBefore, targetSurfaceRef);
+    if (options.taskOwnedWindow !== undefined) options.taskOwnedWindow.surfaceRef = targetSurfaceRef;
+    if (options.taskWindowTransitionPermit !== undefined) {
+      options.taskWindowTransitionPermit.candidate.surfaceRef = targetSurfaceRef;
+      delete current.missingParent;
+      delete current.taskWindowTransition;
+    }
     return current.descriptor;
   }
 
@@ -3684,6 +4297,8 @@ export class CuaDriverComputer implements Computer {
     current.newlySurfacedWindowKeys = new Set();
     current.newHandoffCandidates = [];
     current.foregroundMismatchWindowId = undefined;
+    current.managedBrowserRestoreEligible = false;
+    current.managedBrowserRestoreCandidates.clear();
     current.proactiveHandoffCandidatesReady = false;
   }
 
@@ -3701,6 +4316,394 @@ export class CuaDriverComputer implements Computer {
     this.clearTargetObservationState(current, currentSurfaceRef(current.surfaceRegistry, record.surfaceId) ?? surface);
   }
 
+  private rootSurfaceRefFor(current: PrivateSession, surfaceRef: SurfaceRef): SurfaceRef | undefined {
+    if (!isCurrentSurfaceRef(current.surfaceRegistry, surfaceRef)) return undefined;
+    let surface = current.surfaceRegistry.surfaces.get(surfaceRef.surfaceId);
+    if (surface === undefined) return undefined;
+    while (surface.parentSurfaceId !== undefined) {
+      const parent = current.surfaceRegistry.surfaces.get(surface.parentSurfaceId);
+      if (parent === undefined) return undefined;
+      surface = parent;
+    }
+    return currentSurfaceRef(current.surfaceRegistry, surface.surfaceId);
+  }
+
+  private recordRunOwnedTextEditOpenIntent(
+    current: PrivateSession,
+    baseline: NonNullable<PrivateSession["preActionWindowBaseline"]>,
+  ): void {
+    const sourceIdentity = baseline.sourceApplicationIdentity;
+    const sourceTarget = baseline.parentBinding.target;
+    const sourceSurface = current.surfaceRegistry.surfaces.get(baseline.parentSurfaceRef.surfaceId);
+    const sourceIsAuthorized = targetAllowedByHostScope(sourceTarget, this.options.windowSwitchAllowedTargets) ||
+      current.runOwnedTextEditWindows.has(windowIdentityKey(sourceTarget));
+    if (current.platform !== "darwin" || this.options.windowSwitch !== "opened-windows-v1" ||
+        !baseline.openTextEditDocumentShortcut || baseline.closeShortcut || !baseline.complete || baseline.truncated ||
+        sourceIdentity === undefined || baseline.parentSurfaceRef.parentSurfaceId !== undefined ||
+        sourceSurface?.kind !== "native_window" || sourceSurface.parentSurfaceId !== undefined ||
+        windowIdentityKey(asCuaWindowTarget(sourceSurface.nativeWindow)) !== windowIdentityKey(sourceTarget) ||
+        !sourceIsAuthorized || !baseline.targetKeys.has(windowIdentityKey(sourceTarget))) {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+    current.runOwnedTextEditOpenIntent = {
+      sourceActionId: baseline.actionId,
+      sourceTarget: { ...sourceTarget },
+      sourceParentSurfaceRef: { ...baseline.parentSurfaceRef },
+      sourceApplicationIdentity: sourceIdentity,
+      baselineTargetKeys: new Set(baseline.targetKeys),
+    };
+  }
+
+  private async recordRunOwnedTextEditOpenedWindow(
+    current: PrivateSession,
+    baseline: NonNullable<PrivateSession["preActionWindowBaseline"]>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const intent = current.runOwnedTextEditOpenIntent;
+    if (intent === undefined || baseline.actionId === intent.sourceActionId) return;
+    const sourceTarget = intent.sourceTarget;
+    const actionRoot = this.rootSurfaceRefFor(current, baseline.parentSurfaceRef);
+    const sourceSurface = current.surfaceRegistry.surfaces.get(intent.sourceParentSurfaceRef.surfaceId);
+    const currentSourceRef = currentSurfaceRef(current.surfaceRegistry, intent.sourceParentSurfaceRef.surfaceId);
+    const admittedOpenSheet = intent.admittedOpenSheetRef === undefined
+      ? undefined
+      : current.surfaceRegistry.surfaces.get(intent.admittedOpenSheetRef.surfaceId);
+    let lineage = current.surfaceRegistry.surfaces.get(baseline.parentSurfaceRef.surfaceId);
+    let isDescendantOfAdmittedOpenSheet = false;
+    while (lineage !== undefined) {
+      if (intent.admittedOpenSheetRef !== undefined && lineage.surfaceId === intent.admittedOpenSheetRef.surfaceId) {
+        isDescendantOfAdmittedOpenSheet = sameSurfaceRef(
+          currentSurfaceRef(current.surfaceRegistry, lineage.surfaceId), intent.admittedOpenSheetRef,
+        );
+        break;
+      }
+      lineage = lineage.parentSurfaceId === undefined ? undefined : current.surfaceRegistry.surfaces.get(lineage.parentSurfaceId);
+    }
+    const isSameRunTask = baseline.parentBinding.target.pid === sourceTarget.pid &&
+      actionRoot !== undefined && actionRoot.surfaceId === intent.sourceParentSurfaceRef.surfaceId &&
+      currentSourceRef !== undefined && sourceSurface?.kind === "native_window" &&
+      sourceSurface.parentSurfaceId === undefined && sourceSurface.status === "inactive" &&
+      intent.sourceParentAfterOpenSheetRef !== undefined &&
+      sameSurfaceRef(currentSourceRef, intent.sourceParentAfterOpenSheetRef) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, currentSourceRef) &&
+      sameSurfaceRef(baseline.parentSurfaceRef, current.surfaceRegistry.activeSurface) &&
+      isCurrentSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef) &&
+      isExecutableSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef);
+    const hasModalOpenEvidence = isSameRunTask && intent.admittedOpenSheetRef !== undefined &&
+      admittedOpenSheet?.kind === "native_window" &&
+      admittedOpenSheet.admissionSource === "macos_attached_sheet_proof" &&
+      admittedOpenSheet.parentSurfaceId === intent.sourceParentSurfaceRef.surfaceId &&
+      isDescendantOfAdmittedOpenSheet &&
+      sameSurfaceRef(currentSurfaceRef(current.surfaceRegistry, intent.admittedOpenSheetRef.surfaceId), intent.admittedOpenSheetRef);
+    if (!isSameRunTask || !baseline.complete || baseline.truncated || !hasModalOpenEvidence || baseline.closeShortcut) {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+
+    const inventory = await listWindowInventory(
+      current.driver, current.label, signal, sourceTarget.pid, false, this.options.windowRelationshipProbe, "darwin",
+    );
+    signal.throwIfAborted();
+    if (!inventory.complete || inventory.truncated === true) {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+    const sourceRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(sourceTarget));
+    const sourceRow = sourceRows.length === 1 ? sourceRows[0] : undefined;
+    const openPanelStillPresent = inventory.windows.some((window) =>
+      window.target.pid === sourceTarget.pid && window.ownerPid === sourceTarget.pid &&
+      window.ownerWindowId === sourceTarget.windowId && window.isOnScreen === true && window.minimized !== true);
+    const excludedKeys = new Set([...intent.baselineTargetKeys, ...baseline.targetKeys]);
+    const created = inventory.windows.filter((window) =>
+      window.target.pid === sourceTarget.pid && !excludedKeys.has(windowIdentityKey(window.target)) &&
+      window.ownerWindowId === undefined && window.isOnScreen === true && window.minimized !== true);
+    if (sourceRow === undefined || sourceRow.isOnScreen !== true || sourceRow.minimized === true) {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+    if (created.length === 0 && openPanelStillPresent) return;
+    if (created.length !== 1 || inventory.foregroundPid !== created[0]!.target.pid ||
+        inventory.foregroundWindowId !== created[0]!.target.windowId) {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+
+    const candidate = created[0]!;
+    const candidateProof = await queryDocumentIdentity(
+      current.driver, current.label, candidate.target, candidate.bounds, TEXTEDIT_EXECUTABLE_URL, signal,
+    );
+    signal.throwIfAborted();
+    if (candidateProof === undefined || !sameApplicationProcess(candidateProof.identity, intent.sourceApplicationIdentity)) {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+    const registered = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(candidate.target));
+    if (registered.decision !== "applied") {
+      delete current.runOwnedTextEditOpenIntent;
+      return;
+    }
+    current.surfaceRegistry = registered.state;
+    current.windowBindings.set(windowIdentityKey(candidate.target), { target: candidate.target, bounds: candidate.bounds });
+    current.runOwnedTextEditWindows.set(windowIdentityKey(candidate.target), {
+      target: { ...candidate.target },
+      sourceActionId: baseline.actionId,
+      sourceOpenActionId: intent.sourceActionId,
+      sourceParentSurfaceRef: { ...intent.sourceParentSurfaceRef },
+      sourceApplicationIdentity: candidateProof.identity,
+      surfaceRef: registered.value,
+    });
+    current.firstObservedAfterActionWindows = {
+      actionId: baseline.actionId,
+      targetKeys: new Set([windowIdentityKey(candidate.target)]),
+    };
+    delete current.runOwnedTextEditOpenIntent;
+  }
+
+  private async recordRunOwnedTextEditWindow(
+    current: PrivateSession,
+    baseline: NonNullable<PrivateSession["preActionWindowBaseline"]>,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const sourceIdentity = baseline.sourceApplicationIdentity;
+    if (current.platform !== "darwin" || this.options.windowSwitch !== "opened-windows-v1" ||
+        baseline.closeShortcut || !baseline.complete || baseline.truncated || sourceIdentity === undefined ||
+        baseline.parentSurfaceRef.parentSurfaceId !== undefined) return false;
+    const parentTarget = baseline.parentBinding.target;
+    const inventory = await listWindowInventory(
+      current.driver, current.label, signal, parentTarget.pid, false, this.options.windowRelationshipProbe, "darwin",
+    );
+    if (!inventory.complete || inventory.truncated === true) return false;
+    const parentRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(parentTarget));
+    const created = inventory.windows.filter((window) =>
+      window.target.pid === parentTarget.pid && windowIdentityKey(window.target) !== windowIdentityKey(parentTarget) &&
+      !baseline.targetKeys.has(windowIdentityKey(window.target)) && window.isOnScreen === true && window.minimized !== true);
+    if (parentRows.length !== 1 || parentRows[0]!.isOnScreen !== true || parentRows[0]!.minimized === true ||
+        created.length !== 1 || inventory.foregroundPid !== created[0]!.target.pid ||
+        inventory.foregroundWindowId !== created[0]!.target.windowId ||
+        !sameWindowGeometry(parentRows[0]!.bounds, baseline.parentBinding.bounds)) return false;
+    const candidate = created[0]!;
+    const identity = await queryDocumentIdentity(
+      current.driver, current.label, candidate.target, candidate.bounds, TEXTEDIT_EXECUTABLE_URL, signal,
+    );
+    if (identity === undefined || !sameApplicationProcess(identity.identity, sourceIdentity)) return false;
+    const registered = registerNativePeer(current.surfaceRegistry, asNativeWindowIdentity(candidate.target));
+    if (registered.decision !== "applied") return false;
+    current.surfaceRegistry = registered.state;
+    current.windowBindings.set(windowIdentityKey(candidate.target), { target: candidate.target, bounds: candidate.bounds });
+    current.runOwnedTextEditWindows.set(windowIdentityKey(candidate.target), {
+      target: { ...candidate.target },
+      sourceActionId: baseline.actionId,
+      sourceParentSurfaceRef: { ...baseline.parentSurfaceRef },
+      sourceApplicationIdentity: sourceIdentity,
+      surfaceRef: registered.value,
+    });
+    current.firstObservedAfterActionWindows = {
+      actionId: baseline.actionId,
+      targetKeys: new Set([windowIdentityKey(candidate.target)]),
+    };
+    return true;
+  }
+
+  private async verifyRunOwnedTextEditWindow(
+    current: PrivateSession,
+    candidate: RunOwnedTextEditWindowProof,
+    signal: AbortSignal,
+    suppliedInventory?: CuaWindowInventory,
+  ): Promise<CuaWindowInfo | undefined> {
+    if (current.runOwnedTextEditWindows.get(windowIdentityKey(candidate.target)) !== candidate ||
+        current.platform !== "darwin" || this.options.windowSwitch !== "opened-windows-v1" ||
+        candidate.sourceParentSurfaceRef.parentSurfaceId !== undefined) return undefined;
+    const peerRef = currentSurfaceRef(current.surfaceRegistry, candidate.surfaceRef.surfaceId);
+    const peerNative = peerRef === undefined ? undefined : resolveNativeWindow(current.surfaceRegistry, peerRef);
+    const originSurface = current.surfaceRegistry.surfaces.get(candidate.sourceParentSurfaceRef.surfaceId);
+    if (peerRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, peerRef) ||
+        peerNative === undefined || windowIdentityKey(asCuaWindowTarget(peerNative)) !== windowIdentityKey(candidate.target) ||
+        originSurface?.kind !== "native_window" || originSurface.parentSurfaceId !== undefined ||
+        originSurface.status === "unknown" || originSurface.status === "closed") {
+      return undefined;
+    }
+    const inventory = suppliedInventory ?? await listWindowInventory(
+      current.driver, current.label, signal, candidate.target.pid, false, this.options.windowRelationshipProbe, "darwin",
+    );
+    signal.throwIfAborted();
+    if (!inventory.complete || inventory.truncated === true) return undefined;
+    const rows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target));
+    if (rows.length !== 1 || rows[0]!.isOnScreen !== true || rows[0]!.minimized === true ||
+        this.options.windowDeliveryMode === "foreground" && rows[0]!.noActivate === true) return undefined;
+    const proof = await queryDocumentIdentity(
+      current.driver, current.label, candidate.target, rows[0]!.bounds, TEXTEDIT_EXECUTABLE_URL, signal,
+    );
+    signal.throwIfAborted();
+    if (proof === undefined || !sameApplicationProcess(proof.identity, candidate.sourceApplicationIdentity)) return undefined;
+    candidate.surfaceRef = peerRef;
+    return rows[0];
+  }
+
+  private async beginTaskWindowTransitionAfterClose(
+    current: PrivateSession,
+    baseline: NonNullable<PrivateSession["preActionWindowBaseline"]>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (current.platform !== "darwin" || this.options.windowSwitch !== "opened-windows-v1" ||
+        this.options.windowDeliveryMode !== "foreground" || !baseline.complete || baseline.truncated ||
+        baseline.parentSurfaceRef.parentSurfaceId !== undefined || current.missingParent !== undefined) return;
+    const sourceTarget = baseline.parentBinding.target;
+    const candidates = [...current.runOwnedTextEditWindows.values()].filter((candidate) =>
+      windowIdentityKey(candidate.target) !== windowIdentityKey(sourceTarget) &&
+      resolveNativeWindow(current.surfaceRegistry, candidate.surfaceRef) !== undefined &&
+      windowIdentityKey(asCuaWindowTarget(resolveNativeWindow(current.surfaceRegistry, candidate.surfaceRef)!)) === windowIdentityKey(candidate.target) &&
+      candidate.sourceParentSurfaceRef.surfaceId === baseline.parentSurfaceRef.surfaceId);
+    if (candidates.length !== 1) return;
+    const candidate = candidates[0]!;
+    const inventory = await listWindowInventory(
+      current.driver, current.label, signal, sourceTarget.pid, false, this.options.windowRelationshipProbe, "darwin",
+    );
+    if (!inventory.complete || inventory.truncated === true ||
+        inventory.windows.some((window) => windowIdentityKey(window.target) === windowIdentityKey(sourceTarget))) return;
+    const rows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(candidate.target));
+    if (rows.length !== 1 || rows[0]!.isOnScreen !== true || rows[0]!.minimized === true ||
+        inventory.foregroundPid !== candidate.target.pid || inventory.foregroundWindowId !== candidate.target.windowId) return;
+    const identity = await queryDocumentIdentity(
+      current.driver, current.label, candidate.target, rows[0]!.bounds, TEXTEDIT_EXECUTABLE_URL, signal,
+    );
+    if (identity === undefined || !sameApplicationProcess(identity.identity, candidate.sourceApplicationIdentity)) return;
+    const sourceRef = currentSurfaceRef(current.surfaceRegistry, baseline.parentSurfaceRef.surfaceId);
+    const peerRef = currentSurfaceRef(current.surfaceRegistry, candidate.surfaceRef.surfaceId);
+    if (sourceRef === undefined || peerRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, sourceRef) ||
+        !isCurrentSurfaceRef(current.surfaceRegistry, peerRef) || isExecutableSurfaceRef(current.surfaceRegistry, peerRef)) return;
+    candidate.surfaceRef = peerRef;
+    current.missingParent = {
+      sourceActionId: baseline.actionId, reason: "bound_window_missing", candidates: new Map(), epoch: 0, confirming: false,
+    };
+    current.taskWindowTransition = {
+      closeSourceActionId: baseline.actionId,
+      closeSourceSurfaceRef: sourceRef,
+      target: { ...candidate.target },
+      candidate,
+    };
+    this.clearTargetObservationState(current, sourceRef);
+  }
+
+  private async verifyTaskWindowTransition(
+    current: PrivateSession,
+    signal: AbortSignal,
+  ): Promise<{ readonly inventory: CuaWindowInventory; readonly target: CuaWindowInfo; readonly identity: VerifiedApplicationIdentity }> {
+    const boundary = current.missingParent;
+    const transition = current.taskWindowTransition;
+    if (boundary === undefined || transition === undefined || boundary.sourceActionId !== transition.closeSourceActionId ||
+        current.runOwnedTextEditWindows.get(windowIdentityKey(transition.target)) !== transition.candidate ||
+        !isCurrentSurfaceRef(current.surfaceRegistry, transition.closeSourceSurfaceRef) ||
+        !isExecutableSurfaceRef(current.surfaceRegistry, transition.closeSourceSurfaceRef)) {
+      throw new WindowContractError("WINDOW_SWITCH_STALE", "completed-close task-window transition boundary changed");
+    }
+    const inventory = await listWindowInventory(
+      current.driver, current.label, signal, transition.target.pid, false, this.options.windowRelationshipProbe, "darwin",
+    );
+    signal.throwIfAborted();
+    const sourceNative = resolveNativeWindow(current.surfaceRegistry, transition.closeSourceSurfaceRef);
+    const sourceTarget = sourceNative === undefined ? undefined : asCuaWindowTarget(sourceNative);
+    const sourceRows = sourceTarget === undefined ? [] : inventory.windows.filter((window) =>
+      windowIdentityKey(window.target) === windowIdentityKey(sourceTarget));
+    const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(transition.target));
+    if (!inventory.complete || inventory.truncated === true || sourceRows.length !== 0 || matches.length !== 1 ||
+        matches[0]!.isOnScreen !== true || matches[0]!.minimized === true ||
+        inventory.foregroundPid !== transition.target.pid || inventory.foregroundWindowId !== transition.target.windowId) {
+      throw new WindowContractError("WINDOW_SWITCH_STALE", "fresh process-scoped inventory no longer proves the completed close and exact visible task peer");
+    }
+    const fresh = matches[0]!;
+    const proof = await queryDocumentIdentity(
+      current.driver, current.label, transition.target, fresh.bounds, TEXTEDIT_EXECUTABLE_URL, signal,
+    );
+    signal.throwIfAborted();
+    if (proof === undefined || !sameApplicationProcess(proof.identity, transition.candidate.sourceApplicationIdentity)) {
+      throw new WindowContractError("WINDOW_SWITCH_STALE", "fresh foreground identity no longer matches the Run-created TextEdit process");
+    }
+    return { inventory, target: fresh, identity: proof.identity };
+  }
+
+  private async observeTaskWindowTransition(
+    current: PrivateSession,
+    session: ComputerSessionDescriptor,
+    observationId: ObservationId,
+    signal: AbortSignal,
+  ): Promise<ObservationCapture> {
+    const transition = current.taskWindowTransition!;
+    const boundary = current.missingParent;
+    const closeSourceActionId = transition.closeSourceActionId;
+    const closeSourceSurfaceRef = { ...transition.closeSourceSurfaceRef };
+    const candidateSurfaceRef = { ...transition.candidate.surfaceRef };
+    const savedWindowRef = current.windowRefs.size === 1
+      ? [...current.windowRefs.entries()][0]
+      : undefined;
+    // A window ref survives this evidence refresh only if the exact transition
+    // boundary and peer generation are re-proven below. Any failed/aborted
+    // capture leaves the old inventory unusable.
+    current.windowRefs.clear();
+    const { target, identity } = await this.verifyTaskWindowTransition(current, signal);
+    const capture = await captureWindowWithRetry(
+      current.driver, current.label, transition.target, signal, this.windowCaptureRetryOptions, "darwin",
+    );
+    signal.throwIfAborted();
+    const afterCapture = await queryDocumentIdentity(
+      current.driver, current.label, transition.target, capture.binding.bounds, TEXTEDIT_EXECUTABLE_URL, signal,
+    );
+    if (afterCapture === undefined || !sameApplicationProcess(afterCapture.identity, identity) ||
+        !sameWindowGeometry(capture.binding.bounds, target.bounds)) {
+      throw new WindowContractError("WINDOW_SWITCH_STALE", "transition-only capture lost its exact foreground TextEdit identity");
+    }
+    const afterCaptureVerification = await this.verifyTaskWindowTransition(current, signal);
+    const currentPeerRef = currentSurfaceRef(current.surfaceRegistry, transition.candidate.surfaceRef.surfaceId);
+    if (current.taskWindowTransition !== transition || current.missingParent !== boundary ||
+        boundary === undefined || boundary.sourceActionId !== closeSourceActionId ||
+        transition.closeSourceActionId !== closeSourceActionId ||
+        !sameSurfaceRef(transition.closeSourceSurfaceRef, closeSourceSurfaceRef) ||
+        !sameSurfaceRef(transition.candidate.surfaceRef, candidateSurfaceRef) ||
+        currentPeerRef === undefined || !sameSurfaceRef(candidateSurfaceRef, currentPeerRef) ||
+        windowIdentityKey(afterCaptureVerification.target.target) !== windowIdentityKey(target.target) ||
+        !sameApplicationProcess(afterCaptureVerification.identity, identity) ||
+        !sameWindowGeometry(capture.binding.bounds, afterCaptureVerification.target.bounds)) {
+      throw new WindowContractError("WINDOW_SWITCH_STALE", "transition boundary or exact peer changed during fresh approval capture");
+    }
+    let peerRef = currentSurfaceRef(current.surfaceRegistry, transition.candidate.surfaceRef.surfaceId);
+    if (peerRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, peerRef) ||
+        isExecutableSurfaceRef(current.surfaceRegistry, peerRef)) {
+      throw new WindowContractError("WINDOW_SWITCH_STALE", "transition-only peer Surface changed before capture");
+    }
+    const needsSurfaceTransition = transition.observationSurfaceRef === undefined;
+    if (needsSurfaceTransition) {
+      const advanced = advanceSurfaceGeneration(current.surfaceRegistry, peerRef);
+      if (advanced.decision !== "applied") throw new WindowContractError("WINDOW_SWITCH_STALE", "transition-only peer Surface generation could not advance");
+      current.surfaceRegistry = advanced.state;
+      peerRef = advanced.value;
+    }
+    transition.candidate.surfaceRef = peerRef;
+    transition.observationSurfaceRef = peerRef;
+    current.windowBindings.set(windowIdentityKey(capture.binding.target), capture.binding);
+    this.observations.set(String(observationId), {
+      sessionId: String(session.id),
+      captureSource: capture.source,
+      surfaceRef: peerRef,
+      viewport: capture.viewport,
+      ...(capture.cuaBounds === undefined ? {} : { cuaBounds: capture.cuaBounds }),
+      geometry: capture.binding.bounds,
+    });
+    if (!needsSurfaceTransition && savedWindowRef !== undefined &&
+        sameSurfaceRef(savedWindowRef[1], candidateSurfaceRef) && sameSurfaceRef(candidateSurfaceRef, peerRef) &&
+        isCurrentSurfaceRef(current.surfaceRegistry, peerRef) && current.windowRefs.size === 0 &&
+        current.taskWindowTransition === transition && current.missingParent === boundary) {
+      current.windowRefs.set(savedWindowRef[0], peerRef);
+    }
+    this.latestObservationId = observationId;
+    return {
+      capturedAt: new Date().toISOString(),
+      viewport: capture.viewport,
+      surfaceRef: peerRef,
+      ...(needsSurfaceTransition ? { surfaceTransitionReason: "peer_switch" as const } : {}),
+      screenshot: { mediaType: "image/png", data: capture.data },
+    };
+  }
+
   private canUseManualWindowHandoff(current: PrivateSession): boolean {
     const binding = activeWindowBinding(current);
     const surface = activeSurface(current);
@@ -3712,6 +4715,18 @@ export class CuaDriverComputer implements Computer {
     return this.options.browserTarget === undefined || this.options.windowSwitch === "opened-windows-v1";
   }
 
+  /** A current-root refocus is a narrow exception to the ordinary peer scope.
+   * Explicit scopes remain authoritative. When no explicit scope was supplied,
+   * only the exact Host-selected initial target can use this path. */
+  private isAuthorizedBoundRootRefocusTarget(
+    target: CuaWindowTarget,
+    explicitScope: readonly CuaWindowTarget[] | undefined,
+  ): boolean {
+    if (explicitScope !== undefined) return targetAllowedByHostScope(target, explicitScope);
+    const hostSelectedTarget = this.options.windowTarget;
+    return hostSelectedTarget !== undefined && windowIdentityKey(hostSelectedTarget) === windowIdentityKey(target);
+  }
+
   private async executeWindowSwitch(
     current: PrivateSession,
     action: SwitchWindowAction,
@@ -3720,7 +4735,8 @@ export class CuaDriverComputer implements Computer {
     if (this.options.windowSwitch !== "opened-windows-v1") {
       return refused(action.actionId, "WINDOW_SWITCH_DISABLED", "cross-window switching is not enabled for this Run");
     }
-    if (activeSurfaceUnavailable(current)) {
+    const taskTransition = current.taskWindowTransition;
+    if (activeSurfaceUnavailable(current) && taskTransition === undefined) {
       return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session");
     }
     const selectedRef = current.windowRefs.get(action.windowRef);
@@ -3730,6 +4746,30 @@ export class CuaDriverComputer implements Computer {
       return refused(action.actionId, "WINDOW_REF_STALE", "windowRef was not issued by the current window inventory; list windows again");
     }
     const selectedTarget = asCuaWindowTarget(selectedSurface.nativeWindow);
+    const selectedKey = windowIdentityKey(selectedTarget);
+    const taskOwnedWindow = current.runOwnedTextEditWindows.get(selectedKey);
+    const activeRef = current.surfaceRegistry.activeSurface;
+    const activeRoot = activeSurface(current);
+    const allowRunOwnedPeerRefocus = taskTransition === undefined && taskOwnedWindow === undefined &&
+      this.options.windowDeliveryMode === "foreground" && current.platform === "darwin" &&
+      this.options.browserTarget === undefined && this.options.hybridNativeWebDocumentCapability === undefined &&
+      activeRoot?.kind === "native_window" && activeRoot.parentSurfaceId === undefined &&
+      activeRef !== undefined && sameSurfaceRef(selectedRef, activeRef) &&
+      this.isAuthorizedBoundRootRefocusTarget(selectedTarget, this.options.windowSwitchAllowedTargets);
+    if (taskTransition !== undefined && (current.missingParent === undefined ||
+        taskTransition.candidate !== taskOwnedWindow ||
+        windowIdentityKey(taskTransition.target) !== selectedKey ||
+        !sameSurfaceRef(selectedRef, taskTransition.candidate.surfaceRef) ||
+        taskTransition.observationSurfaceRef === undefined ||
+        !isCurrentSurfaceRef(current.surfaceRegistry, taskTransition.observationSurfaceRef) ||
+        this.latestObservationId === undefined ||
+        !sameSurfaceRef(this.observations.get(String(this.latestObservationId))?.surfaceRef, taskTransition.observationSurfaceRef))) {
+      return refused(action.actionId, "WINDOW_SWITCH_STALE", "completed-close switch must use the fresh listed Run-owned task peer");
+    }
+    if (taskTransition === undefined && taskOwnedWindow !== undefined &&
+        !sameSurfaceRef(selectedRef, taskOwnedWindow.surfaceRef)) {
+      return refused(action.actionId, "WINDOW_REF_STALE", "Run-created TextEdit peer changed; list windows again");
+    }
     // A switch consumes the entire prior inventory. A subsequent choice must
     // come from a fresh list, even if the selected target proves stale.
     current.windowRefs.clear();
@@ -3741,6 +4781,10 @@ export class CuaDriverComputer implements Computer {
         onScreenOnly: false,
         staleCode: "WINDOW_SWITCH_STALE",
         selectedSurfaceRef: selectedRef,
+        ...(allowRunOwnedPeerRefocus ? { allowRunOwnedPeerRefocus: true } : {}),
+        ...(taskTransition === undefined
+          ? taskOwnedWindow === undefined ? {} : { taskOwnedWindow }
+          : { taskWindowTransitionPermit: taskTransition }),
         ...(this.options.windowSwitchAllowedTargets === undefined
           ? {}
           : { authorizedTargets: this.hasHybridCapability()
@@ -3789,7 +4833,7 @@ export class CuaDriverComputer implements Computer {
       return refused(action.actionId, "WINDOW_REF_STALE", "windowRef no longer identifies a current listed window; list windows again");
     }
     signal.throwIfAborted();
-    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe);
+    const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false, this.options.windowRelationshipProbe, current.platform);
     signal.throwIfAborted();
     const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
     if (matches.length !== 1) {
@@ -3857,7 +4901,8 @@ export class CuaDriverComputer implements Computer {
     const hybrid = this.options.hybridNativeWebDocumentCapability;
     if (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.recoveryTarget)) return false;
     return targetAllowedByHostScope(target, this.options.windowSwitchAllowedTargets) ||
-      (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.managedBrowserTarget.windowTarget));
+      (hybrid !== undefined && windowIdentityKey(target) === windowIdentityKey(hybrid.managedBrowserTarget.windowTarget)) ||
+      this.session?.runOwnedTextEditWindows.has(windowIdentityKey(target)) === true;
   }
 
   private async executeReopenSavedDocument(
@@ -4018,12 +5063,17 @@ export class CuaDriverComputer implements Computer {
   ): Promise<ActionReceipt> {
     const current = this.requireSession(session);
     current.firstObservedAfterActionWindows = undefined;
-    if (current.missingParent !== undefined) return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "missing bound window awaits explicit handoff; no input was sent");
+    const taskWindowTransitionPending = current.missingParent !== undefined && current.taskWindowTransition !== undefined;
+    if (current.missingParent !== undefined && (!taskWindowTransitionPending || action.kind !== "switch_window")) {
+      return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "missing bound window awaits a fresh explicit switch to its Run-owned task peer; no input was sent");
+    }
     current.foregroundMismatchWindowId = undefined;
+    current.managedBrowserRestoreEligible = false;
+    current.managedBrowserRestoreCandidates.clear();
     current.preActionWindowBaseline = undefined;
     current.proactiveHandoffCandidatesReady = false;
     signal.throwIfAborted();
-    if (activeSurfaceUnavailable(current)) {
+    if (activeSurfaceUnavailable(current) && !taskWindowTransitionPending) {
       return refused(action.actionId, "WINDOW_TARGET_INVALIDATED", "window target identity was invalidated; close and open a new session");
     }
     let decisionObservation: PrivateObservation | undefined;
@@ -4044,12 +5094,22 @@ export class CuaDriverComputer implements Computer {
         }
       }
       const activeRef = current.surfaceRegistry.activeSurface;
+      const taskTransitionObservation = action.kind === "switch_window" && taskWindowTransitionPending &&
+        current.taskWindowTransition?.observationSurfaceRef !== undefined &&
+        sameSurfaceRef(decisionObservation.surfaceRef, current.taskWindowTransition.observationSurfaceRef) &&
+        isCurrentSurfaceRef(current.surfaceRegistry, decisionObservation.surfaceRef) &&
+        current.runOwnedTextEditWindows.get(windowIdentityKey(current.taskWindowTransition.target)) === current.taskWindowTransition.candidate;
       if (activeRef === undefined || decisionObservation.surfaceRef.surfaceId !== activeRef.surfaceId ||
           decisionObservation.surfaceRef.generation !== activeRef.generation ||
           decisionObservation.surfaceRef.parentSurfaceId !== activeRef.parentSurfaceId ||
           decisionObservation.surfaceRef.admissionSource !== activeRef.admissionSource ||
           !isExecutableSurfaceRef(current.surfaceRegistry, decisionObservation.surfaceRef)) {
+        if (taskTransitionObservation) {
+          // The one transition-only observation is an exact fresh frame of the
+          // Run-owned live peer. It authorizes only a model-selected switch.
+        } else {
         return refused(action.actionId, "SURFACE_REF_STALE", "action Observation is not bound to the current active Surface generation");
+        }
       }
     }
     const shortcutPlatform = current.platform;
@@ -4282,6 +5342,14 @@ export class CuaDriverComputer implements Computer {
     }
     const privateGrounding = action.groundingRef === undefined ? undefined : this.groundings.get(String(action.basedOn));
     const resolvedGrounding = action.groundingRef === undefined ? undefined : privateGrounding?.elements.get(action.groundingRef);
+    // Browser identity also protects native UIA clicks when DOM grounding is
+    // disabled; it does not grant access to DOM dispatch or focus validation.
+    const managedBrowserTarget = privateGrounding?.browserTarget ?? current.browserTarget;
+    if (action.kind === "click" && managedBrowserTarget !== undefined && resolvedGrounding?.geometry !== undefined
+      && decisionObservation !== undefined
+      && isCollapsedBrowserContentUia(resolvedGrounding.element, decisionObservation.viewport, resolvedGrounding.geometry)) {
+      return refused(action.actionId, "GROUNDING_ELEMENT_NOT_ACTIONABLE", "managed-browser UIA content bounds have no reliable clickable interior; scroll into view and observe again; no input was sent");
+    }
     const domTransport = this.options.domGroundingTransport;
     // Managed-browser identity is retained for target reconciliation, but it
     // enables DOM-specific dispatch/focus gates only when this Run has an
@@ -4492,27 +5560,62 @@ export class CuaDriverComputer implements Computer {
       throw error;
     }
     const currentWindowBinding = activeWindowBinding(current);
-    if (options?.detectNewWindowHandoff === true && currentWindowBinding !== undefined && this.options.windowDeliveryMode === "foreground") {
+    const commandChord = action.kind === "keypress" && action.keys.length === 2 &&
+      action.keys.some((key) => key.toUpperCase() === "CMD" || key.toUpperCase() === "META");
+    const createTextEditDocumentShortcut = current.platform === "darwin" &&
+      this.options.windowSwitch === "opened-windows-v1" && commandChord &&
+      action.kind === "keypress" && action.keys.some((key) => key.toUpperCase() === "N");
+    const openTextEditDocumentShortcut = current.platform === "darwin" &&
+      this.options.windowSwitch === "opened-windows-v1" && commandChord &&
+      action.kind === "keypress" && action.keys.some((key) => key.toUpperCase() === "O");
+    const closeShortcut = action.kind === "keypress" && action.keys.length === 2 &&
+      action.keys.some((key) => key.toUpperCase() === "W") && commandChord;
+    const pendingTextEditOpenIntent = current.runOwnedTextEditOpenIntent !== undefined && !closeShortcut;
+    if ((options?.detectNewWindowHandoff === true || createTextEditDocumentShortcut || openTextEditDocumentShortcut ||
+        pendingTextEditOpenIntent || closeShortcut) &&
+        currentWindowBinding !== undefined && this.options.windowDeliveryMode === "foreground") {
       const parentSurfaceRef = current.surfaceRegistry.activeSurface;
       if (parentSurfaceRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, parentSurfaceRef) ||
           !isExecutableSurfaceRef(current.surfaceRegistry, parentSurfaceRef)) {
         return refused(action.actionId, "SURFACE_REF_STALE", "pre-action window inventory has no current executable parent Surface; no input was sent");
       }
       try {
-        const visibleInventory = await listWindowInventory(current.driver, current.label, signal, undefined, true, this.options.windowRelationshipProbe);
+        const scopedPid = createTextEditDocumentShortcut || openTextEditDocumentShortcut || pendingTextEditOpenIntent || closeShortcut
+          ? currentWindowBinding.target.pid
+          : undefined;
+        const visibleInventory = await listWindowInventory(
+          current.driver, current.label, signal, scopedPid, false, this.options.windowRelationshipProbe, current.platform,
+        );
         signal.throwIfAborted();
         const visibleKeys = new Set(visibleInventory.windows.map((window) => windowIdentityKey(window.target)));
         if (!visibleKeys.has(windowIdentityKey(currentWindowBinding.target))) {
           return refused(action.actionId, "WINDOW_INVENTORY_UNKNOWN", "bound target was missing from visible-window inventory; no input was sent");
         }
+        let sourceApplicationIdentity: VerifiedApplicationIdentity | undefined;
+        if (createTextEditDocumentShortcut || openTextEditDocumentShortcut) {
+          try {
+            sourceApplicationIdentity = (await queryDocumentIdentity(
+              current.driver, current.label, currentWindowBinding.target, currentWindowBinding.bounds,
+              TEXTEDIT_EXECUTABLE_URL, signal,
+            ))?.identity;
+          } catch {
+            signal.throwIfAborted();
+          }
+        }
         current.preActionWindowBaseline = {
           actionId: action.actionId,
           sourceObservationId: action.basedOn,
-          closeShortcut: action.kind === "keypress" && action.keys.length === 2 &&
-            action.keys.some((key) => key.toUpperCase() === "W") &&
-            action.keys.some((key) => key.toUpperCase() === "CMD" || key.toUpperCase() === "META"),
+          closeShortcut,
+          createTextEditDocumentShortcut,
+          openTextEditDocumentShortcut,
+          ...(sourceApplicationIdentity === undefined ? {} : { sourceApplicationIdentity }),
           completed: false,
           targetKeys: visibleKeys,
+          windowRows: visibleInventory.windows.map((window) => ({
+            ...window,
+            bounds: { ...window.bounds },
+            target: { ...window.target },
+          })),
           complete: visibleInventory.complete,
           truncated: visibleInventory.truncated === true,
           parentSurfaceRef: { ...parentSurfaceRef },
@@ -4561,7 +5664,17 @@ export class CuaDriverComputer implements Computer {
       if (action.kind === "type" && browserTarget !== undefined) this.browserChromeInput = undefined;
       const result = await callTool(current.driver, request.name, request.arguments, signal);
       if (result.isError) {
-        const driverCode = windowRefusalCode(result.errorCode, result.text, resultProvesNoInput(result));
+        const incompleteTypeText = nativeIncompleteTypeTextReceipt(
+          action.actionId, request.name, result.errorCode, result.structuredJson,
+        );
+        if (incompleteTypeText !== undefined) {
+          this.invalidateObservationAfterAction(current);
+          return incompleteTypeText;
+        }
+        const driverCode = windowRefusalCode(
+          result.errorCode, result.text, resultProvesNoInput(result, request.name), request.name,
+          result.structuredJson, actionWindowBinding?.target,
+        );
         if (decisionObservation !== undefined && isTransientSurface(current, decisionObservation.surfaceRef) &&
             driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
             await this.restoreTransientParentAfterExplicitNoInput(current, decisionObservation.surfaceRef, signal)) {
@@ -4595,8 +5708,17 @@ export class CuaDriverComputer implements Computer {
         }
         if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
           current.foregroundMismatchWindowId = parseActualForegroundWindowId(result.text);
+          current.managedBrowserRestoreEligible = resultProvesNoInput(result, request.name);
         }
-        return refused(action.actionId, driverCode, result.text);
+        const refusalMessage = pointBlockedGuardRefusalMessage({
+          actionKind: action.kind,
+          toolName: request.name,
+          message: result.text,
+          ...(result.structuredJson === undefined ? {} : { structuredJson: result.structuredJson }),
+          ...(actionWindowBinding?.target === undefined ? {} : { bindingTarget: actionWindowBinding.target }),
+          requestedTarget: request.arguments.target,
+        });
+        return refused(action.actionId, driverCode, refusalMessage ?? result.text);
       }
       if (result.degraded) {
         return { actionId: action.actionId, status: "failed", driverCode: "CUA_DEGRADED", message: result.text };
@@ -4627,8 +5749,46 @@ export class CuaDriverComputer implements Computer {
       const diagnostic = currentWindowBinding !== undefined && ["click", "scroll", "drag"].includes(action.kind)
         ? `cua-window-pixels source=${decisionObservation?.captureSource ?? "unknown"} viewport=${decisionObservation?.viewport.width}x${decisionObservation?.viewport.height} bounds=${currentWindowBinding.bounds.width}x${currentWindowBinding.bounds.height} target=${currentWindowBinding.target.pid}/${currentWindowBinding.target.windowId} delivery=${this.options.windowDeliveryMode ?? "background"} point=${JSON.stringify(Object.fromEntries(Object.entries(request.arguments).filter(([key]) => ["x", "y", "from_x", "from_y", "to_x", "to_y"].includes(key))))}`
         : undefined;
-      if (current.preActionWindowBaseline?.actionId === action.actionId) current.preActionWindowBaseline.completed = true;
-      return { actionId: action.actionId, status: "completed", ...((result.text || diagnostic) ? { message: [result.text, diagnostic].filter(Boolean).join("; ") } : {}) };
+      const completedLifecycleBaseline = current.preActionWindowBaseline?.actionId === action.actionId
+        ? current.preActionWindowBaseline
+        : undefined;
+      let runCreatedTextEditPeer = false;
+      if (completedLifecycleBaseline !== undefined) {
+        completedLifecycleBaseline.completed = true;
+        if (completedLifecycleBaseline.createTextEditDocumentShortcut) {
+          try {
+            runCreatedTextEditPeer = await this.recordRunOwnedTextEditWindow(current, completedLifecycleBaseline, signal);
+          } catch {
+            signal.throwIfAborted();
+          }
+        }
+        if (completedLifecycleBaseline.openTextEditDocumentShortcut) {
+          this.recordRunOwnedTextEditOpenIntent(current, completedLifecycleBaseline);
+        } else if (current.runOwnedTextEditOpenIntent !== undefined) {
+          if (completedLifecycleBaseline.closeShortcut) {
+            delete current.runOwnedTextEditOpenIntent;
+          } else {
+            try {
+              await this.recordRunOwnedTextEditOpenedWindow(current, completedLifecycleBaseline, signal);
+            } catch {
+              signal.throwIfAborted();
+              delete current.runOwnedTextEditOpenIntent;
+            }
+          }
+        }
+        if (completedLifecycleBaseline.closeShortcut) {
+          try {
+            await this.beginTaskWindowTransitionAfterClose(current, completedLifecycleBaseline, signal);
+          } catch {
+            signal.throwIfAborted();
+          }
+        }
+      }
+      const runCreatedPeerGuidance = runCreatedTextEditPeer
+        ? "A Run-created TextEdit peer was verified from this completed action. It may now have physical foreground while isCurrent still marks the Run-bound target, not physical focus. Use list_windows, then switch_window to the intended fresh ref even if isCurrent is true before input or closing, and wait for the fresh observation before continuing."
+        : undefined;
+      const message = [result.text, diagnostic, runCreatedPeerGuidance].filter(Boolean).join("; ");
+      return { actionId: action.actionId, status: "completed", ...(message ? { message } : {}) };
     } catch (error) {
       const details = driverErrorDetails(error);
       if (details.tag === "Transport") {
@@ -4639,11 +5799,21 @@ export class CuaDriverComputer implements Computer {
       // records the unresolved action as outcome_unknown. Only explicit
       // structured Tool errors are safe to classify as a refusal.
       if (details.tag === "Tool") {
+        const incompleteTypeText = nativeIncompleteTypeTextReceipt(
+          action.actionId, request.name, details.errorCode, details.structuredJson,
+        );
+        if (incompleteTypeText !== undefined) {
+          this.invalidateObservationAfterAction(current);
+          return incompleteTypeText;
+        }
         const structuredNoInput = resultProvesNoInput({
           text: details.message,
           ...(details.structuredJson === undefined ? {} : { structuredJson: details.structuredJson }),
-        });
-        const driverCode = windowRefusalCode(details.errorCode, details.message, structuredNoInput);
+        }, request.name);
+        const driverCode = windowRefusalCode(
+          details.errorCode, details.message, structuredNoInput, request.name,
+          details.structuredJson, actionWindowBinding?.target,
+        );
         if (decisionObservation !== undefined && isTransientSurface(current, decisionObservation.surfaceRef) &&
             driverCode === "WINDOW_FOREGROUND_MISMATCH" &&
             await this.restoreTransientParentAfterExplicitNoInput(current, decisionObservation.surfaceRef, signal)) {
@@ -4672,8 +5842,17 @@ export class CuaDriverComputer implements Computer {
         }
         if (driverCode === "WINDOW_FOREGROUND_MISMATCH") {
           current.foregroundMismatchWindowId = parseActualForegroundWindowId(details.message);
+          current.managedBrowserRestoreEligible = structuredNoInput;
         }
-        return refused(action.actionId, driverCode, details.message);
+        const refusalMessage = pointBlockedGuardRefusalMessage({
+          actionKind: action.kind,
+          toolName: request.name,
+          message: details.message,
+          ...(details.structuredJson === undefined ? {} : { structuredJson: details.structuredJson }),
+          ...(actionWindowBinding?.target === undefined ? {} : { bindingTarget: actionWindowBinding.target }),
+          requestedTarget: request.arguments.target,
+        });
+        return refused(action.actionId, driverCode, refusalMessage ?? details.message);
       }
       throw normalizeDriverError(error, "execute");
     }
@@ -5808,7 +6987,8 @@ async function readGroundingCatalog(
   const elements = new Map<string, PrivateGroundingElement>();
   const publicElements = annotatedRecords.map((candidate, index) => {
     const elementRef = `uia-${groundingObservationDiscriminator(observationId)}-${index + 1}`;
-    const element: GroundingElement = managedBrowserHybrid && isManagedBrowserContainerRole(candidate.element.role)
+    const element: GroundingElement = managedBrowserHybrid && (isManagedBrowserContainerRole(candidate.element.role)
+      || isCollapsedBrowserContentUia(candidate.element, viewport, binding.bounds))
       ? {
           ...candidate.element,
           elementRef,
@@ -5927,6 +7107,24 @@ function parseMacFocusedElementProof(
  * public catalog and the private delivery map.
  */
 const UIA_BROWSER_REGION_TOLERANCE_PX = 2;
+
+function isCollapsedBrowserContentUia(
+  element: Omit<GroundingElement, "elementRef">,
+  viewport: Viewport,
+  nativeBounds: CuaWindowGeometry,
+): boolean {
+  if (element.source !== "uia" || element.browserRegion !== "content" || element.bbox === undefined) return false;
+  // A31 exposed a scrolled-away browser control as a one-native-unit strip.
+  // Its PNG extent changes with registered-capture scaling (1 -> 1.3064 px
+  // in that Run), so check native geometry units instead of a DPI-dependent
+  // screenshot threshold. Retain its read evidence, but do not treat the
+  // strip's center as proof of an actionable target. This does not identify
+  // which upstream component produced the collapsed frame.
+  const nativeWidth = element.bbox.width * nativeBounds.width / viewport.width;
+  const nativeHeight = element.bbox.height * nativeBounds.height / viewport.height;
+  const roundingTolerance = 1e-6;
+  return nativeWidth <= 1 + roundingTolerance || nativeHeight <= 1 + roundingTolerance;
+}
 
 function classifyUiaBrowserRegion(
   element: { readonly bbox?: GroundingElement["bbox"] },
