@@ -2999,6 +2999,9 @@ export class CuaDriverComputer implements Computer {
     const windows: CuaWindowInfo[] = [];
     for (const window of inventory.windows) {
       if (childWindowKeys.has(windowIdentityKey(window.target))) continue;
+      // The Host recovery blank belongs only to the completed-close recovery
+      // flow. Its presence in the recovery pair never grants ordinary switching.
+      if (!this.isTargetSwitchAllowed(window.target)) continue;
       if (targetAllowedByHostScope(window.target, this.options.windowSwitchAllowedTargets) ||
           this.hasHybridCapability() && windowIdentityKey(window.target) === windowIdentityKey(this.options.hybridNativeWebDocumentCapability!.managedBrowserTarget.windowTarget)) {
         windows.push(window);
@@ -3899,6 +3902,7 @@ export class CuaDriverComputer implements Computer {
       readonly staleMessage?: string;
       readonly allowCurrentTargetRestore?: boolean;
       readonly allowRunOwnedPeerRefocus?: boolean;
+      readonly allowBoundCurrentRefocus?: boolean;
       readonly targetPidOnly?: boolean;
       readonly expectedAppName?: string;
       readonly expectedTitle?: string;
@@ -3936,7 +3940,7 @@ export class CuaDriverComputer implements Computer {
       const taskPermit = options.taskWindowTransitionPermit;
       const taskWindow = options.taskOwnedWindow;
       if (permit === undefined && restorePermit === undefined && taskPermit === undefined && taskWindow === undefined &&
-          options.allowRunOwnedPeerRefocus !== true) return; // Do not narrow historical non-missing recovery paths.
+          options.allowRunOwnedPeerRefocus !== true && options.allowBoundCurrentRefocus !== true) return; // Do not narrow historical non-missing recovery paths.
       signal.throwIfAborted();
       if (this.session !== current || !current.active || activeRefBefore === undefined ||
           !sameSurfaceRef(activeRefBefore, current.surfaceRegistry.activeSurface) ||
@@ -3964,6 +3968,17 @@ export class CuaDriverComputer implements Computer {
           !sameSurfaceRef(current.surfaceRegistry.activeSurface, taskPermit.closeSourceSurfaceRef) ||
           taskPermit.observationSurfaceRef === undefined || !isCurrentSurfaceRef(current.surfaceRegistry, taskPermit.observationSurfaceRef))) {
         throw new WindowContractError(options.staleCode, "completed-close task-window authorization changed before transition");
+      }
+      if (options.allowBoundCurrentRefocus === true &&
+          (current.platform !== "win32" || this.options.windowSwitch !== "opened-windows-v1" ||
+           this.options.windowDeliveryMode !== "foreground" || current.missingParent !== undefined ||
+           !selectedIsCurrent || activeBefore?.kind !== "native_window" || activeBefore.parentSurfaceId !== undefined ||
+           activeBindingBefore === undefined || options.selectedSurfaceRef === undefined ||
+           !sameSurfaceRef(options.selectedSurfaceRef, activeRefBefore) ||
+           !isCurrentSurfaceRef(current.surfaceRegistry, options.selectedSurfaceRef) ||
+           windowIdentityKey(activeBindingBefore.target) !== windowIdentityKey(target) ||
+           !targetAllowedByHostScope(target, this.options.windowSwitchAllowedTargets))) {
+        throw new WindowContractError(options.staleCode, "current-window refocus is outside the exact authorized Windows root-window boundary");
       }
       if (options.allowRunOwnedPeerRefocus === true) {
         const selectedRef = options.selectedSurfaceRef;
@@ -3997,7 +4012,7 @@ export class CuaDriverComputer implements Computer {
     signal.throwIfAborted();
     const transitionInventory = options.expectedOwner === undefined && options.classifyOwnedChild !== true &&
         options.taskOwnedWindow === undefined && options.taskWindowTransitionPermit === undefined &&
-        options.allowRunOwnedPeerRefocus !== true
+        options.allowRunOwnedPeerRefocus !== true && options.allowBoundCurrentRefocus !== true
       ? undefined
       : options.taskWindowTransitionPermit !== undefined
         ? (await this.verifyTaskWindowTransition(current, signal)).inventory
@@ -4042,6 +4057,18 @@ export class CuaDriverComputer implements Computer {
     }
     if (options.restorePermit !== undefined && (fresh.isOnScreen !== true || fresh.minimized === true)) {
       throw new WindowContractError(options.staleCode, "the exact Run-owned browser target is no longer visible and eligible for restoration");
+    }
+    if (options.allowBoundCurrentRefocus === true) {
+      const inventory = transitionInventory!;
+      const targetRows = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+      if (targetRows.length !== 1 || fresh.isOnScreen !== true && fresh.minimized !== true ||
+          activeBindingBefore === undefined || !sameWindowGeometry(fresh.bounds, activeBindingBefore.bounds) ||
+          inventory.foregroundPid === undefined || inventory.foregroundWindowId === undefined) {
+        throw new WindowContractError(options.staleCode, "fresh exact target identity, geometry and foreground evidence are required for current-window refocus");
+      }
+      if (inventory.foregroundPid === target.pid && inventory.foregroundWindowId === target.windowId) {
+        throw new WindowContractError("WINDOW_ALREADY_CURRENT", "the bound window is already the verified physical foreground");
+      }
     }
     if (options.allowRunOwnedPeerRefocus === true) {
       const inventory = transitionInventory!;
@@ -4122,7 +4149,8 @@ export class CuaDriverComputer implements Computer {
         }
       }
     }
-    if (selectedIsCurrent && options.allowCurrentTargetRestore !== true && options.allowRunOwnedPeerRefocus !== true) {
+    if (selectedIsCurrent && options.allowCurrentTargetRestore !== true && options.allowRunOwnedPeerRefocus !== true &&
+        options.allowBoundCurrentRefocus !== true) {
       throw new WindowContractError("WINDOW_ALREADY_CURRENT", "selected window is already the current target");
     }
     current.windowRefs.clear();
@@ -4179,6 +4207,18 @@ export class CuaDriverComputer implements Computer {
       capture = await captureWindowWithRetry(current.driver, current.label, target, signal, this.windowCaptureRetryOptions, resolveCapturePlatform(this.options.platform, current.platform));
       signal.throwIfAborted();
       assertTransitionCurrent();
+      if (options.allowBoundCurrentRefocus === true) {
+        const inventory = await listWindowInventory(current.driver, current.label, signal, undefined, false,
+          this.options.windowRelationshipProbe, current.platform);
+        signal.throwIfAborted();
+        assertTransitionCurrent();
+        const matches = inventory.windows.filter((window) => windowIdentityKey(window.target) === windowIdentityKey(target));
+        if (matches.length !== 1 || matches[0]!.isOnScreen !== true || matches[0]!.minimized === true || matches[0]!.noActivate === true ||
+            !sameWindowGeometry(matches[0]!.bounds, capture.binding.bounds) ||
+            inventory.foregroundPid !== target.pid || inventory.foregroundWindowId !== target.windowId) {
+          throw new WindowContractError(options.staleCode, "refocused window lost its exact identity, geometry or physical foreground during capture");
+        }
+      }
     } catch (error) {
       // A failed candidate capture does not prove the prior bound HWND lost
       // identity. Do not promote the candidate; retain the old Surface and
@@ -4232,13 +4272,17 @@ export class CuaDriverComputer implements Computer {
       current.surfaceRegistry = advanced.state;
       targetSurfaceRef = advanced.value;
       noteSurfaceTransition(current, "generation_advanced");
-    } else if (runOwnedForegroundPeerRefocus !== undefined) {
+    } else if (runOwnedForegroundPeerRefocus !== undefined || options.allowBoundCurrentRefocus === true) {
       if (targetSurfaceRef === undefined) throw new WindowContractError(options.staleCode, "authorized current Surface disappeared before refocus commit");
       const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef);
       if (advanced.decision !== "applied") throw new WindowContractError(options.staleCode, advanced.reason);
       current.surfaceRegistry = advanced.state;
       targetSurfaceRef = advanced.value;
       noteSurfaceTransition(current, "generation_advanced");
+      const replayGuard = current.unknownActionReplayGuard;
+      if (replayGuard !== undefined && sameSurfaceRef(replayGuard.surfaceRef, activeRefBefore)) {
+        current.unknownActionReplayGuard = { ...replayGuard, surfaceRef: { ...targetSurfaceRef } };
+      }
     } else {
       if (targetSurfaceRef === undefined) throw new WindowContractError(options.staleCode, "selected Surface could not be registered");
       const advanced = advanceSurfaceGeneration(current.surfaceRegistry, targetSurfaceRef);
@@ -4749,10 +4793,19 @@ export class CuaDriverComputer implements Computer {
       return refused(action.actionId, "WINDOW_REF_STALE", "windowRef was not issued by the current window inventory; list windows again");
     }
     const selectedTarget = asCuaWindowTarget(selectedSurface.nativeWindow);
+    if (!this.isTargetSwitchAllowed(selectedTarget)) {
+      current.windowRefs.clear();
+      return refused(action.actionId, "WINDOW_SWITCH_UNAUTHORIZED", "selected window is outside the Host-authorized ordinary window-switch scope");
+    }
     const selectedKey = windowIdentityKey(selectedTarget);
     const taskOwnedWindow = current.runOwnedTextEditWindows.get(selectedKey);
     const activeRef = current.surfaceRegistry.activeSurface;
     const activeRoot = activeSurface(current);
+    const allowBoundCurrentRefocus = taskTransition === undefined && current.missingParent === undefined &&
+      current.platform === "win32" && this.options.windowDeliveryMode === "foreground" &&
+      activeRoot?.kind === "native_window" && activeRoot.parentSurfaceId === undefined &&
+      activeRef !== undefined && sameSurfaceRef(selectedRef, activeRef) &&
+      targetAllowedByHostScope(selectedTarget, this.options.windowSwitchAllowedTargets);
     const allowRunOwnedPeerRefocus = taskTransition === undefined && taskOwnedWindow === undefined &&
       this.options.windowDeliveryMode === "foreground" && current.platform === "darwin" &&
       this.options.browserTarget === undefined && this.options.hybridNativeWebDocumentCapability === undefined &&
@@ -4784,6 +4837,7 @@ export class CuaDriverComputer implements Computer {
         onScreenOnly: false,
         staleCode: "WINDOW_SWITCH_STALE",
         selectedSurfaceRef: selectedRef,
+        ...(allowBoundCurrentRefocus ? { allowBoundCurrentRefocus: true } : {}),
         ...(allowRunOwnedPeerRefocus ? { allowRunOwnedPeerRefocus: true } : {}),
         ...(taskTransition === undefined
           ? taskOwnedWindow === undefined ? {} : { taskOwnedWindow }

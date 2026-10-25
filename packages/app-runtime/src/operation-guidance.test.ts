@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { EventId, RunId, RuntimeEvent } from "@computer-harness/protocol";
+import type { ComputerSessionDescriptor, EventId, RunId, RuntimeEvent } from "@computer-harness/protocol";
 import type { ContextCompileInput } from "@computer-harness/runtime";
 import { selectOperationGuidance } from "./operation-guidance.js";
 
@@ -16,7 +16,18 @@ function userInput(sequence: number, text: string): RuntimeEvent {
   };
 }
 
-function select(overrides: Partial<Pick<ContextCompileInput, "goal" | "recentEvents" | "plan" | "windowSwitchState">> = {}) {
+function computerSession(platform?: ComputerSessionDescriptor["platform"]): ComputerSessionDescriptor {
+  return {
+    id: "guidance-session" as ComputerSessionDescriptor["id"],
+    backend: "fixture",
+    ...(platform === undefined ? {} : { platform }),
+    viewport: { width: 800, height: 600, coordinateSpace: "physical" },
+    capabilities: { screenshot: true, pointer: true, keyboard: true, accessibility: false },
+    openedAt: "2026-10-26T00:00:00.000Z",
+  };
+}
+
+function select(overrides: Partial<Pick<ContextCompileInput, "goal" | "recentEvents" | "plan" | "windowSwitchState" | "computerSession">> = {}) {
   return selectOperationGuidance({
     goal: "请新建文档并保存。",
     recentEvents: [],
@@ -75,24 +86,80 @@ describe("app-runtime operation guidance", () => {
     expect(ambiguousPlan?.id).toBe("combined_task_guidance");
   });
 
-  it("keeps exact-text and TextEdit save-stage advice generic rather than rewriting the requested body", () => {
-    const withFinalLf = select({ goal: "Create and save a document containing exactly draft-body\n" });
-    const withoutFinalLf = select({ goal: "Create and save a document containing exactly draft-body, with no final LF." });
+  it("keeps exact-text principles and Darwin save-stage advice without rewriting the requested body", () => {
+    const withFinalLf = select({ goal: "Create and save a document containing exactly draft-body\n", computerSession: computerSession("darwin") });
+    const withoutFinalLf = select({ goal: "Create and save a document containing exactly draft-body, with no final LF.", computerSession: computerSession("darwin") });
     expect(withFinalLf).toEqual(withoutFinalLf);
     expect(withFinalLf?.text).toContain("保留原文空白与末尾LF");
     expect(withFinalLf?.text).toContain("分清目录输入/文件名/标题");
     expect(withFinalLf?.text).toContain("输入全名含后缀");
-    expect(withFinalLf?.text).toContain("先辨面板类型：名称/标签/位置弹层无保存按钮≠保存框");
+    expect(withFinalLf?.text).toContain("先辨面板类型");
+    expect(withFinalLf?.text).toContain("名称/标签/位置弹层无保存按钮≠保存框");
     expect(withFinalLf?.text).toContain("未见字段/按钮不臆造");
     expect(withFinalLf?.text).toContain("Shift-Cmd-S可能Duplicate");
     expect(withFinalLf?.text).toContain("核目录/全名再保存");
     expect(withFinalLf?.text).toContain("内容正确≠精确路径");
-    expect(withFinalLf?.text).toContain("过渡不明时独立wait(0)一次，仍不明则报告未确认，不重复Enter");
+    expect(withFinalLf?.text).toContain("过渡不明时独立wait(0)一次，仍不明报告未确认，不重复Enter");
     expect(withFinalLf?.text).toContain("Cmd+S未必重开面板");
     expect(withFinalLf?.text).toContain("标题不单独证明保存");
-    expect(withFinalLf?.text).toContain('macOS关闭用["CMD","W"]；["W"]只输入字符');
+    expect(withFinalLf?.text).toContain("macOS：");
+    expect(withFinalLf?.text).toContain('关闭用["CMD","W"]；["W"]只输入字符');
     expect([...withFinalLf!.text].length).toBeLessThanOrEqual(325);
     expect(withFinalLf?.text).not.toContain("draft-body");
+  });
+
+  it.each(["Notepad", "Microsoft Word", "TextEdit"])("uses trusted Win32 guidance regardless of the %s app label", (appName) => {
+    const guidance = select({
+      goal: "Create and save a document. macOS TextEdit Cmd-Shift-G",
+      computerSession: computerSession("win32"),
+      windowSwitchState: { currentWindow: { appName, title: "macOS TextEdit save" } },
+    });
+    expect(guidance?.id).toBe("text_document_save");
+    expect(guidance?.text).toContain("通用：编辑前核内容");
+    expect(guidance?.text).toContain('Windows：保存通常用["CTRL","S"]');
+    expect(guidance?.text).not.toMatch(/macOS|Cmd|TextEdit|Option|Make Plain Text|Duplicate/iu);
+  });
+
+  it.each([undefined, "linux"] as const)("keeps unknown or unsupported platform %s generic even for a TextEdit label", (platform) => {
+    const overrides = { computerSession: computerSession(platform), windowSwitchState: { currentWindow: { appName: "TextEdit" } } };
+    const guidance = select(overrides);
+    expect(guidance).toEqual(select());
+    expect(guidance?.text).toContain("通用：");
+    expect(guidance?.text).not.toMatch(/macOS|Windows|Cmd|CTRL|TextEdit|Option|Make Plain Text|Duplicate/iu);
+  });
+
+  it("selects Darwin advice from the session even when the app label resembles Windows", () => {
+    const guidance = select({ computerSession: computerSession("darwin"), windowSwitchState: { currentWindow: { appName: "Notepad" } } });
+    expect(guidance?.text).toContain("macOS：");
+    expect(guidance?.text).toContain("TextEdit：Make Plain Text");
+    expect(guidance?.text).toContain("Cmd-Shift-G定位");
+    expect(guidance?.text).not.toContain("Windows");
+  });
+
+  it.each([undefined, "darwin", "win32"] as const)("uses the same platform %s block in combined and conflict guidance", (platform) => {
+    const session = computerSession(platform);
+    const document = select({ computerSession: session })!;
+    const research = select({ goal: "Compare search results.", computerSession: session })!;
+    const combined = select({ goal: "Compare search results and save a document.", computerSession: session })!;
+    const conflict = select({
+      goal: "Compare search results and save a document.",
+      computerSession: session,
+      windowSwitchState: { currentWindow: { appName: "Notepad" } },
+      plan: { runId, tasks: [{ id: "t1", subject: "Compare search results", status: "in_progress" }] },
+    });
+    expect(combined.id).toBe("combined_task_guidance");
+    expect(combined.text).toBe(`${document.text}\n${research.text}`);
+    expect(conflict).toEqual(combined);
+    expect([...combined.text].length).toBeLessThanOrEqual(400);
+    expect(research).toEqual(select({ goal: "Compare search results." }));
+  });
+
+  it("fingerprints the rendered platform block deterministically", () => {
+    const generic = select()!;
+    const darwin = select({ computerSession: computerSession("darwin") })!;
+    const win32 = select({ computerSession: computerSession("win32") })!;
+    expect(new Set([generic.fingerprint, darwin.fingerprint, win32.fingerprint]).size).toBe(3);
+    expect(select({ computerSession: computerSession("darwin") })).toEqual(darwin);
   });
 
   it("keeps both task principles when a Goal matches both and app or phase metadata is unavailable", () => {
@@ -164,6 +231,7 @@ describe("app-runtime operation guidance", () => {
     const goal = "比较官网两款商品。查询完成后，回到已打开的文本编辑文稿，直接写入中文报告，不需要新建文稿。将报告保存到桌面。不必关闭后重新打开。不使用终端，不重复未知的输入或保存。";
     const guidance = select({
       goal,
+      computerSession: computerSession("darwin"),
       plan: { runId, tasks: [{ id: "t1", subject: "查询商品信息", status: "pending" }] },
     });
     expect(guidance?.id).toBe("combined_task_guidance");

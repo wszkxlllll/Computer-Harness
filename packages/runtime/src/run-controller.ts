@@ -3334,6 +3334,11 @@ export class RunController {
         if (observationCount !== 1 || event.receipt.status !== "completed") return false;
         const previousAction = this.actionForId(event.receipt.actionId);
         if (!matches(previousAction)) return false;
+        // The current decision already inspected this action's fresh image.
+        // A correctly bound expected change can ground a next confirmation or
+        // a different control at the same point. Pixel change alone cannot.
+        const assessment = this.currentBoundAssessment();
+        if (assessment?.actionId === event.receipt.actionId && assessment.actionOutcome === "expected_change") return false;
         const before = this.events.find((item) => item.type === "observation.created" && item.observation.id === previousAction.basedOn);
         return before?.type === "observation.created" && this.latestObservation !== undefined &&
           sameSurfaceRef(before.observation.surfaceRef, this.latestObservation.surfaceRef);
@@ -3352,14 +3357,18 @@ export class RunController {
       ? assessment : undefined;
   }
 
-  private hasCurrentNegativeAssessment(): boolean {
+  private currentBoundAssessment(): ReturnType<typeof parseObservationAssessment> {
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       if (this.events[index]?.type !== "model.response.received") continue;
       const assessment = this.boundAssessmentAt(index);
-      return assessment?.observationId === this.latestObservation?.id
-        && (assessment?.actionOutcome === "no_effect" || assessment?.actionOutcome === "uncertain");
+      return assessment?.observationId === this.latestObservation?.id ? assessment : undefined;
     }
-    return false;
+    return undefined;
+  }
+
+  private hasCurrentNegativeAssessment(): boolean {
+    const assessment = this.currentBoundAssessment();
+    return assessment?.actionOutcome === "no_effect" || assessment?.actionOutcome === "uncertain";
   }
 
   private hasUnresolvedNearbyClick(action: ActionIntent): boolean {
@@ -3369,8 +3378,7 @@ export class RunController {
     const samePartition = (observation: ObservationFrame): boolean => sameSurfaceRef(observation.surfaceRef, latest.surfaceRef)
       && observation.viewport.coordinateSpace === latest.viewport.coordinateSpace
       && observation.viewport.width === latest.viewport.width && observation.viewport.height === latest.viewport.height;
-    let positiveAssessment = false;
-    let assessmentSeen = false;
+    const positiveAssessment = this.currentBoundAssessment()?.actionOutcome === "expected_change";
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       const event = this.events[index];
       if (event === undefined) continue;
@@ -3378,13 +3386,6 @@ export class RunController {
         || event.type === "computer.window.handoff.completed" || event.type === "computer.window.handoff.ignored"
         || event.type === "computer.surface.transitioned" || event.type === "action.execution.failed") return false;
       if (event.type === "observation.created" && !samePartition(event.observation)) return false;
-      if (event.type === "model.response.received" && !assessmentSeen) {
-        const assessment = this.boundAssessmentAt(index);
-        if (assessment !== undefined) {
-          assessmentSeen = true;
-          positiveAssessment = assessment.actionOutcome === "expected_change" && assessment.observationId === latest.id;
-        }
-      }
       if (event.type !== "action.execution.completed") continue;
       if (event.receipt.status !== "completed") return false;
       const previous = this.actionForId(event.receipt.actionId);

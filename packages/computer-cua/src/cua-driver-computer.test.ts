@@ -118,6 +118,249 @@ describe("opened-window sampled visibility projection", () => {
   });
 });
 
+describe("explicit Windows bound-window refocus", () => {
+  it.each(["unscoped", "explicit", "scope-excluded"] as const)("keeps current-peer refocus within the Host window scope: %s", async (scope) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-windows-peer-refocus-"));
+    const fake = windowDriver();
+    const peer = { pid: fake.target.pid + 7, windowId: fake.target.windowId + 8 };
+    fake.setExtraWindow({ ...peer, appName: "Editor", title: "Selected peer" });
+    const allowedTargets = scope === "scope-excluded" ? [fake.target] : [fake.target, peer];
+    const originalCall = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, json, options) => {
+      const response = await originalCall(name, json, options);
+      const input = JSON.parse(json) as Record<string, unknown>;
+      if (name === "bring_to_front" && typeof input.pid === "number" && typeof input.window_id === "number") {
+        fake.setForegroundTarget({ pid: input.pid, windowId: input.window_id });
+      }
+      return response;
+    };
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1",
+      ...(scope === "unscoped" ? {} : { windowSwitchAllowedTargets: allowedTargets }),
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      const initial = await computer.observe(session, "windows-peer-initial" as ObservationId, signal);
+      const peerOption = (await computer.listWindows(session, signal)).options.find((window) => window.title === "Selected peer");
+      if (scope === "scope-excluded") {
+        expect(peerOption).toBeUndefined();
+        expect(await computer.execute(session, { actionId: "windows-excluded-peer" as ActionId, basedOn: "windows-peer-initial" as ObservationId,
+          kind: "switch_window", windowRef: "win-unissued-excluded-peer" }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_REF_STALE" });
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(1);
+        return;
+      }
+      const peerRef = peerOption!.windowRef;
+      expect(await computer.execute(session, { actionId: "windows-select-peer" as ActionId, basedOn: "windows-peer-initial" as ObservationId,
+        kind: "switch_window", windowRef: peerRef }, signal)).toMatchObject({ status: "completed" });
+      const bound = await computer.observe(session, "windows-peer-bound" as ObservationId, signal);
+      expect(bound.surfaceRef.surfaceId).not.toBe(initial.surfaceRef.surfaceId);
+      fake.setForegroundTarget({ pid: 8000, windowId: 9000 });
+      const currentRef = (await computer.listWindows(session, signal)).options.find((window) => window.isCurrent)!.windowRef;
+      const bringCount = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      const receipt = await computer.execute(session, { actionId: "windows-refocus-peer" as ActionId, basedOn: "windows-peer-bound" as ObservationId,
+        kind: "switch_window", windowRef: currentRef }, signal);
+      expect(receipt).toMatchObject({ status: "completed" });
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(bringCount + 1);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front").at(-1)?.input).toMatchObject({ pid: peer.pid, window_id: peer.windowId });
+      const refocused = await computer.observe(session, "windows-peer-refocused" as ObservationId, signal);
+      expect(refocused.surfaceRef.surfaceId).toBe(bound.surfaceRef.surfaceId);
+      expect(refocused.surfaceRef.generation).toBeGreaterThan(bound.surfaceRef.generation);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["success", "partial-inventory", "unknown-before-refocus", "already-foreground", "stale-ref", "activation-refused", "activation-unknown", "capture-fails", "foreground-changes", "foreground-during-capture", "identity-changes", "abort"] as const)("rechecks the exact current native target before refocus: %s", async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-windows-current-refocus-"));
+    const fake = windowDriver();
+    fake.setForegroundTarget(fake.target);
+    const computer = new CuaDriverComputer({
+      socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target],
+      grounding: "off", driverFactory: () => fake.driver,
+    });
+    const parent = new AbortController();
+    const signal = parent.signal;
+    let activated = false;
+    const originalVerify = fake.driver.verifyState.bind(fake.driver);
+    fake.driver.verifyState = async (input, options) => {
+      const response = await originalVerify(input, options);
+      if (activated && scenario === "foreground-during-capture") fake.setForegroundTarget({ pid: 8000, windowId: 9000 });
+      return response;
+    };
+    const originalCall = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, json, options) => {
+      const response = await originalCall(name, json, options);
+      if (name === "bring_to_front" && activated) {
+        if (scenario === "abort") parent.abort(new Error("refocus cancelled"));
+        if (scenario !== "foreground-changes") fake.setForegroundTarget(fake.target);
+        if (scenario === "identity-changes") fake.omitBoundWindow(true);
+      }
+      return response;
+    };
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      let basedOn = "windows-refocus-before" as ObservationId;
+      let before = await computer.observe(session, basedOn, signal);
+      if (scenario === "unknown-before-refocus") {
+        fake.setForegroundRefusal(true, "foreground_input_outcome_unknown: SendInput began before exact foreground drift");
+        expect(await computer.execute(session, { actionId: "windows-unknown-before-refocus" as ActionId, basedOn, kind: "click", point: { x: 10, y: 20 } }, signal))
+          .toMatchObject({ status: "partial", driverCode: "ACTION_OUTCOME_UNKNOWN" });
+        fake.setForegroundRefusal(false);
+        basedOn = "windows-refocus-after-unknown" as ObservationId;
+        before = await computer.observe(session, basedOn, signal);
+      }
+      fake.setForegroundTarget({ pid: 8000, windowId: 9000 });
+      const listed = await computer.listWindows(session, signal);
+      const candidate = listed.options.find((window) => window.isCurrent)!;
+      expect(candidate).toBeDefined();
+      const bringCount = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      activated = true;
+      let additionalActivations = 0;
+      if (scenario === "already-foreground") fake.setForegroundTarget(fake.target);
+      if (scenario === "stale-ref") await computer.listWindows(session, signal);
+      if (scenario === "partial-inventory") fake.setWindowInventoryComplete(false);
+      if (scenario === "activation-refused") fake.setActivationToolResult(windowsForegroundRefusalResult(fake.target.windowId, 9000));
+      if (scenario === "activation-unknown") fake.setActivationToolResult({ isError: true, text: "activation result unknown" });
+      if (scenario === "capture-fails") {
+        fake.setCaptureImages([[]]);
+        fake.setFallbackRefusal("CAPTURE_FAILED", "fixture refocus capture unavailable");
+      }
+      const pending = computer.execute(session, {
+        actionId: "windows-explicit-refocus" as ActionId, basedOn,
+        kind: "switch_window", windowRef: candidate.windowRef,
+      }, signal);
+      if (scenario === "abort") {
+        await expect(pending).rejects.toThrow("refocus cancelled");
+      } else {
+        const receipt = await pending;
+        if (scenario === "success" || scenario === "partial-inventory" || scenario === "unknown-before-refocus") {
+          expect(receipt).toMatchObject({ status: "completed" });
+          const after = await computer.observe(receipt.status === "completed" ? receipt.sessionAfter ?? session : session, "windows-refocus-after" as ObservationId, signal);
+          expect(after.surfaceRef.surfaceId).toBe(before.surfaceRef.surfaceId);
+          expect(after.surfaceRef.generation).toBeGreaterThan(before.surfaceRef.generation);
+          expect(after.surfaceTransitionReason).toBe("generation_advanced");
+          let afterId = "windows-refocus-after" as ObservationId;
+          if (scenario === "unknown-before-refocus") {
+            expect(await computer.execute(session, { actionId: "windows-unknown-after-refocus-replay" as ActionId,
+              basedOn: "windows-refocus-after" as ObservationId, kind: "click", point: { x: 10, y: 20 } }, signal))
+              .toMatchObject({ status: "refused", driverCode: "ACTION_OUTCOME_UNKNOWN_RETRY_BLOCKED" });
+            fake.setForegroundTarget({ pid: 8000, windowId: 9000 });
+            const secondRef = (await computer.listWindows(session, signal)).options.find((window) => window.isCurrent)!.windowRef;
+            expect(await computer.execute(session, { actionId: "windows-unknown-second-refocus" as ActionId, basedOn: afterId,
+              kind: "switch_window", windowRef: secondRef }, signal)).toMatchObject({ status: "completed" });
+            additionalActivations += 1;
+            afterId = "windows-refocus-after-second" as ObservationId;
+            const second = await computer.observe(session, afterId, signal);
+            expect(second.surfaceRef.surfaceId).toBe(before.surfaceRef.surfaceId);
+            expect(second.surfaceRef.generation).toBeGreaterThan(after.surfaceRef.generation);
+            expect(await computer.execute(session, { actionId: "windows-unknown-after-second-refocus-replay" as ActionId,
+              basedOn: afterId, kind: "click", point: { x: 10, y: 20 } }, signal))
+              .toMatchObject({ status: "refused", driverCode: "ACTION_OUTCOME_UNKNOWN_RETRY_BLOCKED" });
+            expect(fake.calls.filter((call) => call.name === "click")).toHaveLength(1);
+          }
+          // Neither a fresh observation nor an ordinary action automatically activates.
+          await computer.execute(session, { actionId: "windows-after-refocus-key" as ActionId, basedOn: afterId, kind: "keypress", keys: ["ESC"] }, signal);
+        } else if (scenario === "already-foreground") expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_ALREADY_CURRENT" });
+        else if (scenario === "stale-ref") expect(receipt).toMatchObject({ status: "refused", driverCode: "WINDOW_REF_STALE" });
+        else if (scenario === "activation-refused") expect(receipt.status).toBe("refused");
+        else expect(receipt.status).toBe("failed");
+      }
+      const attempted = scenario !== "already-foreground" && scenario !== "stale-ref";
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(bringCount + (attempted ? 1 : 0) + additionalActivations);
+      expect(fake.calls.filter((call) => call.name === "bring_to_front").at(-1)?.input).toMatchObject({ pid: fake.target.pid, window_id: fake.target.windowId });
+      if (scenario !== "success" && scenario !== "partial-inventory" && scenario !== "unknown-before-refocus") expect(fake.calls.some((call) => ["click", "type_text", "press_key", "hotkey"].includes(call.name))).toBe(false);
+      if (attempted && scenario !== "abort") {
+        expect(await computer.execute(session, { actionId: "windows-refocus-stale-replay" as ActionId, basedOn, kind: "switch_window", windowRef: candidate.windowRef }, signal)).toMatchObject({ status: "refused", driverCode: "OBSERVATION_NOT_FOUND" });
+        expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(bringCount + 1 + additionalActivations);
+      }
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("hybrid recovery-window inventory boundary", () => {
+  it("hides the prepared recovery blank before the saved-document close and refuses a guessed switch", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "harness-hybrid-recovery-hidden-")));
+    const fake = windowDriver();
+    fake.setPlatform("darwin");
+    const recoveryTarget = { pid: fake.target.pid, windowId: fake.target.windowId + 1 };
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "hybrid-recovery", tabId: "hybrid-tab", generation: "hybrid-generation", delivery: "loopback-cdp", windowTarget: { pid: 7000, windowId: 8000 } };
+    fake.setExtraWindow({ ...recoveryTarget, appName: "TextEdit", title: "Prepared recovery blank" });
+    fake.setSecondExtraWindow({ ...browserTarget.windowTarget, appName: "Browser", title: "Run browser" });
+    const executableUrl = pathToFileURL(await realpath(process.execPath)).href;
+    const originalCall = fake.driver.callTool.bind(fake.driver);
+    fake.driver.callTool = async (name, json, options) => {
+      const input = JSON.parse(json) as Record<string, unknown>;
+      if (name === "get_window_state" && input.document_identity_query !== undefined) {
+        const windowId = typeof input.window_id === "number" ? input.window_id : fake.target.windowId;
+        const processStart = { seconds: 17, microseconds: 23 };
+        return result({ structuredJson: JSON.stringify({ _private_document_proof: {
+          version: "macos-document-identity-v1", snapshot_id: `hidden-recovery-${windowId}`, status: "unstable",
+          target: { pid: fake.target.pid, window_id: windowId, process_start: processStart },
+          application_identity: { status: "verified", target: { pid: fake.target.pid, window_id: windowId, process_start: processStart,
+            bundle_id: "com.apple.TextEdit", executable_url: executableUrl },
+          instances: [{ pid: fake.target.pid, process_start: processStart, bundle_id: "com.apple.TextEdit", executable_url: executableUrl }] },
+          frontmost_pid: fake.target.pid, focused_window_id: windowId,
+          window: { role: "AXWindow", pid: fake.target.pid, owner_pid: fake.target.pid, window_id: windowId, bounds: { x: 100, y: 120, width: 960, height: 680 } },
+        } }) });
+      }
+      return originalCall(name, json, options);
+    };
+    const computer = new ProductionCuaDriverComputer({
+      platform: "darwin", socketPath: "fixture", screenshotDir: directory,
+      windowTarget: fake.target, recoveryWindowTarget: recoveryTarget, recoverBoundWindowMissing: true,
+      windowDeliveryMode: "foreground", windowSwitch: "opened-windows-v1", windowSwitchAllowedTargets: [fake.target, recoveryTarget],
+      grounding: "hybrid-catalog-v1", browserTarget,
+      hybridNativeWebDocumentCapability: { managedBrowserTarget: browserTarget, primaryTarget: fake.target, recoveryTarget },
+      domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, candidates: [] }),
+      reopenSavedDocumentGrant: { path: join(directory, "authorized-output.txt"), expectedExecutableUrl: executableUrl },
+      driverFactory: () => fake.driver,
+    });
+    const signal = new AbortController().signal;
+    let session: ComputerSession | undefined;
+    try {
+      session = await computer.open({}, signal);
+      await computer.observe(session, "hybrid-before-save-close" as ObservationId, signal);
+      const listed = await computer.listWindows(session, signal);
+      const exposedRecovery = listed.options.find((window) => window.title === "Prepared recovery blank");
+      expect.soft(exposedRecovery).toBeUndefined();
+      expect(listed.options.some((window) => window.title === "Run browser")).toBe(true);
+      const activationCount = fake.calls.filter((call) => call.name === "bring_to_front").length;
+      expect(await computer.execute(session, {
+        actionId: "hybrid-premature-recovery-switch" as ActionId, basedOn: "hybrid-before-save-close" as ObservationId,
+        kind: "switch_window", windowRef: exposedRecovery?.windowRef ?? "win-unissued-recovery",
+      }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_REF_STALE" });
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationCount);
+      // Model a previously leaked/forged fresh ordinary candidate. The actual
+      // dispatch predicate must independently enforce the recovery boundary.
+      const scope = computer as unknown as { isTargetSwitchAllowed(target: { pid: number; windowId: number }): boolean };
+      const scopeSpy = vi.spyOn(scope, "isTargetSwitchAllowed").mockReturnValue(true);
+      let leakedRecovery: { windowRef: string } | undefined;
+      try {
+        leakedRecovery = (await computer.listWindows(session, signal)).options.find((window) => window.title === "Prepared recovery blank");
+      } finally { scopeSpy.mockRestore(); }
+      expect(leakedRecovery).toBeDefined();
+      expect(await computer.execute(session, {
+        actionId: "hybrid-leaked-recovery-switch" as ActionId, basedOn: "hybrid-before-save-close" as ObservationId,
+        kind: "switch_window", windowRef: leakedRecovery!.windowRef,
+      }, signal)).toMatchObject({ status: "refused", driverCode: "WINDOW_SWITCH_UNAUTHORIZED" });
+      expect(fake.calls.filter((call) => call.name === "bring_to_front")).toHaveLength(activationCount);
+    } finally {
+      if (session !== undefined) await computer.close(session);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("managed-browser desktop startup activation", () => {
   it.each(["confirmed", "refused"] as const)("uses one exact startup activation for %s and retains the full desktop Surface", async (activation) => {
     const directory = await mkdtemp(join(tmpdir(), `harness-managed-browser-startup-${activation}-`));
@@ -11307,11 +11550,11 @@ describe("CuaDriverComputer", () => {
     }
   });
 
-  describe("optional grounding read deadlines", () => {
+  describe.each(["win32", "darwin"] as const)("optional grounding read deadlines (%s)", (platform) => {
     async function fixture() {
       const directory = await mkdtemp(join(tmpdir(), "harness-optional-grounding-deadline-"));
       const fake = windowDriver({ x: 0, y: 0, width: 1000, height: 800 }, { width: 1000, height: 800 });
-      fake.setPlatform("darwin");
+      fake.setPlatform(platform);
       const nativeState = (name: string) => ({ elements_complete: true, elements: [
         { role: "AXWebArea", frame: { x: 0, y: 80, width: 1000, height: 720 }, enabled: true },
         { role: "AXButton", name, frame: { x: 200, y: 180, width: 100, height: 30 }, enabled: true },
@@ -11371,7 +11614,7 @@ describe("CuaDriverComputer", () => {
         },
       };
       const computer = new ProductionCuaDriverComputer({
-        platform: "darwin", socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
+        platform, socketPath: "fixture", screenshotDir: directory, windowTarget: fake.target,
         windowDeliveryMode: "foreground", grounding: "hybrid-catalog-v1", browserTarget,
         domGroundingTransport: transport, driverFactory: () => fake.driver,
       });
@@ -14717,7 +14960,7 @@ describe("window repair integration boundaries", () => {
     }
   });
 
-  it.each(["matching-pid", "wrong-pid", "changed-file", "wrong-identity", "missing-proof", "launch-error", "capture-failure", "ctime-only", "delayed-document", "no-document-timeout", "changed-app-identity", "abort-during-settle", "postlaunch-size", "postlaunch-mtime", "postlaunch-inode", "unverified-initial-proof", "parent-changed-during-observation"] as const)("reopens only the one saved clean document after its completed close and exact recovery handoff (%s)", async (scenario) => {
+  it.each(["matching-pid", "matching-hybrid", "wrong-pid", "changed-file", "wrong-identity", "missing-proof", "launch-error", "capture-failure", "ctime-only", "delayed-document", "no-document-timeout", "changed-app-identity", "abort-during-settle", "postlaunch-size", "postlaunch-mtime", "postlaunch-inode", "unverified-initial-proof", "parent-changed-during-observation"] as const)("reopens only the one saved clean document after its completed close and exact recovery handoff (%s)", async (scenario) => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "computer-harness-reopen-document-")));
     const movedParent = `${directory}-moved`;
     const outputPath = join(directory, "one-run-output.txt");
@@ -14727,6 +14970,9 @@ describe("window repair integration boundaries", () => {
     const reopenedWindowId = fake.target.windowId + 2;
     fake.setExtraWindow({ ...recoveryTarget, appName: "TextEdit", title: "Prepared recovery blank" });
     const executableUrl = pathToFileURL(await realpath(process.execPath)).href;
+    const browserTarget: ManagedBrowserTarget = { kind: "managed-chromium", browser: "chromium", profileId: "hybrid-reopen",
+      windowTarget: { pid: fake.target.pid + 100, windowId: 9000 }, tabId: "hybrid-reopen-tab", generation: "hybrid-reopen-generation", delivery: "loopback-cdp" };
+    if (scenario === "matching-hybrid") fake.setSecondExtraWindow({ ...browserTarget.windowTarget, appName: "Browser", title: "Run-owned browser" });
     const computer = new ProductionCuaDriverComputer({
       platform: "darwin",
       socketPath: "fixture",
@@ -14738,7 +14984,12 @@ describe("window repair integration boundaries", () => {
       windowDeliveryMode: "foreground",
       windowSwitch: "opened-windows-v1",
       windowSwitchAllowedTargets: [fake.target, recoveryTarget],
-      grounding: "off",
+      grounding: scenario === "matching-hybrid" ? "hybrid-catalog-v1" : "off",
+      ...(scenario === "matching-hybrid" ? {
+        browserTarget,
+        hybridNativeWebDocumentCapability: { managedBrowserTarget: browserTarget, primaryTarget: fake.target, recoveryTarget },
+        domGroundingTransport: createMockDomGroundingTransport({ complete: true, tabId: browserTarget.tabId, generation: browserTarget.generation, candidates: [] }),
+      } : {}),
       driverFactory: () => fake.driver,
     });
     const rawDriver = fake.driver as unknown as {
