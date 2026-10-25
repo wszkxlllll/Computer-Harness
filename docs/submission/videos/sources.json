@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "publicationDate": "2026-10-26",
+  "videos": [
+    {
+      "file": "01-computer-harness-project-overview.mp4",
+      "title": "Computer—Harness 项目介绍（含 Windows 真实任务演示）",
+      "sourceFilename": "微信视频2026-10-26_031204_278.mp4",
+      "durationSeconds": 270.482479,
+      "bytes": 11714831,
+      "sha256": "9d2c7dcb3624761f9b525e7d298ef167f7c5cfad59dfb7e84cf43173305ee13d",
+      "videoCodec": "h264",
+      "dimensions": [
+        1920,
+        1080
+      ],
+      "audioTrack": true,
+      "demonstratedDesktopPlatform": "Windows",
+      "transformation": "Renamed byte-identical copy; no re-encoding, editing or overlay change in this publication."
+    },
+    {
+      "file": "02-computer-harness-macos-shopping-correction-demo.mp4",
+      "title": "Computer—Harness macOS 真实任务 Demo：商品查询、实时纠偏与报告交付",
+      "sourceFilename": "Computer—Harness-执行监督与及时纠偏-108秒双屏版-v5.mp4",
+      "durationSeconds": 108.0,
+      "bytes": 5380059,
+      "sha256": "879a5fe525d7ecfbd3f1225c555c63f9ef4b22d3fbdd0d05bddae66dc9e3682d",
+      "videoCodec": "h264",
+      "dimensions": [
+        1920,
+        1080
+      ],
+      "audioTrack": false,
+      "demonstratedDesktopPlatform": "macOS",
+      "transformation": "Renamed byte-identical copy; no re-encoding, editing or overlay change in this publication."
+    }
+  ]
+}

@@ -11,9 +11,15 @@
 | [真实任务卡](./real-task-cases.md) | 后期明确题面的28张任务卡，按六类整理，包含Demo |
 | [插图预览](./figures/README.md) | 当前六张图与可编辑源文件 |
 | [商品查询与手机纠偏Demo](./interactive-shopping-demo-a71.md) | 技术报告5.4.2及图6的过程、证据与验收范围 |
+| [项目介绍与 Demo 视频](./videos/README.md) | 项目介绍（含 Windows 案例）与 macOS 购物纠偏 Demo |
 | 本文件 | 团队填写与上传时查阅，不作为报告附件 |
 
-演示视频使用已确认的 **02-Lightspeaker-demo.mp4**，约4分31秒。本机成片位于仓库根目录的 `output/submission-review/`。旧PDF与旧版填写资料已移入本机历史目录。
+当前两段视频已归档到 [`videos/`](./videos/README.md)：
+
+- [Computer—Harness 项目介绍](./videos/01-computer-harness-project-overview.mp4)：约4分30秒，包含 Windows 查车次与微信交付，以及产品介绍和开源贡献。
+- [Computer—Harness macOS 购物纠偏 Demo](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)：1分48秒，展示官网查询、用户根据执行情况及时纠偏、保存桌面报告。
+
+项目介绍视频为主展示材料，macOS Demo 为补充案例短片；两段分别对应技术报告5.4.1与5.4.2。原文件仅统一命名，内容未重剪。
 
 ## 平台填写
 
