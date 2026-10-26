@@ -210,7 +210,7 @@ Lightspeaker 将手机作为生活任务的委托与控制入口，电脑负责�
 
 这一案例将手机委托、动态网页查询、跨应用执行和关键操作确认连接为完整流程，展示了 Computer Harness 对任务连续性和用户控制的支撑。随作品提交的演示视频保留真实执行与任务播报，并展示产品交互及开源贡献；等待片段的变速和后期产品旁白均在视频中标识。
 
-项目介绍视频（含本节 Windows 真实任务）：[Computer—Harness 项目介绍](./videos/01-computer-harness-project-overview.mp4)，约4分30秒。
+完整过程见随附的 Lightspeaker 项目介绍视频，时长约4分30秒。
 
 #### 5.4.2 macOS：商品查询、手机纠偏与桌面报告交付
 
@@ -220,9 +220,7 @@ Lightspeaker 将手机作为生活任务的委托与控制入口，电脑负责�
 
 图6　同一次 macOS 任务的实际执行画面。（a）官网配置与价格查询；（b）手机端输入纠偏要求；（c）文本编辑中的已保存报告与桌面文件。三幅画面分别截取自这次任务的电脑、手机原始录屏，按查询、纠偏、交付三个阶段排列，并非同时发生。手机帧保留输入法组合状态；正文中的完整纠偏文字取自该次任务日志。
 
-这一案例展示了 Computer—Harness 对执行监督和用户及时纠偏的支持：用户可根据执行情况介入，系统依据纠偏要求接续后续操作，无需重新启动任务。展示重点是用户参与下的真实应用交付；运行配置、内容核验及验收边界见[商品查询与中途纠偏案例](./interactive-shopping-demo-a71.md)，不将单次演示扩大为稳定率或全部严格验收通过。
-
-本节 macOS 演示视频：[商品查询、实时纠偏与报告交付](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)，1分48秒，手机与电脑双屏呈现。
+这一案例展示了 Lightspeaker 对执行监督和用户及时纠偏的支持：用户可根据执行情况介入，系统依据纠偏要求接续后续操作，无需重新启动任务。
 
 ### 5.5 工程验证与迭代
 
@@ -326,14 +324,8 @@ Lightspeaker 基于开源 Computer-Use 技术，构建了连接手机交互、�
 
 ### 9.2 提交材料与开源入口
 
-随作品整理的材料包括本技术报告、附后的《开源及第三方资源使用清单》，以及两段视频：[项目介绍视频](./videos/01-computer-harness-project-overview.mp4)展示产品交互、Windows 查车次与微信交付及开源贡献；[macOS 真实任务 Demo](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)展示商品查询、用户执行中纠偏与桌面报告交付。视频文件及来源信息统一维护于[视频目录](./videos/README.md)。
+随作品提交的材料包括本技术报告、附后的《开源及第三方资源使用清单》，以及单独提交的 Lightspeaker 项目介绍视频。视频展示产品交互、Windows 查车次与微信交付及开源贡献。
 
-项目源码、使用文档及授权声明的仓库入口如下：
-
-- 项目仓库：[Computer-Harness](https://github.com/wszkxlllll/Computer-Harness)。
-- Windows 安装与使用：[开始使用](https://github.com/wszkxlllll/Computer-Harness/blob/main/docs/getting-started.md)。
-- 系统实现：[技术文档](https://github.com/wszkxlllll/Computer-Harness/blob/main/docs/technical-guide.md)。
-- 项目许可：[LICENSE](https://github.com/wszkxlllll/Computer-Harness/blob/main/LICENSE)。
-- 第三方声明：[THIRD_PARTY_NOTICES](https://github.com/wszkxlllll/Computer-Harness/blob/main/THIRD_PARTY_NOTICES.md)。
+项目成果链接：[Computer-Harness 开源仓库](https://github.com/wszkxlllll/Computer-Harness)。
 
 上游协作的公开提交与合并记录见参考资料[2]—[6]。

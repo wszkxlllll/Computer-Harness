@@ -8,7 +8,11 @@
   "version": {
     "candidate": "astra-main-bd1200f-r3-a71-fullframe-1600",
     "baseCommit": "bd1200ff176f9edfb00143881423bfd63e1b1e2e",
-    "published": false,
+    "published": true,
+    "sourceCommit": "d0298c0b63e43a2b03094dfef0b6062de6f21397",
+    "sourceTag": "astra-a71-interactive-demo-20261026",
+    "sourcePullRequest": "https://github.com/wszkxlllll/Computer-Harness/pull/47",
+    "followupPullRequest": "https://github.com/wszkxlllll/Computer-Harness/pull/48",
     "freezeSha256": "ce442df44f6668f70a1c0ff80a1c1442dc2e43b9fcfd0ed1e4d29f6378f1e144",
     "sourcePinCount": 466,
     "buildPinCount": 566,

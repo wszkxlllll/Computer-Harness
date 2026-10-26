@@ -4,7 +4,7 @@
   "videos": [
     {
       "file": "01-computer-harness-project-overview.mp4",
-      "title": "Computer—Harness 项目介绍（含 Windows 真实任务演示）",
+      "title": "Lightspeaker 项目介绍（含 Windows 真实任务演示）",
       "sourceFilename": "微信视频2026-10-26_031204_278.mp4",
       "durationSeconds": 270.482479,
       "bytes": 11714831,
@@ -20,7 +20,7 @@
     },
     {
       "file": "02-computer-harness-macos-shopping-correction-demo.mp4",
-      "title": "Computer—Harness macOS 真实任务 Demo：商品查询、实时纠偏与报告交付",
+      "title": "Lightspeaker macOS 真实任务 Demo：商品查询、实时纠偏与报告交付",
       "sourceFilename": "Computer—Harness-执行监督与及时纠偏-108秒双屏版-v5.mp4",
       "durationSeconds": 108.0,
       "bytes": 5380059,

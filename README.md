@@ -14,7 +14,11 @@
 
 </div>
 
-<!-- 主 Demo：手机提出目标 → 电脑查询并跨应用执行 → 手机确认发送 → 实际交付。正式重录完成后嵌入视频，不发布开发剪辑作成品。 -->
+[![Lightspeaker 演示：携程查询、手机审批与微信交付，点击观看视频](./docs/submission/figures/fig05-crossapp-demo.png)](./docs/submission/videos/01-computer-harness-project-overview.mp4)
+
+**点击封面观看主视频（4分30秒）** · [Mac 用户纠偏与文稿交付（1分48秒）](./docs/submission/videos/02-computer-harness-macos-shopping-correction-demo.mp4)
+
+视频包含真实任务录屏；版本、来源和补充说明见[视频目录](./docs/submission/videos/README.md)。
 
 ## 手机说一句，电脑来完成
 
@@ -73,7 +77,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mobile.p
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Command start -Build
 ```
 
-启动后在电脑打开 [连接手机](http://localhost:4317/connect)，生成二维码，手机扫码后在电脑确认。完整的[开始使用](./docs/getting-started.md)集中说明 Node.js 安装、Relay 连接资料、语音和排错。当前源码预发布的用户安装流程覆盖 Windows，macOS 安装流程由平台成员补齐。
+启动后在电脑打开 [连接手机](http://localhost:4317/connect)，生成二维码，手机扫码后在电脑确认。[开始使用](./docs/getting-started.md)集中说明安装、Relay 连接资料、语音和排错：Windows 使用 rc.2 源码发布包；[macOS 使用配套源码与驱动的启动流程](./docs/getting-started.md#macos-start)，包含构建、签名和权限设置。
 
 ## 在真实生活中持续打磨
 

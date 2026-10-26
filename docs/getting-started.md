@@ -61,12 +61,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Co
 
 以下源码流程面向 Apple 芯片的 Mac。准备 [Node.js 24 LTS](https://nodejs.org/en/download)（最低22.13.0）、Git、Python 3，以及 Google Chrome 或 Chromium。驱动自行构建还需要 Rust 和 Xcode Command Line Tools，详见下方驱动说明。Intel Mac 的新机流程尚未验收。
 
-1. 在自己选择的文件夹打开“终端”，下载配套源码。下面固定的是公开主干代码 `bd1200f`，不包含其他机器尚未发布的 Demo 修复：
+1. 在自己选择的文件夹打开“终端”，下载配套源码。下面固定 `9b6b3583`，包含完整安装说明；其运行代码及依赖与 N9 主干版本 `bd1200f` 相同，不包含后续 A71/A72 实验改动。Mac Host 与 Relay 均使用此提交：
 
 ```sh
 git clone https://github.com/wszkxlllll/Computer-Harness.git
 cd Computer-Harness
-git checkout --detach bd1200ff176f9edfb00143881423bfd63e1b1e2e
+git checkout --detach 9b6b358346ececc9fd96d777d38be14562f7e6e5
 node --version
 npm install --global pnpm@11.19.0
 pnpm install --frozen-lockfile
@@ -249,7 +249,7 @@ Node 应安装在服务账号能执行的系统共享位置，如 `/usr/local/bi
 
 ### A. 下载并构建
 
-在服务器终端执行。这里已固定为前文电脑端使用的同一版本，维护者无需另外选择提交。后续升级时统一更新电脑端和 Relay：
+在服务器终端执行。以下示例配套 Windows rc.2。为 Mac 部署时，将代码块中的 `git checkout --detach v0.1.0-rc.2` 换成 `git checkout --detach 9b6b358346ececc9fd96d777d38be14562f7e6e5`，与 Mac Host 一致。如果同机已有 Windows Relay，先将本节所有 `lightspeaker-rc2` 改为 `lightspeaker-mac-n9`，服务账号改为 `lightspeaker-relay-mac-n9`，并选择未占用的内部与 HTTPS 端口；后续步骤保持这些名称和端口一致。不要覆盖已有服务。
 
 ```sh
 test ! -e /opt/lightspeaker-rc2 || exit 1
