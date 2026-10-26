@@ -8,7 +8,7 @@
 - [配对驱动说明](../patches/cua-driver/n9/README.md#local-packaging-signing-and-permissions)：补可执行的源码准备、明确目标目录构建、App打包、签名和权限步骤；不依赖原开发者的App、用户名或私有路径。
 - [维护约定](../AGENTS.md#启动方式兼容约定)：后续启动相关代码改动必须保持入门步骤可用，必要变更与文档、迁移说明及验证一起更新。
 
-Mac流程固定公开代码 `bd1200ff176f9edfb00143881423bfd63e1b1e2e` 与公开N9 Driver源码链，不等于未发布的A71候选。Windows rc.2教程保持，Host/Relay配套版本明确分开。Mac普通启动保留默认layered Guard，主模型请求上限显式为100。
+Mac流程现固定 `9b6b358346ececc9fd96d777d38be14562f7e6e5` 与公开N9 Driver源码链。该提交包含完整打包说明，运行代码及依赖与 `bd1200ff176f9edfb00143881423bfd63e1b1e2e` 相同。A71 演示源码已另行公开为标签 `astra-a71-interactive-demo-20261026`，不属于这条安装路线。Windows rc.2教程保持，Host/Relay配套版本明确分开。Mac普通启动保留默认layered Guard，主模型请求上限显式为100。
 
 ## 本次核验
 

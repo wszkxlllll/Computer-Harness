@@ -1,0 +1,2 @@
+# Keep evidence artifacts byte-identical on every platform, including Windows.
+docs/evidence/**/report-original.txt -text

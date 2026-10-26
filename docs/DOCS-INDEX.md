@@ -4,7 +4,7 @@
 
 | 你想了解什么 | 阅读入口 |
 | --- | --- |
-| 安装配置并用手机连接电脑 | [开始使用](./getting-started.md)，Windows步骤集中在一处，Mac流程后续补齐 |
+| 安装配置并用手机连接电脑 | [开始使用](./getting-started.md)，集中说明 Windows 安装与 Mac 源码启动 |
 | 系统怎样运行和扩展 | [技术文档](./technical-guide.md) |
 | 反馈问题或参与开发 | [参与贡献](../CONTRIBUTING.md) |
 | 开发者复现实测修复版本 | [N9精确源码与配对说明](./releases/astra-n9-verified-2026-10-25.md)、[与main整合及核验](./releases/astra-n9-main-integration-2026-10-25.md)；历史真实测试与新整合版离线验证分列 |

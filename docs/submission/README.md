@@ -16,8 +16,8 @@
 
 当前两段视频已归档到 [`videos/`](./videos/README.md)：
 
-- [Computer—Harness 项目介绍](./videos/01-computer-harness-project-overview.mp4)：约4分30秒，包含 Windows 查车次与微信交付，以及产品介绍和开源贡献。
-- [Computer—Harness macOS 购物纠偏 Demo](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)：1分48秒，展示官网查询、用户根据执行情况及时纠偏、保存桌面报告。
+- [Lightspeaker 项目介绍](./videos/01-computer-harness-project-overview.mp4)：约4分30秒，包含 Windows 查车次与微信交付，以及产品介绍和开源贡献。
+- [Lightspeaker macOS 购物纠偏 Demo](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)：1分48秒，展示官网查询、用户根据执行情况及时纠偏、保存桌面报告。
 
 项目介绍视频为主展示材料，macOS Demo 为补充案例短片；两段分别对应技术报告5.4.1与5.4.2。原文件仅统一命名，内容未重剪。
 
