@@ -9,7 +9,7 @@
 | 反馈问题或参与开发 | [参与贡献](../CONTRIBUTING.md) |
 | 开发者复现实测修复版本 | [N9精确源码与配对说明](./releases/astra-n9-verified-2026-10-25.md)、[与main整合及核验](./releases/astra-n9-main-integration-2026-10-25.md)；历史真实测试与新整合版离线验证分列 |
 | 可以委托哪些生活任务 | [真实任务案例](./submission/real-task-cases.md) |
-| 审阅技术报告与比赛附件 | [作品提交材料](./submission/README.md) |
+| 审阅技术报告与比赛附件 | [作品提交材料](./submission/README.md)；[2026-10-24 审查与 Windows 验证记录](./history/2026-10-24-submission-review.md) |
 
 项目许可见[LICENSE](../LICENSE)，第三方说明见[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md)。
 
