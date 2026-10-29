@@ -1,0 +1,144 @@
+{
+  "date": "2026-10-30",
+  "project": "光语者 / Lightspeaker",
+  "team": "应光",
+  "teamId": "AIC-2026-88229444",
+  "evidenceBaseCommit": "e4556f62c0f2b9924a1fea213ad6486684c9ba6c",
+  "caseCount": 20,
+  "caseGroups": {
+    "政务办事": 3,
+    "就医准备": 3,
+    "购物售后": 4,
+    "出行票务": 3,
+    "生活缴费与社区服务": 3,
+    "通信与个人事务": 4
+  },
+  "technicalReportBodyPages": 15,
+  "files": [
+    {
+      "file": "technical-report.pdf",
+      "bytes": 6425799,
+      "sha256": "c8f5a76220fb3e0d4d3b2a0aeea018b5ef3beb8b3bd556983fe31c8ce3adcd7e",
+      "pages": 19
+    },
+    {
+      "file": "third-party-resources.pdf",
+      "bytes": 104619,
+      "sha256": "af6d0cbb2e9f6b9d79d74e58077dc6882ab843d3290b9d14e1f82153640ebd1f",
+      "pages": 1
+    },
+    {
+      "file": "supporting-evidence.pdf",
+      "bytes": 3514714,
+      "sha256": "095cfee2c74ee456f7924fe9d1de3ceb933fd0bb699e9bb49eabe2508d96ffdf",
+      "pages": 16
+    },
+    {
+      "file": "presentation.pdf",
+      "bytes": 1322726,
+      "sha256": "2f79ba9bb5f3cbed0a093fe0ffc3be89952483d4c5e580d580bfeb84bc0910a5",
+      "pages": 15
+    },
+    {
+      "file": "presentation.pptx",
+      "bytes": 9186466,
+      "sha256": "80b7b5f387b506cd52c01f648a27a11bdc75e8ebabb9e33dfe3aac470489579a"
+    }
+  ],
+  "videos": [
+    {
+      "role": "项目介绍主视频",
+      "file": "../videos/01-computer-harness-project-overview.mp4",
+      "sha256": "9d2c7dcb3624761f9b525e7d298ef167f7c5cfad59dfb7e84cf43173305ee13d",
+      "durationSeconds": 270.482479
+    },
+    {
+      "role": "macOS补充案例",
+      "file": "../videos/02-computer-harness-macos-shopping-correction-demo.mp4",
+      "sha256": "879a5fe525d7ecfbd3f1225c555c63f9ef4b22d3fbdd0d05bddae66dc9e3682d",
+      "durationSeconds": 108.0
+    },
+    {
+      "role": "PPT与PDF案例剪辑版",
+      "url": "https://47.108.197.221/demo/",
+      "sha256": "2de8682a3f556999c7befbece44603adb6d9fac91fd56dc2969ecbc3b3199289",
+      "durationSeconds": 163.854687
+    }
+  ],
+  "contributions": [
+    {
+      "url": "https://github.com/trycua/cua/pull/4500",
+      "status": "已合并"
+    },
+    {
+      "url": "https://github.com/trycua/cua/pull/5587",
+      "status": "接续4836并保留团队署名后合并"
+    },
+    {
+      "url": "https://github.com/openclaw/openclaw/pull/126399",
+      "status": "已合并"
+    },
+    {
+      "url": "https://github.com/openclaw/openclaw/pull/127177",
+      "status": "已合并"
+    },
+    {
+      "url": "https://github.com/Tongyi-MAI/OpenGCUA/issues/6",
+      "status": "已公开Windows设计及初步实验"
+    },
+    {
+      "url": "https://hub.xerj.org/contributors/betterGuo",
+      "status": "Computer-Harness源码收录，保留作者与许可"
+    }
+  ],
+  "sources": [
+    {
+      "file": "../README.md",
+      "sha256": "64a4346f3154bd69010822e2072f818fcd42e9e715682033b98b7f04fe72c36f"
+    },
+    {
+      "file": "../technical-report.md",
+      "sha256": "45fb798d941939852556c375a799ed8ee1bf7d173bb59874a0dbe274ced42eb5"
+    },
+    {
+      "file": "../supporting-evidence.md",
+      "sha256": "d7665b7201712fabacf7514374858e99386939e09c39b49c7953ee8ed2bf1671"
+    },
+    {
+      "file": "../third-party-resources.md",
+      "sha256": "9025dd93439a7201e9eb82ef30c8c08c8d4bcc82d1dae1bd1922b1a9fa41959a"
+    },
+    {
+      "file": "../real-task-cases.md",
+      "sha256": "7f9fdc440ac02c13608d4ad2c8424c2701417cc46b7828ab00e52370d1b5dffb"
+    },
+    {
+      "file": "../figures/fig04-task-domains.png",
+      "sha256": "77a4f72b5806aca412c3f3c7329033d54bdc623ce043b85f0ccadd238970c2c7"
+    },
+    {
+      "file": "../figures/README.md",
+      "sha256": "5864af23892d6e12d0de45d87150d32853a4a31da2418d4000d60213ceeaa5ee"
+    },
+    {
+      "file": "../figures/sources.json",
+      "sha256": "ea5d4ac99c46ba4bf1d96d1c5f7a46a5a5da5eb09e0d5dbf1956a943d0648dd5"
+    },
+    {
+      "file": "../latex/build.py",
+      "sha256": "b9e694f1ff46a42b076f3aef057bdf7fb0396cfd39b408b0f44b08c9122f5c14"
+    },
+    {
+      "file": "../latex/build-evidence.py",
+      "sha256": "5b5a8c52952b2b6f63d0f30c1a5af7e021e750b8e19ca4dc5cb8cbf56a0ba1cc"
+    },
+    {
+      "file": "../latex/preamble.tex",
+      "sha256": "550814a499f611a610f18e06222b78bdfd9e0a3027178f8c94ba9a36a63e3875"
+    },
+    {
+      "file": "../latex/cover.tex",
+      "sha256": "e318b752eee7480bc38b9c9083111367b8c4db3ab0824eb24885567095e45fb5"
+    }
+  ]
+}

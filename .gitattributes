@@ -3,3 +3,12 @@ docs/evidence/**/report-original.txt -text
 docs/evidence/windows-success-20261029/*.zip -text
 docs/evidence/windows-success-20261029/*.png -text
 patches/cua-driver/d114f35-macos-f018.patch -text
+
+# Keep the final submission sources and published file fingerprints portable.
+docs/submission/*.md text eol=lf
+docs/submission/**/*.md text eol=lf
+docs/submission/**/*.json text eol=lf
+docs/submission/latex/*.py text eol=lf
+docs/submission/latex/*.tex text eol=lf
+docs/submission/final/*.pdf -text
+docs/submission/final/*.pptx -text

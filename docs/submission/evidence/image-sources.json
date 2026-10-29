@@ -1,0 +1,50 @@
+[
+  {
+    "file": "cua-4500.png",
+    "sourceFile": "c09c007f0f36c2564aca99613c83f9a5.png",
+    "sourceSha256": "80dbdc00df0d0294511cc79e308c1c0a306b5444f8ee3841c5fbe5b4fe0b1453",
+    "cropXYXY": [
+      605,
+      435,
+      2265,
+      555
+    ],
+    "transformation": "Crop only; no content replacement",
+    "sourceDimensions": [
+      2556,
+      777
+    ]
+  },
+  {
+    "file": "cua-5587.png",
+    "sourceFile": "92f382a0691e65e03156fbb868a303fe.png",
+    "sourceSha256": "b0cf9a058396bed1edad6f2f9e10eed54658d065e863c6c2cd0a600fd0ba7c18",
+    "cropXYXY": [
+      420,
+      160,
+      2100,
+      850
+    ],
+    "transformation": "Crop only; no content replacement",
+    "sourceDimensions": [
+      2532,
+      1351
+    ]
+  },
+  {
+    "file": "openclaw-merged.png",
+    "sourceFile": "5e1aeac9413ef5b8d23938df4447df9d.png",
+    "sourceSha256": "061f0fa035cbcce93c6f7cebc792ac0bd0b3817da58c2fca1f5bde1316e62465",
+    "cropXYXY": [
+      605,
+      355,
+      2285,
+      570
+    ],
+    "transformation": "Crop only; no content replacement",
+    "sourceDimensions": [
+      2533,
+      730
+    ]
+  }
+]

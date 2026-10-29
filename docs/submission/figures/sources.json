@@ -2,26 +2,102 @@
   "description": "Report figure provenance; editorial metadata, not a required submission attachment.",
   "format": "Classic SVG and editable PPTX; generated academic alternatives; real recording crops",
   "generatedProductImagery": false,
-  "fig01-architecture": {"kind": "vector diagram", "source": "Report sections 2.2 and 4; runtime Computer contract and Host architecture"},
-  "fig02-execution-loop": {"kind": "vector flowchart", "source": "Report sections 4.3 to 4.5; observation, action receipt and user-control semantics"},
+  "fig01-architecture": {
+    "kind": "vector diagram",
+    "source": "Report sections 2.2 and 4; runtime Computer contract and Host architecture"
+  },
+  "fig02-execution-loop": {
+    "kind": "vector flowchart",
+    "source": "Report sections 4.3 to 4.5; observation, action receipt and user-control semantics"
+  },
   "fig03-mobile-interface": {
     "kind": "real recording crops",
     "panels": [
-      {"file": "66815afe16c9074f17f652bb89d0728a.mp4", "seconds": 4, "cropXYXY": [10,130,438,780]},
-      {"file": "3e611420c7876c087ec7580950035d9b.mp4", "seconds": 8, "cropXYXY": [15,130,577,1035]},
-      {"file": "3e611420c7876c087ec7580950035d9b.mp4", "seconds": 16, "cropXYXY": [15,145,577,1035]},
-      {"file": "3e611420c7876c087ec7580950035d9b.mp4", "seconds": 22, "cropXYXY": [15,145,577,1035]}
+      {
+        "file": "66815afe16c9074f17f652bb89d0728a.mp4",
+        "seconds": 4,
+        "cropXYXY": [
+          10,
+          130,
+          438,
+          780
+        ]
+      },
+      {
+        "file": "3e611420c7876c087ec7580950035d9b.mp4",
+        "seconds": 8,
+        "cropXYXY": [
+          15,
+          130,
+          577,
+          1035
+        ]
+      },
+      {
+        "file": "3e611420c7876c087ec7580950035d9b.mp4",
+        "seconds": 16,
+        "cropXYXY": [
+          15,
+          145,
+          577,
+          1035
+        ]
+      },
+      {
+        "file": "3e611420c7876c087ec7580950035d9b.mp4",
+        "seconds": 22,
+        "cropXYXY": [
+          15,
+          145,
+          577,
+          1035
+        ]
+      }
     ]
   },
-  "fig04-task-domains": {"kind": "AI-assisted category illustration", "source": "Six task domains and representative task cards", "isStatisticalResult": false, "file": "fig04-task-domains.png"},
+  "fig04-task-domains": {
+    "kind": "AI-assisted category illustration",
+    "source": "Six task domains and representative task cards",
+    "isStatisticalResult": false,
+    "file": "fig04-task-domains.png",
+    "revisionDate": "2026-10-30",
+    "revision": "Preserved the six-panel illustration; updated category subtitles to match published task cards: card usage and allowance tips; department locations; shopping comparison; rail and WeChat; electricity and gas; notices and plan editing."
+  },
   "fig05-crossapp-demo": {
     "kind": "real recording crops from the same Run",
     "run": "run-1792766077934-1526577e-0eb",
     "recordingDate": "2026-10-23",
     "panels": [
-      {"file": "desktop.mp4", "seconds": 145, "cropXYXY": [485,650,1710,1018]},
-      {"file": "66815afe16c9074f17f652bb89d0728a.mp4", "seconds": 210, "cropXYXY": [10,65,438,780]},
-      {"file": "desktop.mp4", "seconds": 270, "cropXYXY": [1030,290,2310,860]}
+      {
+        "file": "desktop.mp4",
+        "seconds": 145,
+        "cropXYXY": [
+          485,
+          650,
+          1710,
+          1018
+        ]
+      },
+      {
+        "file": "66815afe16c9074f17f652bb89d0728a.mp4",
+        "seconds": 210,
+        "cropXYXY": [
+          10,
+          65,
+          438,
+          780
+        ]
+      },
+      {
+        "file": "desktop.mp4",
+        "seconds": 270,
+        "cropXYXY": [
+          1030,
+          290,
+          2310,
+          860
+        ]
+      }
     ]
   },
   "fig06-shopping-correction-demo": {

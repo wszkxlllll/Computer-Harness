@@ -1,60 +1,31 @@
 # 提交材料与编辑入口
 
-本目录集中维护报告文字、资源附件、任务卡与插图。文字确认后再进行LaTeX排版。
+作品：**光语者——面向数字无障碍的桌面智能体**。团队：应光，编号：AIC-2026-88229444。本轮材料统一日期：2026年10月30日。
 
-## 文件用途
+## 提交文件
 
-| 文件 | 用途 |
-| --- | --- |
-| [技术报告](./technical-report.md) | 正式报告正文，最终导出PDF |
-| [第三方资源清单](./third-party-resources.md) | 随报告附后提交 |
-| [真实任务卡](./real-task-cases.md) | 按六类整理的任务卡，包含Demo及对应执行证据 |
-| [Windows政务与出行证据](../evidence/windows-success-20261029/README.md) | 六个通过任务的执行轨迹、截图与文档交付 |
-| [Windows医疗与缴费证据](../evidence/windows-medical-utilities-20261029/README.md) | 医院信息、微信交付、电价与燃气核对的执行轨迹及截图 |
-| [macOS购物及个人事务证据](../evidence/macos-shopping-personal-20261029/README.md) | 官网比较、预算更新、通知整理、微信交付及文稿修改核对 |
-| [插图预览](./figures/README.md) | 当前六张图与可编辑源文件 |
-| [商品查询与手机纠偏Demo](./interactive-shopping-demo-a71.md) | 技术报告5.4.2及图6的过程、证据与验收范围 |
-| [项目介绍与 Demo 视频](./videos/README.md) | 项目介绍（含 Windows 案例）与 macOS 购物纠偏 Demo |
-| 本文件 | 团队填写与上传时查阅，不作为报告附件 |
+| 文件 | 用途 | 可编辑文字 |
+| --- | --- | --- |
+| [技术报告PDF](./final/technical-report.pdf) | 正文15页，附参考资料及资源清单 | [报告正文](./technical-report.md) |
+| [开源及第三方资源清单PDF](./final/third-party-resources.pdf) | 独立资源附件，也已附在技术报告末尾 | [资源清单](./third-party-resources.md) |
+| [佐证材料PDF](./final/supporting-evidence.pdf) | 开源贡献、双平台案例、场景交付与完整任务卡 | [佐证正文](./supporting-evidence.md) · [任务卡](./real-task-cases.md) |
+| [演示文稿PDF](./final/presentation.pdf) | 案例页附可点击的双平台剪辑视频，备答页附公开证据 | [可编辑PPT](./final/presentation.pptx) |
+| [项目介绍视频](./videos/01-computer-harness-project-overview.mp4) | 4分30秒，包含产品、Windows跨应用演示与开源贡献 | [视频来源与指纹](./videos/sources.json) |
 
-当前两段视频已归档到 [`videos/`](./videos/README.md)：
+[macOS补充演示](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)为1分48秒。[双平台剪辑版](https://47.108.197.221/demo/)为2分44秒，供演示文稿案例页点击观看。视频保持原有成片，不将不同任务的录屏拼作同一次执行。
 
-- [Lightspeaker 项目介绍](./videos/01-computer-harness-project-overview.mp4)：约4分30秒，包含 Windows 查车次与微信交付，以及产品介绍和开源贡献。
-- [Lightspeaker macOS 购物纠偏 Demo](./videos/02-computer-harness-macos-shopping-correction-demo.mp4)：1分48秒，展示官网查询、用户根据执行情况及时纠偏、保存桌面报告。
+## 证据与版本
 
-项目介绍视频为主展示材料，macOS Demo 为补充案例短片；两段分别对应技术报告5.4.1与5.4.2。原文件仅统一命名，内容未重剪。
+六类场景已发布20项通过任务记录，完整题面、纠正、重试及审批说明见[任务卡](./real-task-cases.md)。三个证据目录分别包含轨迹、最终画面和交付核验记录：
 
-## 平台填写
+- [Windows政务与出行](../evidence/windows-success-20261029/README.md)：6项。
+- [Windows就医与缴费](../evidence/windows-medical-utilities-20261029/README.md)：6项。
+- [macOS购物与个人事务](../evidence/macos-shopping-personal-20261029/README.md)：8项，文稿题附实际文本。
 
-**作品名称：** Lightspeaker
+报告保留场景与机制概述；逐任务记录和证据链接集中在佐证材料。各任务的运行配置保存在包内，20项证据汇总基于[源码与材料提交e4556f6](https://github.com/wszkxlllll/Computer-Harness/tree/e4556f6)。最终文件的SHA-256、视频对应关系和开源贡献状态见[版本清单](./final/manifest.json)。
 
-**主方向：** 开源赋能的AI应用创新
+## 上传时核对
 
-**融合特色：** 开源项目改进与生态贡献
+主方向为“开源赋能的AI应用创新”，融合“开源项目改进与生态贡献”。报告已填写团队名称与编号，详细分工链接位于第四章。报告PDF小于10MB，主视频为3—5分钟MP4；演示文稿按平台对应上传项使用。
 
-**作品简介：**
-
-Lightspeaker面向老年人、低数字素养用户及普通使用者，让用户通过手机文字或语音委托自己的电脑完成真实网站与桌面应用中的任务。团队基于开源CUA自主构建Computer Harness，结合规划、上下文、任务记忆、执行核对、风险审批和用户纠正，支持跨应用任务连续推进，并提供大字、系统读屏适配和个性化设置。项目围绕六类生活场景开展真实任务测试，完成携程查询后经手机审批发送微信的双端演示，代码采用Apache-2.0开放，并通过问题复现、测试和PR参与CUA及OpenClaw社区建设。
-
-**成果链接：** [项目仓库](https://github.com/wszkxlllll/Computer-Harness)
-
-**使用说明：** [开始使用](https://github.com/wszkxlllll/Computer-Harness/blob/main/docs/getting-started.md)
-
-## 还需填写或确认
-
-- 团队名称、编号与三名成员的实际分工。
-- 两张技术图的最终选版及报告排版。
-- 最终代码版本、实际CUA来源、依赖许可与素材授权记录。
-- 报名平台信息、成员授权及提交文件。
-- 仓库已公开；提交前确认成果链接与最终版本一致。
-
-## 提交规格
-
-依据官方[赛程通知](https://www.aicomp.cn/notice/notice-3/5435.html)和[赛题要求](https://www.aicomp.cn/tracks/tracks-5/4924.html)，本轮核对日期为2026年10月24日。
-
-- 报名、缴费及初赛作品提交截止：2026年10月30日20:00。
-- 技术报告：PDF不超过10MB，正文建议15页以内，第三方资源清单作为附件。
-- 演示视频：MP4，3—5分钟，不超过300MB。
-- 平台作品名称不超过20字，简介不超过300字。
-- 材料不出现学校名称、校徽、指导教师信息及访问凭据。
-- 答辩PPT按晋级通知准备，目前不作为初赛必交文件。
+提交截止为2026年10月30日20:00，依据[官方赛程通知](https://www.aicomp.cn/notice/notice-3/5435.html)；文件规格以[赛题要求及附件](https://www.aicomp.cn/tracks/tracks-5/4924.html)和报名平台为准。最后核对报名信息、成员授权及实际上传文件即可。

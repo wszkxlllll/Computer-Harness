@@ -1,0 +1,41 @@
+\documentclass[UTF8,a4paper,12pt,fontset=none]{ctexart}
+\usepackage[left=25mm,right=25mm,top=24mm,bottom=24mm,headheight=15pt]{geometry}
+\usepackage{fontspec}
+\IfFontExistsTF{SimSun}{\setCJKmainfont{SimSun}[AutoFakeBold=2.0]\setCJKsansfont{SimHei}[AutoFakeBold=1.5]}{\setCJKmainfont{FandolSong-Regular}[BoldFont=FandolSong-Bold]\setCJKsansfont{FandolHei-Regular}}
+\IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{\setmainfont{TeX Gyre Termes}}
+\usepackage{graphicx,float,caption,booktabs,array,longtable,pdflscape,enumitem,needspace,fancyhdr,xurl}
+\usepackage{amsmath}
+\usepackage{algpseudocode}
+\usepackage[section]{placeins}
+\usepackage{xcolor}
+\usepackage[normalem]{ulem}
+\definecolor{documentlink}{HTML}{145DA0}
+\usepackage[colorlinks=true,urlcolor=documentlink,linkcolor=black,unicode,pdfencoding=auto]{hyperref}
+\hypersetup{pdftitle={光语者——面向数字无障碍的桌面智能体},pdfauthor={},pdfsubject={AI+开源}}
+\IfFontExistsTF{SimSun}{\setCJKmonofont{SimSun}}{\setCJKmonofont{FandolFang-Regular}}
+\graphicspath{{figures/}}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{3pt}
+\linespread{1.28}
+\setlength{\emergencystretch}{2em}
+\ctexset{section={format=\Large\sffamily\bfseries,beforeskip=17pt,afterskip=10pt},subsection={format=\large\sffamily\bfseries,beforeskip=12pt,afterskip=6pt},subsubsection={format=\normalsize\sffamily\bfseries,beforeskip=10pt,afterskip=5pt}}
+\captionsetup{font=small,labelformat=empty,justification=justified,singlelinecheck=false,skip=7pt}
+\setlength{\textfloatsep}{14pt plus 2pt minus 2pt}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.85}
+\renewcommand{\textfraction}{0.06}
+\renewcommand{\floatpagefraction}{0.9}
+\algrenewcommand\algorithmicrequire{\textbf{输入：}}
+\algrenewcommand\algorithmicensure{\textbf{输出：}}
+\setlist{nosep,leftmargin=2em}
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\small Lightspeaker}\fancyhead[R]{\small AI+开源 · 技术报告}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.35pt}
+\raggedbottom
+\clubpenalty=10000
+\widowpenalty=10000
+\displaywidowpenalty=10000
+\newcommand{\mainsection}[1]{\section*{#1}\addcontentsline{toc}{section}{#1}}
+\newcommand{\subheading}[1]{\subsection*{#1}\addcontentsline{toc}{subsection}{#1}}
+\newcommand{\minorheading}[1]{\subsubsection*{#1}}

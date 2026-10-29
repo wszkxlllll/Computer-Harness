@@ -85,7 +85,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\mobile.ps1 -Co
 
 演示用于呈现完整使用流程；研发记录用于追踪问题与迭代，不用零散样本替代产品整体表现。
 
-[了解真实生活任务案例](./docs/submission/real-task-cases.md)。
+已公开六类场景20项通过任务的轨迹、最终画面与交付记录，覆盖Windows与macOS。[查看任务卡](./docs/submission/real-task-cases.md) · [查看案例与证据](./docs/submission/supporting-evidence.md) · [提交材料](./docs/submission/README.md)。
 
 <!-- 正式Demo及后续有统一口径的场景成果图；没有成稿不填占位数字、虚构评价或客户Logo。 -->
 
