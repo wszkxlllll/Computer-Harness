@@ -8,7 +8,7 @@
 | --- | --- |
 | [技术报告](./technical-report.md) | 正式报告正文，最终导出PDF |
 | [第三方资源清单](./third-party-resources.md) | 随报告附后提交 |
-| [真实任务卡](./real-task-cases.md) | 后期明确题面的28张任务卡，按六类整理，包含Demo |
+| [真实任务卡](./real-task-cases.md) | 按六类整理的任务卡，包含Demo及对应执行证据 |
 | [Windows政务与出行证据](../evidence/windows-success-20261029/README.md) | 六个通过任务的执行轨迹、截图与文档交付 |
 | [Windows医疗与缴费证据](../evidence/windows-medical-utilities-20261029/README.md) | 医院信息、微信交付、电价与燃气核对的执行轨迹及截图 |
 | [插图预览](./figures/README.md) | 当前六张图与可编辑源文件 |
