@@ -11,6 +11,7 @@
 | [真实任务卡](./real-task-cases.md) | 按六类整理的任务卡，包含Demo及对应执行证据 |
 | [Windows政务与出行证据](../evidence/windows-success-20261029/README.md) | 六个通过任务的执行轨迹、截图与文档交付 |
 | [Windows医疗与缴费证据](../evidence/windows-medical-utilities-20261029/README.md) | 医院信息、微信交付、电价与燃气核对的执行轨迹及截图 |
+| [macOS购物及个人事务证据](../evidence/macos-shopping-personal-20261029/README.md) | 官网比较、预算更新、通知整理、微信交付及文稿修改核对 |
 | [插图预览](./figures/README.md) | 当前六张图与可编辑源文件 |
 | [商品查询与手机纠偏Demo](./interactive-shopping-demo-a71.md) | 技术报告5.4.2及图6的过程、证据与验收范围 |
 | [项目介绍与 Demo 视频](./videos/README.md) | 项目介绍（含 Windows 案例）与 macOS 购物纠偏 Demo |

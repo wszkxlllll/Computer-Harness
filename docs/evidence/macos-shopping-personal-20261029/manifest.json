@@ -1,0 +1,248 @@
+{
+  "date": "2026-10-29",
+  "execution": "用户 Harness；macOS全桌面；正常本机Web控制台；GLM glm-5.3-flash high；默认layered Guard、riskModel off；Harness纠正与逐项审批。",
+  "cases": [
+    {
+      "id": "S01",
+      "cardId": "S01",
+      "taskId": "S1-D1-A2",
+      "title": "两款音箱比较并保存建议",
+      "status": "passed",
+      "runId": "run-1793254634929-0a608b45-9a8",
+      "modelRequests": 14,
+      "guiActions": 9,
+      "corrections": 0,
+      "approvals": 1,
+      "archive": "S01.zip",
+      "finalScreenshot": "S01-final.png",
+      "checks": [
+        "两款型号、1099元和2699元的单台全款价格与官网一致",
+        "价差1600元、各一项特点及小房间推荐理由正确",
+        "文稿附官网来源与查询日期，实际保存并保持打开"
+      ],
+      "sources": [
+        "https://www.apple.com.cn/shop/buy-homepod/homepod"
+      ],
+      "artifact": {
+        "originalName": "Astra-S1-D1-A2-20261029.txt",
+        "archivePath": "artifact.txt",
+        "bytes": 541,
+        "sha256": "906df8a9029f8f1bd73d86becf68587001a08ac1de2bc0603a402a52e10ecc8d"
+      },
+      "sha256": "5b1f7cf8bf1c9a1068d917e3d0877fd5fa990d25148b933e176520780485cda4",
+      "bytes": 1384256
+    },
+    {
+      "id": "S02",
+      "cardId": "S02",
+      "taskId": "S2-R1",
+      "title": "按预算选择音箱",
+      "status": "passed",
+      "runId": "run-1793255049853-085c50dd-d5e",
+      "modelRequests": 15,
+      "guiActions": 9,
+      "corrections": 1,
+      "approvals": 2,
+      "archive": "S02.zip",
+      "finalScreenshot": "S02-final.png",
+      "checks": [
+        "按1500元预算核对两款价格及是否超预算",
+        "推荐1099元型号，两条依据与页面一致",
+        "经Harness补充要求后完成文稿，来源、日期及保存结果正确"
+      ],
+      "sources": [
+        "https://www.apple.com.cn/shop/buy-homepod/homepod"
+      ],
+      "artifact": {
+        "originalName": "Astra-S2-R1-20261029.txt",
+        "archivePath": "artifact.txt",
+        "bytes": 810,
+        "sha256": "4b6c09f2ec79f279ebbeae4c247acf14f7c396e230a0fe0340c63cdab8e49434"
+      },
+      "sha256": "65102021d9a7b9d039a7c1bf93f24a14f89db1207205b3c48864f94ecfab32b7",
+      "bytes": 1515234
+    },
+    {
+      "id": "S03",
+      "cardId": "S03",
+      "taskId": "S3-D1-L1-A1",
+      "title": "官网退货期限与退款说明",
+      "status": "passed",
+      "runId": "run-1793274940819-ff92020e-2ca",
+      "modelRequests": 15,
+      "guiActions": 14,
+      "corrections": 0,
+      "approvals": 0,
+      "archive": "S03.zip",
+      "finalScreenshot": "S03-final.png",
+      "checks": [
+        "符合条件商品的退货申请期限及交付起算点准确",
+        "退款到账差异原因保留适用条件",
+        "简短备忘附来源、日期，实际保存并保持打开"
+      ],
+      "sources": [
+        "https://www.apple.com.cn/shop/help/returns_refund"
+      ],
+      "artifact": {
+        "originalName": "Astra-S3-D1-L1-A1-20261029",
+        "archivePath": "artifact.txt",
+        "bytes": 324,
+        "sha256": "475e31d8470ad65ed2c4605246e3c7e4400d12c175140450d45d0ebab75259ae"
+      },
+      "sha256": "583fe4cb63e2c8dc4a751ad93535ac1c4fce0f19eb64fee0441e71fedc6fe853",
+      "bytes": 1732959
+    },
+    {
+      "id": "S04",
+      "cardId": "S04",
+      "taskId": "S4-L1-A1",
+      "title": "更改预算后更新购物建议",
+      "status": "passed",
+      "runId": "run-1793266852125-a5661eeb-854",
+      "modelRequests": 14,
+      "guiActions": 10,
+      "corrections": 1,
+      "approvals": 3,
+      "archive": "S04.zip",
+      "finalScreenshot": "S04-final.png",
+      "checks": [
+        "通过Harness将预算从3000元更新为1500元",
+        "交付报告采用新预算并推荐1099元型号",
+        "比较价格和特点，附来源日期，实际保存并保持打开"
+      ],
+      "sources": [
+        "https://www.apple.com.cn/shop/buy-homepod/homepod"
+      ],
+      "artifact": {
+        "originalName": "Astra-S4-L1-A1-20261029",
+        "archivePath": "artifact.txt",
+        "bytes": 829,
+        "sha256": "db2d0609d6b8d15291f30ba623853bd477d2f345ae798566ae73f98972914575"
+      },
+      "sha256": "fed4f240a2624a2c40af9558ee2ec247cad729b9ccc5ef3dbe48a869ea1c1c46",
+      "bytes": 1833742
+    },
+    {
+      "id": "CM01",
+      "cardId": "CM01",
+      "taskId": "P1-R1",
+      "title": "通知整理为待办",
+      "status": "passed",
+      "runId": "run-1793252583084-ff252aa6-63a",
+      "modelRequests": 12,
+      "guiActions": 8,
+      "corrections": 0,
+      "approvals": 1,
+      "archive": "CM01.zip",
+      "finalScreenshot": "CM01-final.png",
+      "checks": [
+        "活动日期、14:00至15:30时段及203地点准确",
+        "报名截止、书及笔记本和待办完整",
+        "合成通知在真实文本编辑中整理并保存，未实际报名或发送"
+      ],
+      "sources": [],
+      "artifact": {
+        "originalName": "Astra-P1-R1-20261029.txt",
+        "archivePath": "artifact.txt",
+        "bytes": 408,
+        "sha256": "1e31906c919e6874d3e76d325d4adc98beb5b14d8ae05564f8386440defb8a14"
+      },
+      "sha256": "b570bd7fa7e2768d3783f2a00e549238e3dc0919f3cd1510a00deeecb8d40bb3",
+      "bytes": 219690
+    },
+    {
+      "id": "CM02",
+      "cardId": "CM02",
+      "taskId": "P2-R2",
+      "title": "两项安排消除时间冲突",
+      "status": "passed",
+      "runId": "run-1793256218158-5a9ff510-f1e",
+      "modelRequests": 9,
+      "guiActions": 6,
+      "corrections": 0,
+      "approvals": 1,
+      "archive": "CM02.zip",
+      "finalScreenshot": "CM02-final.png",
+      "checks": [
+        "识别15:00至15:30的时间重叠",
+        "固定读书会不变，将照片整理调整为16:00至17:00",
+        "新计划与实际题面一致，纯文本文件已保存并保持打开"
+      ],
+      "sources": [],
+      "artifact": {
+        "originalName": "Astra-P2-R2-20261029",
+        "archivePath": "artifact.txt",
+        "bytes": 403,
+        "sha256": "ad71e8556c75538114489e560551261c7945cb4bfb228bfeb803a503a149b76e"
+      },
+      "sha256": "c9074b644e305d377c093e0e7ee8a1f12afcbad1c819334cd7ab52f13db52ecb",
+      "bytes": 1393801
+    },
+    {
+      "id": "CM03",
+      "cardId": "CM03",
+      "taskId": "P3-L1-A1",
+      "title": "通知摘要发送给自己",
+      "status": "passed",
+      "runId": "run-1793279983557-a92c367b-138",
+      "modelRequests": 19,
+      "guiActions": 13,
+      "corrections": 0,
+      "approvals": 5,
+      "archive": "CM03.zip",
+      "finalScreenshot": "CM03-final.png",
+      "checks": [
+        "活动、时间地点、截止和携带物与通知一致",
+        "本人确认115字符完整稿后，模型向文件传输助手发送一次",
+        "最终气泡带P3-L1-A1标记，输入框清空且发送状态完成"
+      ],
+      "sources": [],
+      "delivery": {
+        "kind": "wechat_message",
+        "recipient": "文件传输助手",
+        "sendCount": 1,
+        "characters": 115,
+        "textSha256": "6a8b211c153af8feb330ce5d9456b4d9f78ab3656ae5f012854f4b1b14c8250f",
+        "textTranscript": "sent-message.txt",
+        "humanConfirmationRelayCount": 1
+      },
+      "sha256": "0dee805afc645ba64ba27bb2c1611846bebd0b0ad3a376b7b6c38823024760f7",
+      "bytes": 246012
+    },
+    {
+      "id": "CM04",
+      "cardId": "CM04",
+      "taskId": "P4-D1-L1-A1",
+      "title": "修改计划并保存重开",
+      "status": "passed",
+      "runId": "run-1793272461556-9127ecff-602",
+      "modelRequests": 49,
+      "guiActions": 34,
+      "corrections": 2,
+      "approvals": 2,
+      "archive": "CM04.zip",
+      "finalScreenshot": "CM04-final.png",
+      "checks": [
+        "起点为预先准备的计划副本，模型修改并保存当前副本",
+        "地点更新为205、笔记本改水杯，两项日期时间和安排保留",
+        "目标副本关闭后重新打开，三条正文正确且原稿指纹未变"
+      ],
+      "sources": [],
+      "artifact": {
+        "originalName": "Astra-P4-D1-L1-A1-20261029.txt",
+        "archivePath": "artifact.txt",
+        "bytes": 163,
+        "sha256": "dc5b4eaf6d04459475e27ffc2c22a69f9ad85e0f408b40eb8e19706f9e97f95c"
+      },
+      "originalInput": {
+        "archivePath": "input-original.txt",
+        "bytes": 191,
+        "sha256Before": "88d67e0104bbbf0be86b768be3d34e3eaa86c1c86bcaed23ba42a13652a3278b",
+        "sha256After": "88d67e0104bbbf0be86b768be3d34e3eaa86c1c86bcaed23ba42a13652a3278b",
+        "preparedCopyBeforeRun": true
+      },
+      "sha256": "675fe4b9f343c07b5f1888088f0c7314294a87cf5fb0cc685d6d59e4ad651b62",
+      "bytes": 383571
+    }
+  ]
+}
