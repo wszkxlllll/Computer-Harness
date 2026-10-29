@@ -328,18 +328,6 @@ test("manifest fixture contains nine identified tasks and no answer key is proje
   assert.match(t03.checks.find((item) => item.id === "consumer").description, /分别人工核验文件与投递，不自动判分/u);
   assert.match(t03.checks.find((item) => item.id === "constraints").description, /只向指定微信会话发送这一个DOCX/u);
   assert.doesNotMatch(`${t03.title} ${t03.sourceLineage}`, /银行|电话预约/u);
-  const taskCards = await readFile(join(ROOT, "docs", "history", "2026-10-20-product-docs", "life-business-task-cards-2026-10-15.md"), "utf8");
-  const extractT03TaskCardGoal = (markdown) => {
-    const lfMarkdown = markdown.replace(/\r\n?/gu, "\n");
-    const t03Section = lfMarkdown.match(/## T03 ·[\s\S]*?(?=\n## |$)/u)?.[0];
-    return t03Section?.match(/### 给Agent的完整需求\n\n```text\n([\s\S]*?)\n```/u)?.[1];
-  };
-  const normalizedTaskCards = taskCards.replace(/\r\n?/gu, "\n");
-  const taskCardGoalFromLf = extractT03TaskCardGoal(normalizedTaskCards);
-  const taskCardGoalFromCrlf = extractT03TaskCardGoal(normalizedTaskCards.replace(/\n/gu, "\r\n"));
-  assert.equal(taskCardGoalFromLf, t03.goal, "LF T03 task card Goal must match the manifest exactly");
-  assert.equal(taskCardGoalFromCrlf, t03.goal, "CRLF T03 task card Goal must match the manifest exactly");
-  assert.equal(taskCardGoalFromCrlf, taskCardGoalFromLf, "T03 task card Goal extraction must be newline-invariant");
   for (const taskId of ["T02", "M02"]) {
     const task = manifest.tasks.find((candidate) => candidate.id === taskId);
     assert.deepEqual(task.requiredApps, ["managed-browser"]);
@@ -350,13 +338,6 @@ test("manifest fixture contains nine identified tasks and no answer key is proje
   const inputsDir = join(ROOT, "eval", SUITE_ID, "inputs");
   const activeInputNames = await pathExists(inputsDir) ? (await readdir(inputsDir)).sort() : [];
   assert.deepEqual(activeInputNames, []);
-  const v0InputNames = (await readdir(join(ROOT, "eval", SUITE_ID, "history", "v0-inputs"))).sort();
-  assert.deepEqual(v0InputNames, [
-    "G01-准备清单.txt", "G02-签注准备页.txt", "T01-杭州出行备忘.txt", "T02-铁路规则对照.txt",
-    "M01-来院便条.txt", "M02-就诊准备.txt", "M03-来院资料.txt",
-  ].sort());
-  const v1InputNames = (await readdir(join(ROOT, "eval", SUITE_ID, "history", "v1-inputs"))).sort();
-  assert.deepEqual(v1InputNames, ["G03-长者办事资料.txt", "T03-南京出行资料.txt"].sort());
   for (const category of ["government", "travel", "medical"]) {
     assert.deepEqual(manifest.tasks.filter((task) => task.category === category).map((task) => task.difficulty), ["easy", "medium", "hard"]);
   }

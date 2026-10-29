@@ -63,7 +63,6 @@ M03/CP03必须传入`--output-file`，值为本Run新目录内尚不存在的Win
 
 计划冻结配置在两份manifest的`runtimeConfiguration`：preview提交`d4eae01a1f27b6c73e2bee64b57e769d39894954`；evaluator工具提交`1f57852879b53618029c24afedb1b5db0a786fe6`；Node24.21.0、pnpm11.19.0、既有CUA候选7852ab1/contract0.7.0、foreground-caret-v1、GLM-5.3-Flash low、hybrid grounding、layered Guard。**它们是所选计划，不是Windows已同步/构建证明。** 修改配置应重新冻结受影响实例并保留旧证据。
 
-**10-12代码与预检更新另见[Windows修复/续验记录](../../../docs/history/2026-10-20-product-docs/member-c-results-2026-10-11/windows-preflight-2026-10-12.md)。** 两份原manifest与Goal保持原字节；Windows候选已加入CP02期限修复，不是纯d4eae01，不能把本次公开来源核对或发布授权当作重新冻结/正式Run放行。GLM在筹备读取后已暂停，尚无新请求或Run；来源/日期必须在恢复运行时再核。
 
 后续运行前必须：
 
@@ -80,14 +79,12 @@ M03/CP03必须传入`--output-file`，值为本Run新目录内尚不存在的Win
 - 独立十进制定价核算：合成v1为68.55元、与账面69.00相差0.45；v2为112.90元，金额吻合仍不能覆盖A/B区地址冲突；350/500年度阶梯边界核算通过。
 - 上述是原作者报告的公开入口与合同消费冒烟，不是本PR新验证，也不是模型完成12题、真人评分、Windows Harness或业务成功证明。原结果与来源hash保留在verification.json；其中历史passed不适用于发布版新字节。
 
-本次发布另从仓库相对路径实际消费12个Goal展开与7个无效输入，核对公开锁、来源关系和相对链接，结果见[发布消费验证](../../../docs/history/2026-10-20-product-docs/member-c-results-2026-10-11/publication-verification.json)。这是实例准备与附件消费，不重新访问业务网页或运行Windows/CUA/模型；不能与上述历史调用累计成业务样本。另以缺失时区数据的隔离环境确认工具启动会报ZoneInfoNotFoundError，环境前提已在使用说明列明，未修改工具或安装依赖。
 
 ## 发布包来源与边界
 
 - 两份manifest及其中具体Goal、两域任务卡、合成输入、实例工具和9张截图保持原bytes；合同新ID、各3族×2变体、开发v1/留出v2、安全停止点及reset/cleanup未变。工具没有绑定本机路径，保持原样。
 - 发布前逐张实际查看9张截图：均为官方公开网页内容，未见贡献者凭据、帐号、私人桌面或私人浏览器界面。南网登录页输入为空；114二维码属于公开公众号入口；医院科室页含官网公开宣传图片及其中的图像注释，不作为患者资料或本Run医疗证据。每张截图的来源URL、观察标识和隐私查看记录见entry-evidence.json。
 - README改为仓库相对路径与PR发布说明；证据索引移除本机浏览器执行路径、内部profile名称与agent标识；操作者真值说明去掉内部协作角色名称。发布版字节不同，但无任务合同或Goal语义改动。freeze-lock.json独立锁定发布文件，并保留原冻结manifest hash及私有原包来源hash；原锁/原verification只作来源标记，不伪造缺失链接。
-- Windows阶段历史见[10-11预检记录](../../../docs/history/2026-10-20-product-docs/member-c-results-2026-10-11/windows-preflight.md)，最新见[10-12生产修复与来源/初态续核](../../../docs/history/2026-10-20-product-docs/member-c-results-2026-10-11/windows-preflight-2026-10-12.md)，合并发布入口见[总体说明](../../../docs/history/2026-10-20-product-docs/member-c-results-2026-10-11/README.md)。六项来源/新输出初态已核，不等于模型任务、人审评分或D02；修复版本仍须重新冻结，GLM已暂停。本目录不复制Windows同步/桥、付费runner、配置或原始运行日志，任何本机操作边界都不构成团队跳过环境核验的政策。
 - 官网截图仅用于来源与界面验收，权利归原运营主体；不声称本仓库Apache-2.0许可证覆盖这些官网素材。运营主体与已记录来源URL见entry-evidence.json；国网落地页原包未记录URL，保留来源缺项，不补造可点击来源。
 
 ## 后续验收，不属于本次成果

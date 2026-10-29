@@ -1,2 +1,5 @@
 # Keep evidence artifacts byte-identical on every platform, including Windows.
 docs/evidence/**/report-original.txt -text
+docs/evidence/windows-success-20261029/*.zip -text
+docs/evidence/windows-success-20261029/*.png -text
+patches/cua-driver/d114f35-macos-f018.patch -text

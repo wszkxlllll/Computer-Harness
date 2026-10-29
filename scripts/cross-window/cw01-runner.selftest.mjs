@@ -24,7 +24,7 @@ test("CLI is inert without both live and root GO flags", () => {
 });
 
 test("real CW01 card extracts the full goal and substitutes only the designated output path", async () => {
-  const taskCard = await readFile(resolve(repoRoot, "docs/history/2026-10-20-product-docs/cross-window-life-task-cards-2026-10-02.md"), "utf8");
+  const taskCard = await readFile(resolve(repoRoot, "eval/cross-window/task-cards.md"), "utf8");
   const goal = extractCw01Goal(taskCard, "E:\\MyDesktop\\output\\CW01-活动备忘录.txt");
   assert.match(goal, /WPS《CW01-社区通知》/u);
   assert.match(goal, /空白记事本/u);

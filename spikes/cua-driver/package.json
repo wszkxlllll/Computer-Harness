@@ -16,8 +16,8 @@
     "probe:uia:grounding:production": "tsx uia-grounding-production-probe.ts",
     "probe:runtime": "tsx runtime-contract-probe.ts",
     "run:stage4-task": "tsx stage4-local-runner.ts",
-    "test:stage4-runner": "tsx ../../scripts/history/2026-10-24/stage4-local/runner-contract-check.ts",
-    "test:stage4-runner-lifecycle": "node ../../scripts/history/2026-10-24/stage4-local/runner-lifecycle-check.mjs",
+    "test:stage4-runner": "tsx ../../scripts/validation/stage4-local/runner-contract-check.ts",
+    "test:stage4-runner-lifecycle": "node ../../scripts/validation/stage4-local/runner-lifecycle-check.mjs",
     "probe:api": "tsx --tsconfig tsconfig.json ../../scripts/api-conformance.ts"
   },
   "dependencies": {

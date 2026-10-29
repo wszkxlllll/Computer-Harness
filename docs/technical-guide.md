@@ -81,5 +81,3 @@ Web提供目标、状态、截图、审批、暂停/恢复/停止及纠正。配
 `createRunFactory`与`RunDependencies`提供Provider、Computer、Context、Planning、Memory和Policy等工厂接缝。外部实现必须遵守已有事件、状态、生命周期和清理合同；没有工厂时不静默回落默认实现。当前不要求动态加载插件或运行中热切换。
 
 每个新字段必须有生产者、消费者、更新/失效和清理规则。不能把GUI副作用伪装成普通side工具绕过ActionPolicy。模块替换须覆盖关闭态、组合态、跨Run隔离和失败清理；CI运行离线合同，真实API和桌面动作另行授权。
-
-更细的历史合同、实现审查和版本化证据保留在[历史资料](./history/README.md)，不作为用户安装的必读材料。

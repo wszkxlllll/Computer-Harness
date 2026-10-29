@@ -12,7 +12,7 @@ import { createShanghaiPilotRuntimePolicy, SHANGHAI_PILOT_POLICY_ID } from "./sh
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MANIFEST_PATH = resolve(REPO_ROOT, "eval/shanghai-pilot/manifest.json");
-const TASK_DOC_PATH = resolve(REPO_ROOT, "docs/history/2026-10-20-product-docs/shanghai-government-travel-pilot-2026-10-01.md");
+const TASK_DOC_PATH = resolve(REPO_ROOT, "eval/shanghai-pilot/task-cards.md");
 const CONFIG_PATH = resolve(REPO_ROOT, ".harness.local.psd1");
 const APP_RUNTIME_DIST_PATH = resolve(REPO_ROOT, "packages/app-runtime/dist/index.js");
 const RUNTIME_DIST_PATH = resolve(REPO_ROOT, "packages/runtime/dist/index.js");
@@ -331,7 +331,7 @@ async function main() {
     runSuffix: runSuffix ?? null,
     queryDateBasis,
     entryMode: "non_interactive_app_runtime_sdk",
-    goalSource: "docs/history/2026-10-20-product-docs/shanghai-government-travel-pilot-2026-10-01.md",
+    goalSource: "eval/shanghai-pilot/task-cards.md",
     startupUrl: task.startupUrl,
     goalSha256: sha256(Buffer.from(goal, "utf8")),
     nodeRuntime,
@@ -401,7 +401,7 @@ async function main() {
       attempt,
       runSuffix: runSuffix ?? null,
       queryDateBasis,
-      goalSourceDocument: `docs/history/2026-10-20-product-docs/shanghai-government-travel-pilot-2026-10-01.md#${taskId}`,
+      goalSourceDocument: `eval/shanghai-pilot/task-cards.md#${taskId}`,
       startupUrl: task.startupUrl,
       requestedConfig,
       runtimePolicy: SHANGHAI_PILOT_POLICY_ID,

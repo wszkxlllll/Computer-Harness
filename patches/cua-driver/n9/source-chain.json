@@ -48,7 +48,7 @@
     },
     {
       "order": 8,
-      "path": "docs/history/2026-10-20-product-docs/a-line-sync/diagnostics/F-20261007-018/native.patch",
+      "path": "patches/cua-driver/d114f35-macos-f018.patch",
       "sha256": "6e3dd9cf25423abdd77e943cb7c77e577067f181ce07d0d6a3d86b207885f109",
       "availableAtMain": true,
       "alternatePaths": [

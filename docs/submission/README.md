@@ -9,6 +9,7 @@
 | [技术报告](./technical-report.md) | 正式报告正文，最终导出PDF |
 | [第三方资源清单](./third-party-resources.md) | 随报告附后提交 |
 | [真实任务卡](./real-task-cases.md) | 后期明确题面的28张任务卡，按六类整理，包含Demo |
+| [Windows政务与出行证据](../evidence/windows-success-20261029/README.md) | 六个通过任务的执行轨迹、截图与文档交付 |
 | [插图预览](./figures/README.md) | 当前六张图与可编辑源文件 |
 | [商品查询与手机纠偏Demo](./interactive-shopping-demo-a71.md) | 技术报告5.4.2及图6的过程、证据与验收范围 |
 | [项目介绍与 Demo 视频](./videos/README.md) | 项目介绍（含 Windows 案例）与 macOS 购物纠偏 Demo |
