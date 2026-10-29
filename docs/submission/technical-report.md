@@ -246,6 +246,8 @@ Lightspeaker 的创新体现在开源技术的系统化应用与面向真实用�
 
 上述成果通过 GitHub 仓库维护，第三方组件分别遵循其许可证与服务条款，开放范围以仓库中的源码及授权声明为准。
 
+项目的开放成果已被 XERJ Corpus Hub 收录[7]。其选中案例为 Computer-Harness 的 evaluator 权限保护与 Provider 前置检查相关提交（`66cf92f639bd17a5398648c5dec7593674dffe83`），并通过 betterGuo 贡献者页面展示作者、原仓库及提交链接[8]，供 AI 编程代理检索实现参考。收录语料为该固定提交时的整个仓库快照。这项外部收录使项目实现能够作为可追溯的代码参考被发现和复用，补充了团队向上游提交修复之外的开源传播成果。
+
 ### 6.3 与开源社区维护者共同解决实际问题
 
 在 Lightspeaker 的开发过程中，团队发现 Windows 现代记事本存在多行输入异常：模型生成的内容正确，但目标应用在换行后可能出现字符丢失或错误。团队将问题从完整任务中提取，建立独立复现，并为 WPF、WinUI3 编写测试夹具，通过应用实际接收的文本验证输入结果。
@@ -322,6 +324,10 @@ Lightspeaker 基于开源 Computer-Use 技术，构建了连接手机交互、�
 
 [6] openclaw/openclaw. PR #127177: fix(gateway): prevent repeated Windows device approvals[EB/OL]. [https://github.com/openclaw/openclaw/pull/127177](https://github.com/openclaw/openclaw/pull/127177).
 
+[7] XERJ Corpus Hub. wszkxlllll/Computer-Harness: repo corpus for AI agents[EB/OL]. [2026-10-29]. [https://hub.xerj.org/corpus/wszkxlllll--computer-harness](https://hub.xerj.org/corpus/wszkxlllll--computer-harness).
+
+[8] XERJ Corpus Hub. betterGuo contributor page[EB/OL]. [2026-10-29]. [https://hub.xerj.org/contributors/betterGuo](https://hub.xerj.org/contributors/betterGuo).
+
 ### 9.2 提交材料与开源入口
 
 随作品提交的材料包括本技术报告、附后的《开源及第三方资源使用清单》，以及单独提交的 Lightspeaker 项目介绍视频。视频展示产品交互、Windows 查车次与微信交付及开源贡献。
@@ -329,3 +335,5 @@ Lightspeaker 基于开源 Computer-Use 技术，构建了连接手机交互、�
 项目成果链接：[Computer-Harness 开源仓库](https://github.com/wszkxlllll/Computer-Harness)。
 
 上游协作的公开提交与合并记录见参考资料[2]—[6]。
+
+项目成果的外部收录与贡献者署名见参考资料[7]—[8]。

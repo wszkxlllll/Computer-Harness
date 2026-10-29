@@ -97,6 +97,8 @@ Lightspeaker建立在开源Computer-Use生态之上，也将真实使用中的�
 - [CUA PR #5587](https://github.com/trycua/cua/pull/5587)：针对前台文稿输入提供带能力检查与读回验证的改进方案，上游维护者保留团队原始提交并推动合并，已合并。
 - OpenClaw [#126399](https://github.com/openclaw/openclaw/pull/126399)、[#127177](https://github.com/openclaw/openclaw/pull/127177)：修复任务结束后的资源复用问题与 Windows 设备重复审批问题，均已合并。
 
+项目的开放成果也获得外部收录：[XERJ Corpus Hub](https://hub.xerj.org/corpus/wszkxlllll--computer-harness) 已收录 evaluator 权限保护与 Provider 前置检查相关实现，并建立 [betterGuo 贡献者页面](https://hub.xerj.org/contributors/betterGuo)，链接原仓库及具体提交，供 AI 编程代理检索参考。
+
 我们欢迎开发者通过代码、任务案例、问题反馈和无障碍体验建议参与改进。准备开发环境和提交修改请看[参与贡献](./CONTRIBUTING.md)。
 
 ## 使用与数据边界
