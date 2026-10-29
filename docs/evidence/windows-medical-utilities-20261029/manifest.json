@@ -1,0 +1,157 @@
+{
+  "date": "2026-10-29",
+  "execution": "用户 Harness；Windows 全桌面前台；受管浏览器最大化；GLM glm-5.3-flash；Plan/Memory 开启；Monitor guidance；结构采集关闭；本地扫描及人工审批。",
+  "cases": [
+    {
+      "id": "M01",
+      "cardId": "协和-M01-v1",
+      "taskId": "M01-v3",
+      "title": "协和内分泌科位置与就诊准备",
+      "status": "passed",
+      "runId": "run-1793272125269-977bb10c-906",
+      "modelRequests": 6,
+      "guiActions": 4,
+      "corrections": 0,
+      "approvals": 0,
+      "archive": "M01.zip",
+      "sha256": "4c264173937e00e4bdd5bc9a203fe4af9b770ceb3a737bc5e92e91f37ce8fc4b",
+      "bytes": 2947489,
+      "finalScreenshot": "M01-final.png",
+      "checks": [
+        "普通及特需门诊楼5层、国际门诊3层与位置页一致",
+        "准备资料、咨询护士及保留资料与患者流程一致",
+        "最终答复附官方来源"
+      ],
+      "sources": [
+        "https://www.pumch.cn/detail/12497.html",
+        "https://www.pumch.cn/detail/12436.html"
+      ]
+    },
+    {
+      "id": "M02",
+      "cardId": "协和-M01-v2",
+      "taskId": "M02-v3",
+      "title": "协和口腔科位置与初诊指南",
+      "status": "passed",
+      "runId": "run-1793272401545-cd290620-dc0",
+      "modelRequests": 10,
+      "guiActions": 8,
+      "corrections": 0,
+      "approvals": 0,
+      "archive": "M02.zip",
+      "sha256": "2e464f35e033654e3d38175216e217080a7ead62d7272a1eecb62e8485735a4f",
+      "bytes": 6318009,
+      "finalScreenshot": "M02-final.png",
+      "checks": [
+        "东院门诊楼7层、西院门诊楼3层与官网一致",
+        "口腔修复及口腔种植与官网初诊指南图片一致",
+        "官网提示自行关闭后继续读取"
+      ],
+      "sources": [
+        "https://www.pumch.cn/detail/14819.html",
+        "https://www.pumch.cn/detail/14820.html"
+      ]
+    },
+    {
+      "id": "M03",
+      "cardId": "M01",
+      "taskId": "M03-v3",
+      "title": "华山来院信息并发送微信",
+      "status": "passed",
+      "runId": "run-1793272707451-05cc7ef6-fb8",
+      "modelRequests": 16,
+      "guiActions": 11,
+      "corrections": 1,
+      "approvals": 3,
+      "archive": "M03.zip",
+      "sha256": "b31d9385a96b1b511fce10cf72a87a1ad62f0c1feeb693b9aacf586c4551b356",
+      "bytes": 18185912,
+      "finalScreenshot": "M03-final.png",
+      "checks": [
+        "乌鲁木齐中路12号、021-52889999、常熟路及静安寺站线路与官网一致",
+        "截图状态退出纠正及逐项审批有完整记录",
+        "最终截图显示文件传输助手19:32新增文字消息及空输入框"
+      ],
+      "sources": [
+        "https://www.huashan.org.cn/mzdh/lyjt.htm"
+      ]
+    },
+    {
+      "id": "CP01",
+      "cardId": "CP01-v2",
+      "taskId": "CP01-alt1",
+      "title": "惠州农业生产用电费用构成",
+      "status": "passed",
+      "runId": "run-1793280750481-105cd420-666",
+      "modelRequests": 9,
+      "guiActions": 6,
+      "corrections": 0,
+      "approvals": 0,
+      "archive": "CP01.zip",
+      "sha256": "dc4ba911e3c06395a111ed0b72f1bfac61473aea78141a34b8ea6c3b2f50493f",
+      "bytes": 7248066,
+      "finalScreenshot": "CP01-final.png",
+      "checks": [
+        "实际页面地区已选广东省惠州市",
+        "表名与2021年12月1日执行日期可见",
+        "农业行62.71、0.196875、横线及62.906875与截图一致，单位分/千瓦时含税",
+        "最终答复未认定为个人账单或最新政策"
+      ],
+      "sources": [
+        "https://95598.csg.cn/#/gd/serviceInquire/LRLayer/elePriceInquire",
+        "https://www.hzzk.gov.cn/zzgxqzdlyxxgk/jghsf/jfbz/fwjg/content/post_5040860.html"
+      ]
+    },
+    {
+      "id": "CP02",
+      "cardId": "CP02-v1",
+      "taskId": "CP02-v3",
+      "title": "居民燃气账单的地址与跨档金额核对",
+      "status": "passed",
+      "runId": "run-1793281173762-14554343-111",
+      "modelRequests": 1,
+      "guiActions": 0,
+      "corrections": 0,
+      "approvals": 0,
+      "archive": "CP02.zip",
+      "sha256": "45c031cb0fc2c7bd79a74bc523ea3d79481b74f49c4de600cc332f659dc713d0",
+      "bytes": 1871001,
+      "finalScreenshot": "CP02-final.png",
+      "checks": [
+        "真实官网截图包含一般生活用气350/500年阶梯及2.61/2.83/4.23单价",
+        "25立方米分为10和15立方米，费用26.10+42.45=68.55",
+        "账面69.00比核算高0.45",
+        "识别三与3的格式对应，将2-501缩写含义列为人工确认",
+        "说明演示虚构数据，未登录或付款"
+      ],
+      "sources": [
+        "https://www.bjgas.com/tag/86.html"
+      ]
+    },
+    {
+      "id": "CP03",
+      "cardId": "CP02-v2",
+      "taskId": "CP03-v3",
+      "title": "居民燃气账单的地址差异与跨档金额核对",
+      "status": "passed",
+      "runId": "run-1793282249000-9c797f2a-add",
+      "modelRequests": 1,
+      "guiActions": 0,
+      "corrections": 0,
+      "approvals": 0,
+      "archive": "CP03.zip",
+      "sha256": "f79bc557ef84619b4ac9a8fb93e9a16944fee03554f8d16fcb489eebc1425ee1",
+      "bytes": 1880277,
+      "finalScreenshot": "CP03-final.png",
+      "checks": [
+        "真实官网截图的年阶梯与价格核对一致",
+        "第二档10立方米、第三档20立方米，28.30+84.60=112.90",
+        "金额相符但A/B区不同，明确不能视为同一地址",
+        "账户与地址关系单独待核实，未登录或付款"
+      ],
+      "sources": [
+        "https://www.bjgas.com/tag/86.html"
+      ]
+    }
+  ]
+}
