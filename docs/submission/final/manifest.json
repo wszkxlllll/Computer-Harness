@@ -35,14 +35,14 @@
     },
     {
       "file": "presentation.pdf",
-      "bytes": 1325777,
-      "sha256": "202b4258514aec29a30ff0bb4684100a484bcfe65645d6ba79853a676152d7ff",
+      "bytes": 2472914,
+      "sha256": "d2dc293c12d534bc598da9df70e376e04eb53f1286b1d3f47b382780147998cb",
       "pages": 15
     },
     {
       "file": "presentation.pptx",
-      "bytes": 9186809,
-      "sha256": "33b1982a55315155ac9301f519327401bc83f3361b6b74895f072b7c1a4a7ba0"
+      "bytes": 9186800,
+      "sha256": "d348a58822c31523ccee4c4ed8be3666d73a351ed9ea51b1a671a882ad186a92"
     }
   ],
   "videos": [
