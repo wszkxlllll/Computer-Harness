@@ -17,8 +17,8 @@
   "files": [
     {
       "file": "technical-report.pdf",
-      "bytes": 6425799,
-      "sha256": "c8f5a76220fb3e0d4d3b2a0aeea018b5ef3beb8b3bd556983fe31c8ce3adcd7e",
+      "bytes": 6428986,
+      "sha256": "3a8cc3fa684f576fbdac830d0a22a0a90fa8fab1b43c06ec40767052d0aaf7cd",
       "pages": 19
     },
     {
@@ -35,14 +35,14 @@
     },
     {
       "file": "presentation.pdf",
-      "bytes": 1322726,
-      "sha256": "2f79ba9bb5f3cbed0a093fe0ffc3be89952483d4c5e580d580bfeb84bc0910a5",
+      "bytes": 1325777,
+      "sha256": "202b4258514aec29a30ff0bb4684100a484bcfe65645d6ba79853a676152d7ff",
       "pages": 15
     },
     {
       "file": "presentation.pptx",
-      "bytes": 9186466,
-      "sha256": "80b7b5f387b506cd52c01f648a27a11bdc75e8ebabb9e33dfe3aac470489579a"
+      "bytes": 9186809,
+      "sha256": "33b1982a55315155ac9301f519327401bc83f3361b6b74895f072b7c1a4a7ba0"
     }
   ],
   "videos": [
@@ -98,7 +98,7 @@
     },
     {
       "file": "../technical-report.md",
-      "sha256": "45fb798d941939852556c375a799ed8ee1bf7d173bb59874a0dbe274ced42eb5"
+      "sha256": "18a77f54633304c3b1ad9a8d8f8bfd1749a902bc30a1f6b12c0f5d3dc5921f21"
     },
     {
       "file": "../supporting-evidence.md",
@@ -140,5 +140,6 @@
       "file": "../latex/cover.tex",
       "sha256": "e318b752eee7480bc38b9c9083111367b8c4db3ab0824eb24885567095e45fb5"
     }
-  ]
+  ],
+  "editorialRevision": "四项优势归纳；保留原目录结构与导航；正文15页。"
 }
